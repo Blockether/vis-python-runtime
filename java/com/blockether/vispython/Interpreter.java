@@ -443,11 +443,13 @@ public final class Interpreter {
    * Equip {@code session} with the sandbox runtime, answering how many names it
    * got. The runtime is IMPORTED, never interpolated into a string: CPython's
    * own import machinery compiles and caches it, so a traceback points at a file
-   * and the second session pays nothing.
+   * and the second session pays nothing. The session names ITSELF here, so a
+   * host call made from it carries that name and one host can serve many.
    */
   public static long installRuntime(String session) {
     exec(session, "import vis_runtime");
-    return Long.parseLong(eval(session, "vis_runtime.install(globals())"));
+    return Long.parseLong(
+        eval(session, "vis_runtime.install(globals(), " + literal(session) + ")"));
   }
 
   /** Make the sandbox shim {@code name} importable, answering its source file. */

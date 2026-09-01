@@ -14,7 +14,8 @@
    like any other), a host failure arriving as a catchable exception with the
    host's own message, an answer larger than the buffer costing a retry but
    never a second RUN of the tool, and UTF-8 surviving both crossings."
-  (:require [clojure.string :as str]
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
             [com.blockether.vis-python-runtime.harness :as harness :refer [block]]
             [com.blockether.vis-python-runtime :as runtime]))
@@ -121,3 +122,26 @@
         (harness/bind-tools! {"echo" echo})))
     (testing "rebinding brings the same session's tool back"
       (is (= "<x>" (ran session "print(await echo('x'))"))))))
+
+(harness/defbuilt-test host-tool-names-its-session-test
+  ;; One interpreter holds many sessions and the door is ONE function, so the
+  ;; envelope has to say which session called: a host binding `shell` for two
+  ;; workspaces binds two different functions under one name.
+  (let [seen (atom [])]
+    (try
+      (runtime/bind-host!
+       (fn [nm payload]
+         (let [envelope (json/read-str payload)]
+           (swap! seen conj [nm (get envelope "session")])
+           (json/write-str {"value" (get envelope "session")}))))
+      (let [one (harness/block-session)
+            two (harness/block-session)]
+        (runtime/install-tool! one "whose")
+        (runtime/install-tool! two "whose")
+        (testing "the tool answers each caller with its own session"
+          (is (= one (ran one "print(await whose())")))
+          (is (= two (ran two "print(await whose())"))))
+        (testing "the host saw the name once per session, never a blank"
+          (is (= [["whose" one] ["whose" two]] @seen))))
+      (finally
+        (harness/bind-tools! {"echo" echo})))))

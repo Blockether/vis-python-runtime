@@ -102,7 +102,7 @@ def par(thunks):
     return _vis_host.par(list(thunks))
 
 
-def install(namespace):
+def install(namespace, session=None):
     """Equip `namespace` with the sandbox runtime, IN its own globals.
 
     The runtime is EXECUTED here rather than copied in, because that is what it
@@ -122,12 +122,18 @@ def install(namespace):
     shadow — a `from asyncio import gather` rebinds nothing, and a top-level
     `def cat(...)` is refused, because those names are the sandbox's.
 
+    `session` is the name the host knows this namespace by, kept as
+    `__vis_session__` so every host call made from it can say WHOSE it is: one
+    interpreter holds many sessions, and a tool bound in two of them is two
+    different host functions.
+
     Returns how many names the session ended up with, so the host can assert it
     is equipped instead of guessing.
     """
     install_finder()
     importlib.import_module(AUTO_IMPORTS_MODULE)
     exec(sandbox_code(), namespace)
+    namespace["__vis_session__"] = session
     namespace.setdefault("__vis_par__", par)
     namespace.setdefault(
         "__vis_protected_names__",
@@ -149,7 +155,7 @@ def host_call(name, payload):
     return _vis_host.call(name, payload)
 
 
-def _host_tool(name):
+def _host_tool(name, session=None):
     """The guest half of the host tool `name`: JSON out, JSON back.
 
     Arguments travel as `{"args": [...]}` and the reply is `{"value": ...}` or
@@ -159,11 +165,15 @@ def _host_tool(name):
     sides of the boundary, not two. A value JSON cannot carry reaches the host as
     its `str`, which is the honest limit of a text boundary: a tool takes data,
     and an open socket was never data.
+
+    The envelope also carries `session`, because the host binds a tool per
+    session — the same name in two sessions is two functions, and the boundary
+    is one.
     """
 
     def call(*args, **kwargs):
         params = list(args) + ([dict(kwargs)] if kwargs else [])
-        payload = json.dumps({"args": params}, default=str)
+        payload = json.dumps({"session": session, "args": params}, default=str)
         reply = json.loads(host_call(name, payload))
         if "error" in reply:
             raise RuntimeError(reply["error"])
@@ -185,7 +195,7 @@ def install_tool(namespace, name):
     deferred = namespace.get("__vis_deferred__")
     if deferred is None:
         raise RuntimeError("install(namespace) has to run before a tool is bound")
-    namespace[name] = deferred(_host_tool(name), name)
+    namespace[name] = deferred(_host_tool(name, namespace.get("__vis_session__")), name)
     namespace["__vis_protected_names__"] = sorted(
         set(namespace.get("__vis_protected_names__") or ()) | {name}
     )
