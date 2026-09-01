@@ -72,6 +72,16 @@ docstring or a test can state lives there, not here.
   around it. A Python-side guard — a rebound `open`, a wrapper in a shim — is
   advice, not a boundary, and never becomes one. `confinement_test.clj` is what
   proves the difference.
+- **Every policy here is the SANDBOX's; extension Python is trusted and does not
+  belong under it.** Confinement, the thread cap and the pool are PROCESS state —
+  `vispython_confine` replaces the policy for every session, and a session is a
+  module namespace sharing the one interpreter — so a single process cannot hold
+  a confined block and unconfined extension code at once. Extension Python gets
+  its OWN process: its own interpreter, confinement lifted with two empty lists,
+  a cap it never reaches, and its own diagnostics ring drained by whoever owns
+  that process. So everything recorded here is about the sandbox — the pool, the
+  cap, a refusal, a block's timing — and a host that files records from both
+  tags them at the drain, because C cannot know which process it is.
 - **Threads are C's too, and there is ONE pool.** `par` is `_vis_host.par`: the
   workers, the per-call quota and the hard cap on live threads are C state the
   host sets through `vispython_threads`, and the cap is checked from the SAME
