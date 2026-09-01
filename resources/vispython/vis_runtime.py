@@ -40,6 +40,27 @@ AUTO_IMPORTS_MODULE = "auto_imports"
 _MODULE_CODE = {}
 
 
+def _preinit_mimetypes():
+    """Give `mimetypes` its built-in table, so nothing goes looking for /etc.
+
+    `guess_type` initializes lazily by READING `mimetypes.knownfiles` -
+    `/etc/mime.types`, `/etc/apache2/mime.types` and their siblings - and those
+    lie outside every session's roots: a block asking for the type of a name it
+    chose itself would be refused for a path it never mentioned. Emptying
+    `knownfiles` first is what makes the initialization file-free, because
+    `init(files)` READS the known files as well as the ones it is handed. The
+    built-in table costs one dict, touches the filesystem not at all, and
+    answers the same on every machine.
+    """
+    import mimetypes
+
+    mimetypes.knownfiles = []
+    if not mimetypes.inited:
+        mimetypes.init([])
+
+
+_preinit_mimetypes()
+
 def module_code(module):
     """The compiled source of one sandbox module, located through the import system.
 
@@ -113,9 +134,8 @@ def install(namespace, session=None):
     (`__vis_survivor__`), so a second session shares those process-wide tables
     instead of quietly resetting them.
 
-    Also puts the shim finder on `sys.meta_path`, because an equipped session is
-    one where `import bs4` finds the sandbox's bs4, and imports the auto-imports
-    module, because a block writes `json.dumps(...)` without importing json.
+    Also imports the auto-imports module, because a block writes
+    `json.dumps(...)` without importing json.
     Two names the runtime READS but does not define arrive here, and only when
     the host has not bound its own: `__vis_par__`, the pool `gather` dispatches
     on, and `__vis_protected_names__`, the surface a block may not silently
@@ -130,7 +150,6 @@ def install(namespace, session=None):
     Returns how many names the session ended up with, so the host can assert it
     is equipped instead of guessing.
     """
-    install_finder()
     importlib.import_module(AUTO_IMPORTS_MODULE)
     exec(sandbox_code(), namespace)
     namespace["__vis_session__"] = session
@@ -140,6 +159,22 @@ def install(namespace, session=None):
         sorted(name for name in namespace if not name.startswith("_")),
     )
     return len(namespace)
+
+
+class VisToolError(RuntimeError):
+    """What a HOST tool raised, as the guest sees it.
+
+    The failure belongs to the host, not to the block: the message is the
+    host's own, verbatim, and `vis_data` carries whatever the host attached to
+    it. A host that reads its data back off this exception maps the failure to
+    its own error shape instead of parsing a string it printed itself.
+    """
+
+    __slots__ = ("vis_data",)
+
+    def __init__(self, message, data=None):
+        super().__init__(message)
+        self.vis_data = data
 
 
 def host_call(name, payload):
@@ -154,6 +189,24 @@ def host_call(name, payload):
 
     return _vis_host.call(name, payload)
 
+
+def _tool_arg(value):
+    """One argument JSON cannot carry, as text the host can use.
+
+    A path the model spelled as an OBJECT is still a path: every `os.PathLike`
+    crosses as its FILESYSTEM string, not as a repr — `cat(root / "q.clj")` used
+    to refuse with `File not found: PosixPath('/…/q.clj')`. `pathlib.Path` is
+    only the common case; the duck-type is `__fspath__`. Anything else — and a
+    path-like whose `__fspath__` raises, which is not a path — crosses as its
+    `str`, the honest limit of a text boundary.
+    """
+    if isinstance(value, (bytes, bytearray)):
+        return str(value)
+    try:
+        text = os.fspath(value)
+    except Exception:
+        return str(value)
+    return text if isinstance(text, str) else str(value)
 
 def _host_tool(name, session=None):
     """The guest half of the host tool `name`: JSON out, JSON back.
@@ -173,10 +226,10 @@ def _host_tool(name, session=None):
 
     def call(*args, **kwargs):
         params = list(args) + ([dict(kwargs)] if kwargs else [])
-        payload = json.dumps({"session": session, "args": params}, default=str)
+        payload = json.dumps({"session": session, "args": params}, default=_tool_arg)
         reply = json.loads(host_call(name, payload))
         if "error" in reply:
-            raise RuntimeError(reply["error"])
+            raise VisToolError(reply["error"], reply.get("error_data"))
         return reply.get("value")
 
     call.__name__ = name
@@ -202,6 +255,42 @@ def install_tool(namespace, name):
     return name
 
 
+def install_sync_tool(namespace, name):
+    """Bind the host tool `name` into `namespace` as an ORDINARY function.
+
+    The sandbox's tools are deferred thunks: a block awaits them, gathers them
+    and settles whatever it left lying around. Trusted host-side Python has no
+    such runner — it calls a tool the way it calls any function and expects the
+    ANSWER, not a thunk — so this is the same boundary without the deferral.
+    """
+    if "__vis_session__" not in namespace:
+        raise RuntimeError("install(namespace) has to run before a tool is bound")
+    namespace[name] = _host_tool(name, namespace.get("__vis_session__"))
+    return name
+def set_stdin(text):
+    """Point the interpreter's ``sys.stdin`` at `text`, or restore the real one.
+
+    A guest that calls ``input()`` reads descriptor 0, and in an embedded
+    interpreter that descriptor belongs to the HOST — a terminal nobody is
+    typing into, or a pipe nobody writes. The read never returns, and because
+    every session's Python runs on the one runtime thread, one such block
+    freezes the whole process. Measured, not theorised.
+
+    So the host states what the guest's stdin IS. `text` is what it reads
+    before EOF: ``""`` is a stream that is simply empty, which turns a stray
+    ``input()`` into ``EOFError`` instead of a hang. ``None`` restores the
+    process's own stdin, for the one caller that genuinely owns it — the
+    human running the CLI. The stream is a real ``TextIOWrapper``, so
+    ``sys.stdin.buffer`` reads bytes exactly as it does in ``python3``.
+    """
+    if text is None:
+        sys.stdin = sys.__stdin__
+    else:
+        sys.stdin = io.TextIOWrapper(
+            io.BytesIO(text.encode("utf-8")), encoding="utf-8"
+        )
+    return True
+
 def run(source, namespace):
     """Execute `source` in `namespace`, answering the trailing expression's value.
 
@@ -209,13 +298,20 @@ def run(source, namespace):
     it is `ast` work: statements execute, and if the last statement is an
     expression its value comes back instead of `None`. The host hands the source
     over as a string object, so nothing is interpolated into code here.
+
+    The answer is SETTLED when the namespace carries `__vis_settle__`: a tool
+    bound as a deferred thunk answers a thunk, a block's runner settles whatever
+    the block left lying around, and one expression evaluated here is that same
+    shape — so the caller gets the tool's answer, never its deferral.
     """
+    settle = namespace.get("__vis_settle__")
     tree = ast.parse(source)
     if tree.body and isinstance(tree.body[-1], ast.Expr):
         tail = ast.Expression(tree.body.pop().value)
         if tree.body:
             exec(compile(tree, "<vis>", "exec"), namespace)
-        return eval(compile(tail, "<vis>", "eval"), namespace)
+        value = eval(compile(tail, "<vis>", "eval"), namespace)
+        return settle(value) if settle is not None else value
     exec(compile(tree, "<vis>", "exec"), namespace)
     return None
 
@@ -335,17 +431,18 @@ def close_session(name):
     last reference is usually the session's own globals: a process that never
     drops a finished session holds every descriptor every block ever leaked.
 
-    The collection is not optional. Every function a block defined holds the
-    namespace as its `__globals__`, so a cleared session is a reference CYCLE
-    and nothing in it is freed until the collector runs. Answers whether there
-    was such a session.
+    The namespace is NOT cleared. Every function a block defined holds it as
+    `__globals__`, so a finished session is a reference CYCLE — which is what the
+    collector is for, and CPython's runs here. Clearing was the answer to an
+    interpreter that did not refcount, and it is WRONG here: a session installs
+    doors the whole PROCESS uses (`builtins.open`, the socket guard), and a
+    function whose globals were cleared answers `NameError` for every session
+    after it — measured. What is still referenced stays alive because something is
+    still using it; the rest is freed. Answers whether there was such a session.
     """
     module = sys.modules.pop(name, None)
     if module is None:
         return False
-    namespace = getattr(module, "__dict__", None)
-    if namespace is not None:
-        namespace.clear()
     del module
     gc.collect()
     reclaim = getattr(builtins, "__vis_reclaim_fds__", None)
@@ -362,108 +459,6 @@ def run_block_json(source, namespace):
 def run_json(source, namespace):
     """`run` the source and render the value as JSON. What the C ABI calls."""
     return to_json(run(source, namespace))
-
-
-def shim_root():
-    """Directory holding the sandbox shim sources."""
-    override = os.environ.get("VIS_PYTHON_SHIMS_PATH")
-    if override:
-        return override
-    here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(
-        os.path.dirname(os.path.dirname(here)), "resources", "vis-shims"
-    )
-
-
-_installed_shims = set()
-
-
-class ShimLoader(importlib.machinery.SourceFileLoader):
-    """Load a shim source and blame the SHIM when the source itself fails.
-
-    Without this, a shim that dies on its own missing dependency surfaces as a
-    bare `ModuleNotFoundError` for the dependency — or worse, as the import
-    machinery reporting the SHIM as missing — and the reader cannot tell which
-    of the two is broken. The wrapper names both.
-    """
-
-    def exec_module(self, module):
-        try:
-            super().exec_module(module)
-        except Exception as exc:
-            raise ImportError(
-                f"vis shim {module.__name__!r} failed to load: {exc}"
-            ) from exc
-
-
-class ShimFinder:
-    """Resolve a bare `import <name>` to the sandbox shim of that name.
-
-    The sandbox ships no wheels, so a shim IS the package as far as user code
-    is concerned, and code that imports `tabulate` from a `pandas` snippet must
-    find it. This finder is APPENDED to `sys.meta_path`, never prepended: a
-    real stdlib module always wins, and only a name Python could not import
-    otherwise falls through to `resources/vis-shims/<name>.py`.
-    """
-
-    def find_spec(self, name, path=None, target=None):
-        if path is not None or "." in name:
-            return None
-        source = os.path.join(shim_root(), name + ".py")
-        if not os.path.isfile(source):
-            return None
-        _installed_shims.add(name)
-        return importlib.util.spec_from_file_location(
-            name, source, loader=ShimLoader(name, source)
-        )
-
-
-def install_finder():
-    """Put the shim finder on `sys.meta_path` once."""
-    for finder in sys.meta_path:
-        if isinstance(finder, ShimFinder):
-            return False
-    sys.meta_path.append(ShimFinder())
-    return True
-
-
-def forget_shims():
-    """Drop every loaded shim, so the next import gets a pristine one.
-
-    One interpreter means one module table: a caller that monkeypatches a shim
-    would otherwise hand that patch to whoever imports it next. Removing the
-    modules — and the names the shims staple onto builtins — puts the table
-    back the way a fresh interpreter has it.
-    """
-    import builtins
-
-    for name in sorted(_installed_shims):
-        module = sys.modules.get(name)
-        for loaded in [n for n in sys.modules if n == name or n.startswith(name + ".")]:
-            del sys.modules[loaded]
-        if module is not None and getattr(builtins, name, None) is module:
-            delattr(builtins, name)
-    _installed_shims.clear()
-
-
-def install_shim(name):
-    """Load the shim `name` so `import <name>` works in this interpreter.
-
-    A shim source installs ITSELF: it publishes a module into `sys.modules` and
-    staples it onto builtins when executed. So the work here is loading the file
-    through the import machinery — under a private module name, because a shim
-    like `sqlite3` or `pytest` must not shadow the stdlib module it wraps — and
-    letting the file do the rest. Returns the loaded source path.
-    """
-    install_finder()
-    _installed_shims.add(name)
-    path = os.path.join(shim_root(), name + ".py")
-    if not os.path.isfile(path):
-        raise ImportError(f"no shim source at {path!r}")
-    spec = importlib.util.spec_from_file_location("vis_shim_" + name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return path
 
 
 def sys_path_snapshot():

@@ -668,7 +668,11 @@ if not __vis_socket_doors_on__:
 
 
 def __vis_count_forms__(src):
-    return len(__vis_ast__.parse(src).body)
+    # What the DRIVER would run, not what was typed: the sandbox rewrites the
+    # protected imports away, so a block whose only statement is `from asyncio
+    # import gather` executes NOTHING. The host reads this count to tell an
+    # empty block from a real one, and a stripped-to-nothing block is empty.
+    return len(__vis_ast__.parse(__vis_strip_protected_imports__(src)).body)
 
 
 def __vis_banned_name__(src, banned):
@@ -1375,23 +1379,44 @@ class __VisGrep__(__VisResultStr__):
 __vis_paged_tools__ = frozenset(("grep", "find_files", "find"))
 
 
+def __vis_typed_result__(__vis_d__):
+    # Type ONE tool-result dict. `op` is stamped by the engine on results only, so
+    # a model-built dict can never impersonate one, and a shell answer additionally
+    # naming a live id is the HANDLE (see __VisShell__) that drives its process.
+    if isinstance(__vis_d__, __VisDict__):
+        return __vis_d__
+    if "op" in __vis_d__:
+        if __vis_d__.get("op") in __VisShell__.__vis_shell_ops__ and "id" in __vis_d__:
+            return __VisShell__(__vis_d__)
+        return __VisResult__(__vis_d__)
+    return __VisDict__(__vis_d__)
+
+
 def __vis_as_result__(__vis_v__, __vis_paging__=None):
     # Normalize a tool result so EVERY value answers the dict probes
     # (.get/.keys/.items/.values) — the shape the model reaches for when it iterates the
-    # store. A dict passes through untouched (a tool-result dict is already a
-    # __VisResult__). A top-level list/tuple/str is re-typed to a probeable subclass that
-    # KEEPS its native list/str behavior, so `res.get('op')` is safe on the whole set
-    # without an isinstance guard. Rare scalars (int/float/None/bytes) pass through.
+    # store. A dict is typed HERE, at the one seam a host answer arrives through: the
+    # embedded CPython hands back a plain dict, indistinguishable from one the model
+    # built, so the CALL is what makes it a result. A top-level list/tuple/str is
+    # re-typed to a probeable subclass that KEEPS its native list/str behavior, so
+    # `res.get('op')` is safe on the whole set without an isinstance guard, and a list
+    # of results (what `par` answers) carries typed elements. Rare scalars
+    # (int/float/None/bytes) pass through.
     #
     # `__vis_paging__` is `__vis_paged_spec__`'s answer for the call that produced this
     # value: a PAGED search answers text that can continue itself (see __VisGrep__),
     # and only the call knows the options map to continue WITH.
     if isinstance(__vis_v__, dict):
-        return __vis_v__
+        return __vis_typed_result__(__vis_v__)
     if isinstance(__vis_v__, (__VisResultList__, __VisResultStr__)):
         return __vis_v__
     if isinstance(__vis_v__, (list, tuple)):
-        return __VisResultList__(__vis_v__)
+        return __VisResultList__(
+            [
+                __vis_typed_result__(__vis_e__) if isinstance(__vis_e__, dict) else __vis_e__
+                for __vis_e__ in __vis_v__
+            ]
+        )
     if isinstance(__vis_v__, str):
         if __vis_paging__ is not None:
             return __VisGrep__(__vis_v__).__vis_paged__(
@@ -1761,6 +1786,15 @@ def __vis_err_pos_now__():
     pos = __vis_error_pos__(e)
     g["__vis_err_pos__"] = pos
     return pos
+
+
+def __vis_err_host_data__():
+    # HOST-CALLED beside `__vis_err_pos_now__`: whatever the host attached to
+    # the tool failure the block died of (`VisToolError.vis_data`), or None
+    # when the block died of its own Python. It does NOT release the stashed
+    # exception — the position lookup owns that — so the two reads are order-free.
+    e = globals().get("__vis_err_obj__")
+    return getattr(e, "vis_data", None) if e is not None else None
 
 
 class CancelledError(BaseException):
@@ -4406,7 +4440,11 @@ def __vis_kwargs_direct_tools__():
 # a __VisResult__ so it prints as a clean real dict, and a deferred call handed to
 # print WITHOUT `await` is settled first. Nothing is captured on the side — the
 # block's stdout IS its one result.
-__vis_real_print__ = print
+# The REAL print, captured ONCE. A reinstall re-runs this line with the module
+# global `print` ALREADY bound to `__vis_print__`, so a fresh capture would make
+# the wrapper call itself forever (`RecursionError` on the first `print` of the
+# next block). Same rule as `__vis_real_open__`: re-adopt the first value.
+__vis_real_print__ = __vis_survivor__("__vis_real_print__", lambda: __vis_builtins__.print)
 
 
 def __vis_print__(*__vis_a__, **__vis_kw__):

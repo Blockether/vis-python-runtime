@@ -20,6 +20,7 @@
    the socket cases with the shims that open connections."
   (:require [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
+            [com.blockether.vis-python-runtime :as runtime]
             [com.blockether.vis-python-runtime.harness :as harness :refer [block printed]])
   (:import [com.sun.management UnixOperatingSystemMXBean]
            [java.lang.management ManagementFactory OperatingSystemMXBean]
@@ -249,3 +250,23 @@
                         "os.close(fd)\n" "print(json.dumps([tracked, out]))"))]
       (is (nil? (:error r)))
       (is (= [false "probe"] (printed r))))))
+
+;; Regression: `close_session` used to CLEAR the closing session's namespace, and
+;; a session installs doors the whole PROCESS then uses — `builtins.open`, `io.open`,
+;; the socket guard. The door left installed was a function whose globals had been
+;; emptied, so the next block in ANY other session died with
+;; `NameError: name '__vis_open_writes__' is not defined`.
+(harness/defbuilt-test doors-outlive-a-closed-session-test
+  (let [earlier (sandbox)
+        later (sandbox)]
+    (is (nil? (:error (block later "print(1)")))
+        "the later session installed the doors this process now holds")
+    (runtime/close-session! later)
+    (let [r (block earlier (str "import socket\n"
+                                "s = socket.socket()\n"
+                                "s.close()\n"
+                                "with open(F) as h:\n"
+                                "    text = h.read()\n"
+                                "print(json.dumps(text))"))]
+      (is (nil? (:error r)))
+      (is (= "probe\n" (printed r))))))

@@ -138,6 +138,38 @@
    (let [[read write] (Interpreter/confine (vec read-roots) (vec write-roots) refusal)]
      {:read read :write write})))
 
+(defn network!
+  "Grant or refuse the guest the network as a whole, answering the flag in force.
+
+   A CAPABILITY, not part of confinement: refused, the audit hook stops every
+   socket, name lookup and connection, so a session whose host granted no egress
+   cannot even learn an address. WHICH hosts a session with egress may reach is
+   the host proxy's decision, made where the request is visible. Like confinement
+   this is PROCESS state and REPLACES the flag for every session; `refusal` is the
+   sentence the guest reads."
+  ([allowed?] (network! allowed? ""))
+  ([allowed? refusal]
+   (Interpreter/network (boolean allowed?) (str refusal))))
+(defn stdin!
+  "Say what the guest's `sys.stdin` reads, answering true.
+
+   PROCESS state like confinement, and for the same reason: descriptor 0
+   belongs to the host, so a guest `input()` blocks on a terminal nobody is
+   typing into and — every session's Python running on the one runtime thread
+   — takes the process with it. `text` is what the guest reads before EOF; `\"\"`
+   is an empty stream, which is the sandbox's answer. `nil` restores the
+   process's own stdin, for the caller that owns it: the human at the CLI."
+  [text]
+  (Interpreter/exec
+    default-session
+    (if (nil? text)
+      "import vis_runtime\nvis_runtime.set_stdin(None)"
+      (str "import base64, vis_runtime\nvis_runtime.set_stdin(base64.b64decode('"
+           (.encodeToString (java.util.Base64/getEncoder)
+                            (.getBytes ^String text "UTF-8"))
+           "').decode('utf-8'))")))
+  true)
+
 (defn threads!
   "Set the process's thread policy, answering `{:cap n :workers n :quota n}` in
    force. A zero keeps what is already set.
@@ -152,6 +184,19 @@
   [cap workers quota]
   (let [[c w q] (Interpreter/threads cap workers quota)]
     {:cap c :workers w :quota q}))
+
+(defn interrupt!
+  "Raise `KeyboardInterrupt` in the thread running guest code, answering whether
+   a thread state took it.
+
+   The one way out of a runaway block: a host future's cancel reaches only the
+   JVM side, so a spinning `while True:` burns a core until the process dies.
+   CPython delivers the exception at a bytecode boundary — the block unwinds, its
+   `finally` blocks run, the session stays usable — while a thread blocked in a
+   host call or inside C sees it only when it returns, which is what `false`
+   means. Call it from ANY thread except the one running the block."
+  []
+  (Interpreter/interrupt))
 
 (defn logging!
   "Set what the runtime records, answering `{:level … :mirror? …}` in force.
@@ -217,11 +262,6 @@
   ([] (install-runtime! default-session))
   ([session] (Interpreter/installRuntime session)))
 
-(defn install-shim!
-  "Make the sandbox shim `name` importable, answering its source file."
-  ([name] (install-shim! default-session name))
-  ([session name] (Interpreter/installShim session name)))
-
 (defn install-module!
   "Execute the sandbox module `name` INTO `session`'s own globals, answering the
    source file that ran — how a CONFIGURED part of the sandbox arrives."
@@ -232,6 +272,16 @@
   "Bind the host tool `name` into `session`, answering the name bound."
   ([name] (install-tool! default-session name))
   ([session name] (Interpreter/installTool session name)))
+
+(defn install-sync-tool!
+  "Bind the host tool `name` into `session` as an ordinary function, answering
+   the name bound.
+
+   The same boundary as [[install-tool!]] without the deferral, for Python the
+   HOST runs: a thunk needs a block runner to settle it, and trusted code has
+   none - it calls a tool and reads the answer."
+  ([name] (install-sync-tool! default-session name))
+  ([session name] (Interpreter/installSyncTool session name)))
 
 (defn close-session!
   "Drop `session`'s namespace, answering whether there was one."
@@ -251,7 +301,6 @@
      (reify HostFunction
        (call [_ name payload] (str (f name payload))))))
   nil)
-
 (defn finalize!
   "Stop the interpreter. Idempotent."
   []

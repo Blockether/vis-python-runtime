@@ -140,10 +140,10 @@ starts moving here:
   and a top-level `def cat(...)` a refusal. The host adds its tool names to it,
   the way it already does.
 
-One expectation changed on purpose: a tool's own dict arrives as a `dict`, not
-as `__VisDict__`. That type was what a GraalPy host PROXY got re-typed into so a
-block could subscript it; CPython hands the block a real dict and the JSON the
-case actually asserts on is byte for byte the same.
+Nothing about a tool result changed: it arrives as `__VisDict__`, the sandbox's
+own dict subclass, exactly as it did before. The subclass is not a GraalPy
+artifact - it is what makes a missing key raise a KeyError naming the keys the
+tool did answer - and the JSON a case asserts on is byte for byte the same.
 
 What the filesystem boundary demanded, and it is the one thing GraalPy gave for
 free: confinement. Truffle took a `FileSystem` implementation; CPython opens

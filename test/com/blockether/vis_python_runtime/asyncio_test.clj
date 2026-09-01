@@ -475,9 +475,10 @@ print(json.dumps(res, sort_keys=True))")
 ;; `json.dumps(res)` did not, and refused an object the caller never created.
 (harness/defbuilt-test asyncio-to-thread-settles-a-tool-test
   (testing "a tool handed to to_thread / run_in_executor settles inside its gather slot"
-    ;; The tool's own dict stays a `dict` here: `__VisDict__` is what a GraalPy
-    ;; host PROXY was re-typed into, and CPython hands the block a real dict.
-    (is (= (str "['dict', 'dict', '__VisResultStr__', 'int', '__VisResultList__']\n"
+    ;; A tool's dict arrives as `__VisDict__`: every map rebuilt at the host
+    ;; boundary is one, so a missing key raises a KeyError that names the keys
+    ;; the tool DID answer. It is a real dict - the JSON below is the proof.
+    (is (= (str "['__VisDict__', '__VisDict__', '__VisResultStr__', 'int', '__VisResultList__']\n"
                 "[{\"arg\": \"a\", \"nested\": {\"deep\": [1, 2, 3]}, \"tool\": \"row\"}, "
                 "{\"arg\": \"b\", \"nested\": {\"deep\": [1, 2, 3]}, \"tool\": \"row\"}, "
                 "\"<c>\", 42, [\"<x>\", \"<y>\"]]")

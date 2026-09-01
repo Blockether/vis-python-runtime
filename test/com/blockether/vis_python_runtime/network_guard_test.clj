@@ -114,3 +114,21 @@
           "the later session's policy replaced the earlier one")
       (is (= :permitted (resolution strict "evil.test"))
           "and it replaced it for every session, because there is one socket"))))
+
+;; Regression: a connect() carries the ADDRESS an allowed lookup just answered,
+;; never the name the block asked for, and the guard checked that literal against
+;; the DOMAIN allowlist — so every request to an ALLOWED host was refused the
+;; moment its name resolved ("network host '2606:4700::…' is blocked").
+(harness/defbuilt-test resolved-address-reaches-connect-test
+  (let [session (harness/guarded-session ["localhost"] [])]
+    (is (= :blocked (raw-connect session "127.0.0.1"))
+        "an address nobody resolved is not one of the names the policy allows")
+    (is (= :permitted (resolution session "localhost")))
+    (is (= :permitted (raw-connect session "127.0.0.1"))
+        "the address the allowed lookup answered is the one the connection uses")
+    (is (= :blocked (raw-connect session "127.0.0.2"))
+        "and only that address: another literal is still refused"))
+  (let [session (harness/guarded-session ["localhost"] ["127.0.0.1"])]
+    (is (= :permitted (resolution session "localhost")))
+    (is (= :blocked (raw-connect session "127.0.0.1"))
+        "a DENIED address stays denied however it was learned")))

@@ -39,21 +39,6 @@
   (doseq [s @opened] (runtime/close-session! s))
   (reset! opened []))
 
-(defn session
-  "A session of its own with the sandbox runtime and `shim` installed.
-
-   One interpreter serves the whole suite, so a session is a fresh namespace
-   AND a fresh module table: every shim loaded so far is dropped first, and a
-   test that monkeypatches one hands nothing to the next test."
-  [shim]
-  (runtime/initialize!)
-  (let [s (str "shim-" shim "-" (System/nanoTime))]
-    (runtime/install-runtime! s)
-    (runtime/exec! s "import vis_runtime")
-    (runtime/eval-str s "vis_runtime.forget_shims()")
-    (runtime/install-shim! s shim)
-    (track! s)))
-
 (defmacro defbuilt-test
   "A test that needs the interpreter: skips LOUDLY, naming the command that
    fixes it, in a checkout where no cdylib has been built."
@@ -62,14 +47,6 @@
      (if-not built?
        (println "SKIP" ~(str test-name) "- no cdylib, run native/vispython/build.sh")
        (do ~@body))))
-
-(defmacro defshim-test
-  "A ported shim test: binds `session` to a session with `shim` installed.
-   Keeps the moved bodies unchanged."
-  [test-name shim & body]
-  `(defbuilt-test ~test-name
-     (let [~'session (session ~shim)]
-       ~@body)))
 
 (defn ev
   "Run `code` in `session` and answer its value as Clojure data — the moved
@@ -119,18 +96,6 @@
        (finally
          (runtime/run session
                       "import sys\nsys.modules.clear()\nsys.modules.update(_vis_saved_modules)\nNone"))))
-
-(defn fresh
-  "A session with the runtime but NO shim installed: the moved tests that ran
-   in a context of their own are the ones asserting on lazy import, so the
-   shim must arrive through `import`, not before it."
-  [shim]
-  (runtime/initialize!)
-  (let [s (str "fresh-" shim "-" (System/nanoTime))]
-    (runtime/install-runtime! s)
-    (runtime/exec! s "import vis_runtime")
-    (runtime/eval-str s "vis_runtime.forget_shims()")
-    (track! s)))
 
 (defn guarded-session
   "A session confined to `allowed`/`denied` the way the engine confines one: the

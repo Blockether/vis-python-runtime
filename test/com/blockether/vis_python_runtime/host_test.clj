@@ -42,8 +42,9 @@
       ;; reads `find("x", paths=[…])` as one options map rather than as kwargs.
       (is (= {"args" ["hi" 2 {"deep" true}]}
              (harness/printed (block session "print(json.dumps(await describe('hi', 2, deep=True)))")))))
-    (testing "the host's value arrives as a dict, not as a repr"
-      (is (= "dict" (ran session "print(type(await describe()).__name__)"))))))
+    (testing "the host's value arrives as a mapping, not as a repr"
+      (is (= "__VisDict__" (ran session "print(type(await describe()).__name__)"))
+          "a real dict, subclassed only so a missing key names the keys there are"))))
 
 (harness/defbuilt-test host-tool-deferred-test
   ;; A tool is not an ordinary function: calling one hands back a thunk, which is
