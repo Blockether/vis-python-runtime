@@ -108,4 +108,18 @@ for glibc/musl.
 Phase 0 done: repository, resolution, version, build and test scaffolding, plus
 the measured GraalPy baseline in `bench/pre-cpython.md` and the harness that
 produced it.
-Phase 1 not started — it is the gate for everything after it.
+
+Phase 1 in progress. The JVM half is proven: `native/vis-python/vispython.c`
+exports `initialize`/`version`/`eval`/`exec`/`finalize`, `build.sh` produces
+`libvispython.dylib` against the local CPython, and
+`com.blockether.vis-python-runtime.ffi` binds all five through FFM on one pinned
+thread. `ffi-test` runs a real CPython 3.14.6 inside the JVM: `1 + 1`, an
+`ast.parse` whose result survives into the next call, and `1 / 0` arriving as
+`ex-info` rather than a crash. Measured start: 35 ms to `initialize!`, 8 ms to
+import json/re/ast, against 1.1 s for a GraalPy context.
+
+Still open in Phase 1, and the actual gate: the same downcalls under
+`native-image` on CE 25.1.3, with registrations inside the jar at
+`resources/META-INF/native-image/com.blockether/vis-python-runtime/`; and a
+static libpython, since today's cdylib is 34 KB because it links the Homebrew
+interpreter dynamically.
