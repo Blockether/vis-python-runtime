@@ -3,7 +3,15 @@
    jar is small — one namespace plus a namespaced VERSION. The embedded CPython
    cdylib ships as per-platform artifacts such as
    `com.blockether/vis-python-runtime-native-darwin-arm64`, each carrying the
-   prebuilt library under `prebuilds/<platform>/`."
+   prebuilt library under `prebuilds/<platform>/`.
+
+   NOT DONE, and Phase 5 of PLAN.md owns it: `native-jar` copies the cdylib
+   ALONE, while `build.sh` now vendors a whole CPython tree beside it. A jar
+   cannot carry that tree faithfully — it holds no symlinks and no permission
+   bits — so the platform artifact needs an archive resource extracted once,
+   the way the cdylib itself is extracted today. Until that lands, a published
+   native jar resolves no `python/` directory and the interpreter falls back
+   to the machine's own standard library."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.build.api :as b]
@@ -45,7 +53,7 @@
                 :version version
                 :basis @basis
                 :src-dirs ["src"]
-                :pom-data (pom-data "Embedded CPython for the Vis sandbox — statically linked, reached over FFM, without Truffle.")})
+                :pom-data (pom-data "Embedded CPython for the Vis sandbox — vendored per platform, reached over FFM, without Truffle.")})
   ;; src only: resources/prebuilds belongs to the per-platform native jars, and
   ;; VIS_PYTHON_VERSION is a repo-root file, not a resource — the namespaced copy
   ;; below is the one that ships, because a bare `VERSION` resource would collide

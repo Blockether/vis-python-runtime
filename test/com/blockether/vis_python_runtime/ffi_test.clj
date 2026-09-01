@@ -23,6 +23,17 @@
         (is (str/starts-with? (ffi/version) "3.")
             "an embedded CPython 3.x is running inside this JVM"))
 
+      (testing "the interpreter is rooted in the VENDORED tree, not the machine's Python"
+        ;; A shipped artifact carries its own standard library beside the
+        ;; cdylib. If `sys.prefix` ever points outside it, the sandbox is
+        ;; borrowing whatever interpreter the machine happens to have — which is
+        ;; exactly the dependency this library exists to remove.
+        (let [home (runtime/resolve-python-home)]
+          (when home
+            (is (= home (:python-home (ffi/initialize!))))
+            (is (str/starts-with? (ffi/eval-str "__main__" "__import__('sys').prefix") home)
+                "the standard library resolves inside the vendored tree"))))
+
       (testing "expressions evaluate and state survives between calls"
         (is (= "2" (ffi/eval-str "1 + 1")))
         (is (nil? (ffi/exec! "import ast\nparsed = ast.parse('x = 1')")))

@@ -1,0 +1,13 @@
+# The CPython this project embeds, and where it comes from.
+#
+# Upstream is astral-sh/python-build-standalone: a redistributable CPython built
+# for embedding and published per platform. We do NOT build CPython ourselves —
+# our own build would be one more thing to keep patched for every CVE, on five
+# platforms, forever, and the sandbox gains nothing from it.
+#
+# `native/vis-python/build.sh` vendors the pinned tree INTO the platform's
+# prebuild directory, so the shipped artifact carries its own standard library
+# and never borrows whatever Python the machine happens to have. The two keys
+# move together, and moving them means rebuilding every platform artifact.
+CPYTHON_RELEASE=20260825
+CPYTHON_VERSION=3.14.7

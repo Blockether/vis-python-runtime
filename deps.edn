@@ -1,7 +1,7 @@
 ;; vis-python-runtime — the Python runtime the Vis sandbox executes, without
 ;; Truffle. GraalPy costs ~300 MB in the native image (python-language alone is
-;; 95 MB in ~/.m2, and SVM expands it); this library embeds a statically linked
-;; CPython behind a small first-party C ABI (native/vis-python) reached through
+;; 95 MB in ~/.m2, and SVM expands it); this library embeds a VENDORED CPython
+;; behind a small first-party C ABI (native/vis-python) reached through
 ;; the JDK Foreign Function & Memory API — the same shape clj-imaging uses for
 ;; its Rust cdylib, and the reason there is no JNI and no subprocess here.
 ;;

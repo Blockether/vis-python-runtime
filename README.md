@@ -1,7 +1,7 @@
 # vis-python-runtime
 
-Embedded CPython for the Vis sandbox — statically linked, reached over the JDK
-Foreign Function & Memory API, with no Truffle in the native image.
+Embedded CPython for the Vis sandbox — vendored per platform, reached over the
+JDK Foreign Function & Memory API, with no Truffle in the native image.
 
 ## Why
 
@@ -12,13 +12,14 @@ shipped binary: `python-language` alone is 95 MB of jar, plus `truffle-api`,
 does not refcount, so a dropped handle stays alive for the life of the JVM and
 the sandbox has to keep an ownership registry by hand.
 
-A statically linked CPython behind a small C ABI is on the order of **20 MB**,
-brings real refcounting, full C-API and CPython's own speed.
+A vendored CPython behind a small C ABI is on the order of **20 MB** of shared
+library plus its standard library, brings real refcounting, the full C-API and
+CPython's own speed.
 
 ## Shape
 
     src/                    the JVM half: resolution, the FFM bridge
-    native/vis-python/      the C shim + the static CPython build
+    native/vis-python/      the C shim + the vendoring build
     resources/prebuilds/    build output per platform (git-ignored)
     test/                   clojure -M:test
 

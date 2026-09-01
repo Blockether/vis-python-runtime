@@ -505,11 +505,23 @@ int vis_python_confine(const char *read_roots, const char *write_roots, char *ou
     return vis_py_copy_out(summary, out, cap);
 }
 
-/* Start the interpreter. Idempotent, so a caller that cannot cheaply know
-   whether a sibling already started it does not have to. Returns 0, or
-   VIS_PY_ERR_INIT with the reason in `out`. */
-int vis_python_initialize(char *out, int cap)
+/* Start the interpreter, rooted at `home` when one is given.
+
+   `home` is a VENDORED CPython tree — the directory holding `lib/python3.14/`.
+   Passing one is what makes an installation self-contained: without it CPython
+   resolves its standard library from whatever interpreter the machine happens
+   to have, so a laptop with no Python, or with the wrong one, decides whether
+   the sandbox runs at all. NULL or empty keeps CPython's own search, which is
+   what a source checkout built against a system interpreter wants.
+
+   Idempotent, so a caller that cannot cheaply know whether a sibling already
+   started it does not have to. Returns 0, or VIS_PY_ERR_INIT with the reason in
+   `out`. */
+int vis_python_initialize(const char *home, char *out, int cap)
 {
+    PyConfig config;
+    PyStatus status;
+
     if (vis_py_started) {
         return 0;
     }
@@ -522,9 +534,26 @@ int vis_python_initialize(char *out, int cap)
         vis_py_copy_out("PySys_AddAuditHook was refused", out, cap);
         return VIS_PY_ERR_INIT;
     }
-    Py_InitializeEx(0);
+    if (home == NULL || home[0] == '\0') {
+        Py_InitializeEx(0);
+    } else {
+        PyConfig_InitPythonConfig(&config);
+        /* Match Py_InitializeEx(0): an embedded interpreter must not take the
+           host process's signal handlers away from the JVM. */
+        config.install_signal_handlers = 0;
+        status = PyConfig_SetBytesString(&config, &config.home, home);
+        if (!PyStatus_Exception(status)) {
+            status = Py_InitializeFromConfig(&config);
+        }
+        PyConfig_Clear(&config);
+        if (PyStatus_Exception(status)) {
+            vis_py_copy_out(status.err_msg == NULL ? "Py_InitializeFromConfig failed" : status.err_msg,
+                            out, cap);
+            return VIS_PY_ERR_INIT;
+        }
+    }
     if (!Py_IsInitialized()) {
-        vis_py_copy_out("Py_InitializeEx did not start the interpreter", out, cap);
+        vis_py_copy_out("the interpreter did not start", out, cap);
         return VIS_PY_ERR_INIT;
     }
     vis_py_started = 1;

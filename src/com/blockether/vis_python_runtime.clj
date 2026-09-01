@@ -3,10 +3,10 @@
 
    Vis runs sandbox Python — `packages/vis-agent` plus every shim in
    `resources/vis-shims/` — inside GraalPy today, which costs roughly 300 MB in
-   the native image. This library replaces that engine with a statically linked
-   CPython reached through the JDK Foreign Function & Memory API over a
-   first-party C ABI (`native/vis-python`), so the image carries a cdylib beside
-   it instead of a Truffle language inside it.
+   the native image. This library replaces that engine with a VENDORED CPython
+   reached through the JDK Foreign Function & Memory API over a first-party C
+   ABI (`native/vis-python`), so the image carries a cdylib and an interpreter
+   tree beside it instead of a Truffle language inside it.
 
    Nothing here links at build time. The library is resolved when it is first
    needed: `VIS_PYTHON_NATIVE_PATH` wins (a file, or a directory holding the
@@ -103,3 +103,24 @@
                           :file file-name
                           :env native-path-env
                           :resource (str "prebuilds/" platform-tag "/" file-name)}))))))
+
+(def python-home-env
+  "Name of the environment variable that overrides the vendored interpreter."
+  "VIS_PYTHON_HOME")
+
+(defn resolve-python-home
+  "The vendored CPython tree this library should start, as an absolute path, or
+   nil to let CPython search for itself.
+
+   `VIS_PYTHON_HOME` wins. Otherwise the tree is the `python/` directory BESIDE
+   the resolved cdylib, which is how a shipped platform artifact is laid out:
+   the library and the interpreter it was linked against travel together, so an
+   installation carries its own standard library instead of borrowing whatever
+   Python the machine has. A source checkout that built against a system
+   interpreter has no such directory, and gets nil."
+  ([] (resolve-python-home (resolve-library)))
+  ([{:keys [path]}]
+   (or (some-> (System/getenv python-home-env) str/trim not-empty)
+       (let [vendored (io/file (.getParentFile (io/file ^String path)) "python")]
+         (when (.isDirectory vendored)
+           (.getAbsolutePath vendored))))))
