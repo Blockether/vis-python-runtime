@@ -160,6 +160,14 @@ working, and an unresolvable path is refused rather than trusted.
 The Python half can move; the assertions that prove the JVM capability stay in
 Vis. Split them, never copy them.
 
+The bridge itself now EXISTS here, which is what blocked this wave: `bind-host!`
+registers one upcall stub, `install-tool!` binds a name the sandbox defers like
+any other tool, and `_vis_host.call(name, payload)` is the guest's only way
+through (`host_test.clj`). What a shim like `pil.py` still needs is the JVM
+capability behind each `__vis_*` name — those are Vis' own, so a shim moves only
+with a host that answers them, and the assertions proving the capability stay in
+Vis either way.
+
 - [ ] `pil_compat_shim_test.clj` — 1619 lines — `__vis_pil_*`: every image op
       delegates to com.blockether/imaging on the JVM and the pixels never enter
       Python, so the suite belongs to this wave and not to Wave 1 where it was

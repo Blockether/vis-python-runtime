@@ -154,6 +154,62 @@ def install(namespace):
     return len(namespace)
 
 
+def host_call(name, payload):
+    """Call the host callable `name` with `payload`, answering its reply text.
+
+    The one door back out of the sandbox. Text crosses in both directions
+    because the C ABI carries bytes and nothing else; what the text MEANS is
+    agreed between this module and the host, never by the boundary. A host that
+    failed arrives as `RuntimeError` carrying the host's own message.
+    """
+    import _vis_host
+
+    return _vis_host.call(name, payload)
+
+
+def _host_tool(name):
+    """The guest half of the host tool `name`: JSON out, JSON back.
+
+    Arguments travel as `{"args": [...]}` and the reply is `{"value": ...}` or
+    `{"error": "..."}`. Keyword arguments fold into a TRAILING DICT the way the
+    sandbox's own call path folds them (`__vis_Call__`), because a vis tool takes
+    a trailing options map — `find("x", paths=[...])` is one convention on both
+    sides of the boundary, not two. A value JSON cannot carry reaches the host as
+    its `str`, which is the honest limit of a text boundary: a tool takes data,
+    and an open socket was never data.
+    """
+
+    def call(*args, **kwargs):
+        params = list(args) + ([dict(kwargs)] if kwargs else [])
+        payload = json.dumps({"args": params}, default=str)
+        reply = json.loads(host_call(name, payload))
+        if "error" in reply:
+            raise RuntimeError(reply["error"])
+        return reply.get("value")
+
+    call.__name__ = name
+    return call
+
+
+def install_tool(namespace, name):
+    """Bind the host tool `name` into `namespace`, answering the name bound.
+
+    A tool is not an ordinary function: `__vis_deferred__` wraps it, so calling
+    one hands back a thunk — the seam `await`, `gather` and top-level
+    auto-settle are built on. The name joins `__vis_protected_names__` too,
+    because a bound tool is precisely a name a block may not shadow with an
+    import or a top-level `def`.
+    """
+    deferred = namespace.get("__vis_deferred__")
+    if deferred is None:
+        raise RuntimeError("install(namespace) has to run before a tool is bound")
+    namespace[name] = deferred(_host_tool(name), name)
+    namespace["__vis_protected_names__"] = sorted(
+        set(namespace.get("__vis_protected_names__") or ()) | {name}
+    )
+    return name
+
+
 def run(source, namespace):
     """Execute `source` in `namespace`, answering the trailing expression's value.
 

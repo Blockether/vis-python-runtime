@@ -27,6 +27,7 @@
 #define VIS_PY_ERR_PYTHON (-3) /* Python raised; buffer holds str(exception) */
 
 static int vis_py_started = 0;
+static int vis_py_inittab = 0;
 
 /* Copy a NUL-terminated UTF-8 string into the caller's buffer, truncating to
    fit. Returns the byte count written, not counting the terminator. */
@@ -365,6 +366,129 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
     return 0;
 }
 
+/* --------------------------------------------------------------------------
+ * Host callables.
+ *
+ * A sandbox tool is HOST code the guest calls: `grep(...)` reads as Python and
+ * runs as Clojure. GraalPy handed the guest a foreign proxy for that; CPython
+ * has no such object, so the door here is one function pointer the host
+ * registers and one builtin module the guest reaches it through.
+ *
+ * The pointer is invoked as
+ * `int (*)(const char *name, const char *payload, char *out, int cap)` and
+ * answers the byte length its reply NEEDS: it writes the reply NUL-terminated
+ * when that fits and writes nothing when it does not, so an answer larger than
+ * the buffer costs one retry instead of an allocation crossing the boundary.
+ * A negative return is a failure whose reason the host left in the buffer, and
+ * that text becomes the Python exception.
+ *
+ * Only text crosses. What the payload and the reply MEAN is the runtime's
+ * (`vis_runtime.install_tool` encodes JSON), never this file's: a boundary that
+ * knows a dialect has to be changed whenever the dialect grows a case.
+ *
+ * The GIL is RELEASED around a host call. It is blocking work in another
+ * language, and holding the lock would stop every other guest thread for as
+ * long as the host takes.
+ * ------------------------------------------------------------------------ */
+
+#define VIS_PY_HOST_BUFFER 65536
+
+typedef int (*vis_py_host_fn)(const char *name, const char *payload, char *out, int cap);
+
+static vis_py_host_fn vis_py_host = NULL;
+
+/* `_vis_host.call(name, payload)` -> the host's reply as `str`. */
+static PyObject *vis_py_host_call(PyObject *self, PyObject *args)
+{
+    const char *name = NULL;
+    const char *payload = NULL;
+    vis_py_host_fn host = vis_py_host;
+    PyThreadState *save;
+    char *buffer;
+    char *grown;
+    PyObject *answer;
+    int cap = VIS_PY_HOST_BUFFER;
+    int needed;
+
+    (void)self;
+    if (!PyArg_ParseTuple(args, "ss", &name, &payload)) {
+        return NULL;
+    }
+    if (host == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "no host is bound to this interpreter");
+        return NULL;
+    }
+    buffer = (char *)malloc((size_t)cap);
+    if (buffer == NULL) {
+        return PyErr_NoMemory();
+    }
+    save = PyEval_SaveThread();
+    needed = host(name, payload, buffer, cap);
+    PyEval_RestoreThread(save);
+    if (needed >= cap) {
+        grown = (char *)realloc(buffer, (size_t)needed + 1);
+        if (grown == NULL) {
+            free(buffer);
+            return PyErr_NoMemory();
+        }
+        buffer = grown;
+        cap = needed + 1;
+        save = PyEval_SaveThread();
+        needed = host(name, payload, buffer, cap);
+        PyEval_RestoreThread(save);
+        if (needed >= cap) {
+            free(buffer);
+            PyErr_SetString(PyExc_RuntimeError, "host reply grew between calls");
+            return NULL;
+        }
+    }
+    if (needed < 0) {
+        buffer[cap - 1] = '\0';
+        PyErr_SetString(PyExc_RuntimeError, buffer[0] == '\0' ? "host call failed" : buffer);
+        free(buffer);
+        return NULL;
+    }
+    answer = PyUnicode_FromStringAndSize(buffer, (Py_ssize_t)needed);
+    free(buffer);
+    return answer;
+}
+
+static PyMethodDef vis_py_host_methods[] = {
+    {"call", vis_py_host_call, METH_VARARGS,
+     "call(name, payload) -> str: run the host callable `name` over a text payload."},
+    {NULL, NULL, 0, NULL}
+};
+
+static struct PyModuleDef vis_py_host_module = {
+    PyModuleDef_HEAD_INIT,
+    "_vis_host",
+    "The one door from the sandbox back to the host that started it.",
+    -1,
+    vis_py_host_methods,
+    NULL,
+    NULL,
+    NULL,
+    NULL
+};
+
+static PyObject *vis_py_host_init(void)
+{
+    return PyModule_Create(&vis_py_host_module);
+}
+
+/* Bind the callable every `_vis_host.call` reaches; NULL unbinds, after which a
+   guest calling a tool is told there is no host rather than crashing. The host
+   may rebind at will: the pointer is read per call. Returns 0. */
+int vis_python_host(void *fn)
+{
+    vis_py_host_fn host;
+
+    /* A cast from `void *` to a function pointer is not ISO C; copying the
+       bytes is, and the JVM has no other way to hand over an upcall stub. */
+    memcpy(&host, &fn, sizeof host);
+    vis_py_host = host;
+    return 0;
+}
 /* Confine the interpreter to `read_roots` and `write_roots`, each a
    newline-separated list of paths. Replaces whatever was in force; two empty
    lists LIFT the confinement, which only the host can ask for, because only the
@@ -389,6 +513,11 @@ int vis_python_initialize(char *out, int cap)
     if (vis_py_started) {
         return 0;
     }
+    if (!vis_py_inittab && PyImport_AppendInittab("_vis_host", vis_py_host_init) != 0) {
+        vis_py_copy_out("PyImport_AppendInittab refused _vis_host", out, cap);
+        return VIS_PY_ERR_INIT;
+    }
+    vis_py_inittab = 1;
     if (PySys_AddAuditHook(vis_py_audit, NULL) != 0) {
         vis_py_copy_out("PySys_AddAuditHook was refused", out, cap);
         return VIS_PY_ERR_INIT;

@@ -71,7 +71,10 @@ Acceptance criteria: every exported symbol documented beside its declaration,
 GIL ownership stated per call, and a test proving a released handle is freed
 (the exact leak GraalPy could not express).
 
-Unknowns: the ownership model for host callables the sandbox injects.
+Unknowns: none left. The ownership model for host callables is settled — one
+upcall stub for the process behind an atom, text in and text out, and a reply
+too big for the buffer waits on the JVM side so the retry never runs the tool
+twice (`bind-host!`, `install-tool!`, `host_test.clj`).
 
 ## Phase 3 — Run the existing sandbox unchanged
 
@@ -146,7 +149,8 @@ Still open in Phase 1, and the actual gate: the same downcalls under
 `native-image` on CE 25.1.3, with registrations inside the jar at
 `resources/META-INF/native-image/com.blockether/vis-python-runtime/`; and a
 static libpython, since today's cdylib is 34 KB because it links the Homebrew
-interpreter dynamically.
+interpreter dynamically. The host door adds one item to that same gate: an FFM
+UPCALL stub has to survive `native-image`, not just the downcalls.
 
 Moved: all 36 sandbox Python sources (1.77 MB) — `resources/vis-python/` (13
 files) and `resources/vis-shims/` (23 files) — now live here at the resource
@@ -160,3 +164,11 @@ before `Py_InitializeEx`, two lists of canonical roots in C, and the guest with
 no way to see or change them. Reads, writes, `..`, symlinks out of a root and
 `os` mutations are covered by `confinement_test.clj`; what stays in Vis is the
 JVM-side `sandbox-fs.clj`, which is Truffle's seam and dies with GraalPy.
+
+Phase 2 closed with the door back OUT: `vis_python_host` registers one function
+pointer, `_vis_host.call(name, payload)` is the guest's only way through it, and
+`vis_runtime.install_tool` binds a name the sandbox defers exactly like any
+other tool. Only text crosses — the JSON envelope is the runtime's, the C
+boundary reads none of it — the GIL is released for the call's duration so guest
+threads keep running, and an oversized reply costs a retry rather than a second
+RUN of the tool. That unblocks Wave 3, whose shims are host-bridged.

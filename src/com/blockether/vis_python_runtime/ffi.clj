@@ -8,6 +8,10 @@
    message together and this namespace never has to ask the interpreter what
    went wrong.
 
+   Traffic is not one way. `bind-host!` hands C an upcall stub, so a tool the
+   guest calls — `grep(...)` reads as Python and runs as Clojure — arrives back
+   here, on the interpreter's own thread, while the block waits.
+
    EVERY call runs on ONE dedicated thread. `Py_InitializeEx` leaves the GIL
    held by the thread that started the interpreter and never releases it, so a
    call arriving on another thread walks into CPython without the lock and
@@ -22,7 +26,8 @@
             [clojure.string :as str]
             [com.blockether.vis-python-runtime :as runtime])
   (:import [java.lang.foreign Arena FunctionDescriptor Linker Linker$Option MemoryLayout MemorySegment SymbolLookup ValueLayout]
-           [java.lang.invoke MethodHandle]
+           [java.lang.invoke MethodHandle MethodHandles MethodType]
+           [java.nio.charset StandardCharsets]
            [java.util.concurrent Callable ExecutionException Executors ExecutorService ThreadFactory]))
 
 (def ^:private message-capacity
@@ -44,6 +49,7 @@
    "vis_python_run"        (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_run_block"  (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_confine"    (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
+   "vis_python_host"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS)
    "vis_python_finalize"   (descriptor ValueLayout/JAVA_INT)})
 
 (defn- link-handles
@@ -236,6 +242,112 @@
    (exec! session "import vis_runtime")
    (eval-str session (str "vis_runtime.install_module(globals(), " (pr-str name) ")"))))
 
+;; The function `_vis_host.call` reaches, or nil when nothing is bound. One atom
+;; behind one upcall stub: rebinding swaps the function, never the pointer, so a
+;; process that rebinds a thousand times still owns exactly one stub.
+(defonce ^:private host-callable (atom nil))
+
+(def ^:private ^ThreadLocal pending-reply
+  "A reply that did not fit the buffer C offered, per thread.
+
+   C grows its buffer and calls straight back, on the same thread, for the same
+   arguments — and a tool that deleted a file must not delete it a second time
+   because its answer was long. So the oversized text waits here and the retry
+   serves it instead of running the host again."
+  (ThreadLocal.))
+
+(defn- c-string
+  "Read a NUL-terminated UTF-8 string out of a C pointer. The segment arrives
+   with no size, so it is reinterpreted before it can be read."
+  ^String [^MemorySegment segment]
+  (.getString (.reinterpret segment (long Integer/MAX_VALUE)) 0))
+
+(defn- write-reply
+  "Write `text` into C's buffer, answering the byte length it NEEDS. Writes only
+   the terminator when the answer does not fit: C grows the buffer and asks
+   again, which beats truncating in the middle of a UTF-8 character."
+  ^long [^String text ^MemorySegment out ^long cap]
+  (let [needed (alength (.getBytes text StandardCharsets/UTF_8))
+        room   (.reinterpret out cap)]
+    (if (< needed cap)
+      (.setString room 0 text)
+      (.set room ValueLayout/JAVA_BYTE 0 (byte 0)))
+    needed))
+
+(defn- host-upcall
+  "The callback C invokes: read the two strings, run the bound host, write the
+   reply. Never throws across the boundary — an exception escaping an upcall
+   takes the process down, so a failure comes back as a negative status with its
+   reason in the buffer, exactly like a failure on the way in."
+  [name payload out cap]
+  (let [cap (long cap)]
+    (try
+      (let [nm      (c-string name)
+            body    (c-string payload)
+            pending (.get ^ThreadLocal pending-reply)
+            text    (if (= (first pending) [nm body])
+                      (second pending)
+                      (let [f (or @host-callable
+                                  (throw (ex-info "no host is bound to this interpreter" {})))]
+                        (str (f nm body))))
+            needed  (write-reply text out cap)]
+        (if (>= needed cap)
+          (.set ^ThreadLocal pending-reply [[nm body] text])
+          (.remove ^ThreadLocal pending-reply))
+        (int needed))
+      (catch Throwable t
+        (.remove ^ThreadLocal pending-reply)
+        (write-reply (or (not-empty (str (.getMessage t))) (.getName (class t))) out cap)
+        (int -1)))))
+
+(defonce ^:private host-stub
+  (delay
+    (let [classes (fn ^"[Ljava.lang.Class;" [& cs] (into-array Class cs))
+          invoked (MethodType/methodType Object ^"[Ljava.lang.Class;" (classes Object Object Object Object))
+          native  (MethodType/methodType Integer/TYPE
+                                         ^"[Ljava.lang.Class;"
+                                         (classes MemorySegment MemorySegment MemorySegment Integer/TYPE))
+          target  (-> (.findVirtual (MethodHandles/lookup) clojure.lang.IFn "invoke" invoked)
+                      (.bindTo ^clojure.lang.IFn host-upcall)
+                      (.asType native))]
+      (.upcallStub (Linker/nativeLinker) target
+                   (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS
+                               ValueLayout/ADDRESS ValueLayout/JAVA_INT)
+                   (Arena/global)
+                   (into-array Linker$Option [])))))
+
+(defn bind-host!
+  "Bind `f` as THE host this interpreter calls back into; nil unbinds.
+
+   `f` takes a callable's name and a text payload and answers text. Everything
+   else about it is constrained by where it RUNS: inside the call the guest is
+   blocked on, so it must not re-enter this namespace — `run`, `exec!` and their
+   siblings would wait behind the call already in flight — and on any thread,
+   because the GIL is released for its duration and a second guest thread can
+   reach it while the first is still there.
+
+   The dialect is the caller's: this carries text and reads none of it.
+   `install-tool!` binds the JSON one the sandbox runtime speaks."
+  [f]
+  (reset! host-callable f)
+  (on-runtime-thread
+   (fn []
+     (.invokeWithArguments (handle "vis_python_host") ^java.util.List (vector @host-stub))
+     nil))
+  nil)
+
+(defn install-tool!
+  "Bind the host tool `name` into `session`, answering the name bound.
+
+   A tool is a name the guest CALLS and the host answers: the runtime wraps it
+   so calling one hands back a thunk — what `await`, `gather` and top-level
+   auto-settle are built on — and adds it to the names a block may not shadow.
+   Requires a host bound with `bind-host!`; without one the guest is told so
+   when it calls, not when the name is bound."
+  ([name] (install-tool! default-session name))
+  ([session name]
+   (exec! session "import vis_runtime")
+   (eval-str session (str "vis_runtime.install_tool(globals(), " (pr-str name) ")"))))
 (defn close-session!
   "Drop `session`'s namespace, answering whether there was one.
 

@@ -163,3 +163,33 @@
                   nm " = __vis_deferred__(__vis_impl_" nm "__, " (pr-str nm) ")\n"
                   "__vis_protected_names__ = sorted(set(__vis_protected_names__)"
                   " | {" (pr-str nm) "})")))
+
+(defn bind-tools!
+  "Bind `tools` — tool name to a function of its ARGUMENT VECTOR — as the host this
+   interpreter calls back into, and answer it.
+
+   The library carries TEXT: the JSON envelope is the runtime's, so decoding it
+   is what every host does and what a test should not spell out twice. A tool
+   that throws comes back as the failure envelope, which is how the guest gets a
+   catchable exception rather than a dead block."
+  [tools]
+  (ffi/bind-host!
+   (fn [nm payload]
+     (let [args (get (json/read-str payload) "args")
+           tool (get tools nm)]
+       (json/write-str
+        (if (nil? tool)
+          {"error" (str "no tool named " nm)}
+          (try {"value" (tool args)}
+               (catch Throwable t
+                 {"error" (str (.getMessage t))})))))))
+  tools)
+
+(defn tool-session
+  "A block session with every tool in `tools` bound and installed, so a block
+   can call them by name."
+  [tools]
+  (bind-tools! tools)
+  (let [s (block-session)]
+    (doseq [nm (keys tools)] (ffi/install-tool! s nm))
+    s))
