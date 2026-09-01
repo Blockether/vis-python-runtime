@@ -125,6 +125,37 @@
          (when (.isDirectory vendored)
            (.getAbsolutePath vendored))))))
 
+(defn- state-path
+  "A path under `~/.vis/python`, where a host keeps this runtime's per-machine
+   state: what pip installed and what CPython compiled. Both are caches in the
+   sense that matters - deleting the tree costs a download and a recompile,
+   never data - and neither belongs inside a shipped, hashed installation. Nil
+   when the machine reports no home directory."
+  ^String [& parts]
+  (when-let [home (System/getProperty "user.home")]
+    (.getAbsolutePath ^java.io.File (apply io/file home ".vis" "python" parts))))
+
+(def packages-dir-env
+  "Name of the environment variable that overrides the package directory."
+  "VIS_PYTHON_PACKAGES")
+
+(defn resolve-packages-dir
+  "Where packages installed for the sandbox live, as an absolute path.
+
+   The artifact BUNDLES NOTHING: it is an interpreter and its standard library,
+   and everything else arrives through `pip`, once, into this one directory that
+   every session then imports from. That keeps the shipped tree the same bytes
+   on every machine, keeps a package the user chose out of an installation the
+   next release replaces, and makes `pip` the whole story instead of a
+   requirements file somebody has to re-decide.
+
+   A host confining the interpreter puts this on the READABLE roots and nowhere
+   near the writable ones: installing is something the host does, never a block.
+   `VIS_PYTHON_PACKAGES` wins."
+  []
+  (or (some-> (System/getenv packages-dir-env) str/trim not-empty)
+      (state-path "packages")))
+
 (def pycache-prefix-env
   "Name of the environment variable that overrides the bytecode cache location."
   "VIS_PYTHON_PYCACHE_PREFIX")
@@ -136,13 +167,25 @@
    A shipped artifact carries NO bytecode: `__pycache__` is per-machine cache
    that nearly doubles a vendored tree on disk, and CPython's default writes it
    BESIDE the source file - inside an installation that is read-only, shared
-   between projects, and hashed. So the cache goes under the user's own
-   directory instead: the first run compiles what it imports, every later run
-   imports at cached speed, and the tree stays exactly as it shipped.
-   `VIS_PYTHON_PYCACHE_PREFIX` wins, which is also how a host puts the cache
-   where it keeps its other state."
+   between projects, and hashed. So the cache goes beside the packages instead:
+   the first run compiles what it imports, every later run imports at cached
+   speed, and the tree stays exactly as it shipped. `VIS_PYTHON_PYCACHE_PREFIX`
+   wins, which is also how a host puts the cache where it keeps its other
+   state."
   []
   (or (some-> (System/getenv pycache-prefix-env) str/trim not-empty)
-      (some-> (System/getProperty "user.home")
-              (io/file ".vis" "python-cache")
-              (.getAbsolutePath))))
+      (state-path "pycache")))
+
+(defn resolve-python-executable
+  "The vendored interpreter's own executable, or nil when there is no vendored
+   tree. `pip` is a PROGRAM: the host runs it in a process of its own rather
+   than inside the embedded interpreter, which is confined and, being one
+   interpreter for the whole process, would carry an installer's imports and
+   monkeypatches into every session after it."
+  ([] (resolve-python-executable (resolve-python-home)))
+  ([home]
+   (when-let [found (->> ["bin/python3" "python.exe" "bin/python"]
+                         (map #(io/file home %))
+                         (filter #(.isFile ^java.io.File %))
+                         (first))]
+     (.getAbsolutePath ^java.io.File found))))

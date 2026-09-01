@@ -129,7 +129,7 @@ resource extracted once, the way the cdylib is extracted today. It carries no
 bytecode: `__pycache__` is per-machine cache worth 11.8 MB against 18.4 MB of
 stdlib source, invalid the moment the tree moves, and a jar that shipped it
 would still be writing into a read-only installation. `vis_python_initialize`
-takes a `pycache_prefix` instead (`~/.vis/python-cache` by default,
+takes a `pycache_prefix` instead (`~/.vis/python/pycache` by default,
 `VIS_PYTHON_PYCACHE_PREFIX` to move it), so the host compiles once on first run
 and the shipped tree is never written to.
 
@@ -139,7 +139,7 @@ measured size drop is recorded here.
 Unknowns: Windows vendoring (the upstream build is MSVC); whether one artifact
 per platform is enough for glibc/musl.
 
-## Phase 6 — Real packages, redistributed
+## Phase 6 — Real packages, installed by pip
 
 Rationale: the shims are pure-Python REIMPLEMENTATIONS because GraalPy could not
 load a C extension. CPython can, so `numpy`, `pandas`, `pillow`, `bs4` and the
@@ -148,48 +148,58 @@ a subset that resembles one. This is also what answers the bytes question the
 host door raised: nothing has to marshal a raster or a frame across the boundary
 once the library that owns it lives inside the interpreter.
 
-Data: two tiers, and the line between them is MEASURED. The first estimate here
-was wrong and is kept as the reason the rule changed: "everything that has a shim
-is a promise, so it ships" was projected at 65-80 MB per platform from wheel
-sizes, and the actual install is 315 MB on darwin-arm64 — the whole GraalPy cost
-back again, because a wheel on disk is not its download (pandas 72 MB, numpy 35,
-matplotlib 33, lxml 20, fontTools 20, PIL 15, and 59 MB of vendored test suites
-and 85 MB of `__pycache__` on top).
+Data: the artifact BUNDLES NOTHING — an interpreter, its standard library and
+`pip`, 69 MB on darwin-arm64 against the ~300 MB a GraalPy context costs. Two
+measurements killed the tier that preceded this. "Everything that has a shim is
+a promise, so it ships" was projected at 65-80 MB per platform from wheel sizes;
+the actual install is 315 MB, because a wheel on disk is not its download
+(pandas 72 MB, numpy 35, matplotlib 33, lxml 20, fontTools 20, PIL 15, plus 59 MB
+of vendored test suites and 85 MB of `__pycache__`). The tier that survived that
+was 21 MB of pure-Python packages — and even those are somebody's decision baked
+into an artifact everybody downloads, replaced on every release, and impossible
+to correct without one. So the rule is now simpler than any list: what a user
+needs, a user installs.
 
-So the split is by cost, with one exception by KIND. `packages/base.txt` ships:
-bs4 + soupsieve, PyYAML, python-dateutil, pytz, tzdata, XlsxWriter — a few MB
-together, and the artifact measures 77 MB against the ~300 MB a GraalPy context
-costs. `packages/on-demand.txt` is what the host installs on first import:
-numpy, pandas, matplotlib, pillow, fontTools, python-pptx, pytest, 161 MB with
-their test suites stripped, and `tabulate`, which is there only because the
-pandas SHIM renders through it. The exception by kind is `requests`, `urllib3`
-and `httpx`: their shims are host BRIDGES to the JVM HTTP client, not
-reimplementations, so shipping the real ones moves network policy onto
-`network_guard.py` — a wave of its own, not a line in a requirements file. A
-block installs nothing either way: a sandbox that can reach an index is a sandbox
-that can write its own next payload, which is the same reason `ctypes` reaches no
-symbol in Phase 4.
+`vis-agent pip <args…>` is that door, and `pip.clj` is its whole implementation:
+installs go to `~/.vis/python/packages` with the bytecode beside them in
+`~/.vis/python/pycache`, and `initialize!` appends that directory to `sys.path`,
+so an installed distribution shadows the shim of its name with no code change.
+Three properties are not defaults but decisions. `--only-binary=:all:` refuses an
+sdist, because an sdist runs its own `setup.py` at install time, on the host,
+outside every boundary this project has. Pip runs in a PROCESS of its own, not in
+the embedded interpreter, which is confined and would carry an installer's
+imports into every session after it. And a block installs nothing, ever: a
+sandbox that can reach an index is a sandbox that can write its own next payload,
+the same reason `ctypes` reaches no symbol in Phase 4.
+
+Certificates come from the JVM. Pip would otherwise verify TLS against the CA
+bundle vendored inside it, so a machine whose operator added a corporate root to
+the Java trust store — the only store this product's own HTTP client reads —
+would have a runtime trusting two different sets of certificates and failing on
+one of them. `pip/certificates-pem!` exports the default trust manager's
+anchors to `~/.vis/python/cacert.pem` (measured: 109 certificates, 165 KB) and
+pip is pointed at that file with `--cert`, `PIP_CERT` and `SSL_CERT_FILE`.
 
 The mechanism needs no code. The shim finder is APPENDED to `sys.meta_path`, so
 `PathFinder` already wins and a package present on `sys.path` shadows its shim —
 the cutover is incremental, and a shim dies when its package arrives rather than
 on a flag day.
 
-Acceptance criteria: the base tier is installed at build time into
-`resources/prebuilds/<platform>/python/lib/python3.14/site-packages` from pinned
-requirements, transitive dependencies included; a block gets the REAL
-distribution at its real file for every name the artifact ships
-(`packages_test.clj`); the whole suite still passes, which is what proves a
-shipped package did not shadow a shim something else still needs; an extension
-declares a dependency and imports it; a block that tries to install one is
-refused; and every redistributed license is recorded the way `audit/README.md`
-records ours.
+Acceptance criteria: the shipped interpreter carries pip and no package
+(`pip_test.clj`); `pip/install!` puts a real distribution in the packages
+directory over TLS the JVM's own certificates verified, a block imports it from
+there, and the install compiles into the cache prefix rather than into the
+package directory; `vis-agent pip` reaches this from the CLI once Vis pins the
+library; an extension declares a dependency and installs it; a block that tries
+to install one is refused.
 
-Unknowns: hashes — the pins are exact but not `--require-hashes`, which needs a
-per-platform lock generated on each build machine. Whether the on-demand tier
-installs into the vendored tree or a per-installation site directory. glibc
-versus musl for the linux wheels. And the licence-record generator, which today
-only knows in-house coordinates.
+Unknowns: `vis-agent pip` itself, which cannot be written until Vis pins this
+library — Vis' sandbox is still GraalPy, where `~/.vis/python/packages` means
+nothing. Whether `--target` is the right shape or a real site directory with
+`--user` is, since `pip uninstall` and upgrades read the first only through
+`PYTHONPATH`. Hashes, which need a per-platform lock. glibc versus musl for the
+linux wheels. And what a block should be TOLD when it imports a package nobody
+installed, which is the one place the doc pages and the CLI have to agree.
 
 ## Phase 7 — Delete the shims
 
@@ -299,27 +309,35 @@ interpreter imports raises none of those events, which is exactly what lets Phas
 wording this once. `posix.py` itself stays until Vis pins this library, because
 the parity test hashes both copies.
 
-Phase 6 has its first tier. `packages/base.txt` and `packages/on-demand.txt` are
-the two lists, `native/vis-python/build.sh` installs the first into the vendored
-tree and strips the test suites vendored inside those packages, and
-`packages_test.clj` pins the thing that matters: a block gets the REAL
-distribution, at its real file under `site-packages`, with nothing changed to
-make it so. Measured on darwin-arm64 the whole artifact is 90 MB, against the
-~300 MB a GraalPy context costs.
+Phase 6 bundles nothing. The tier that was here — `packages/base.txt` and
+`packages/on-demand.txt`, installed into the vendored tree at build time — is
+gone, and both files with it: 21 MB of somebody's decision baked into an artifact
+everybody downloads and nobody can correct without a release. What replaced it is
+`src/com/blockether/vis_python_runtime/pip.clj`: installs run in a process of
+their own into `~/.vis/python/packages`, `initialize!` appends that directory to
+`sys.path`, and an installed distribution shadows the shim of its name with no
+code change. `--only-binary=:all:` refuses an sdist, which would run its own
+`setup.py` on the host outside every boundary here. Trust is the JVM's: the
+default trust manager's anchors are exported to `~/.vis/python/cacert.pem` (109
+certificates, 165 KB measured) and pip verifies against that file, so a corporate
+root added to `cacerts` covers the installer too and the machine has ONE trust
+decision. The artifact is 69 MB on darwin-arm64, against the ~300 MB a GraalPy
+context costs. `pip_test.clj` installs a real distribution from PyPI, imports it
+in a block, and pins that the shipped interpreter carries pip and nothing else.
 
-Two decisions came out of the measurement rather than out of taste, and both are
-recorded because the estimate that preceded them was wrong. Bundling everything a
-shim promises is 315 MB installed, not the 65-80 MB projected from wheel sizes.
-And a shipped package can shadow a shim that ANOTHER shim still needs: the real
-`tabulate` broke the pandas shim, which renders through it, so tabulate now
-travels with pandas in the on-demand list. The suite is the detector for that
-class of breakage and it is green at 111 tests / 595 assertions.
+One measurement is kept because the estimate that preceded it was wrong:
+bundling everything a shim promises is 315 MB installed, not the 65-80 MB
+projected from wheel sizes. A second finding survives the tier that produced it —
+a real package can shadow a shim that ANOTHER shim still needs (the real
+`tabulate` broke the pandas shim, which renders through it), so the full suite is
+the detector for that class of breakage, whoever runs the install.
 
 The artifact ships no bytecode. `native/vis-python/build.sh` strips every
 `__pycache__` after vendoring, and `vis_python_initialize` takes a
 `pycache_prefix` that `runtime/resolve-pycache-prefix` puts under the user's own
 directory — so what is shipped is source, what is per-machine is cache, and the
-tree stays exactly as it was hashed. Measured on darwin-arm64: 90 MB to 77 MB,
+tree stays exactly as it was hashed. Measured on darwin-arm64: 90 MB to 77 MB
+with the tier still bundled, 69 MB now that nothing is;
 and a cold import of ten stdlib modules costs 148 ms against 17 ms cached, paid
 once per machine rather than per run. Confinement adds the prefix to the
 writable roots for as long as a policy is in force, because that directory is
@@ -328,7 +346,7 @@ break an import — the import machinery swallows the PermissionError — it wou
 quietly pay the compile on every run. `bytecode_test.clj` pins all three: the
 shipped tree carries no `.pyc`, the interpreter reports the prefix the host
 resolved, and a module a confined block imports is cached under the prefix with
-no `__pycache__` beside its source. Suite: 114 tests / 602 assertions.
+no `__pycache__` beside its source. Suite: 116 tests / 583 assertions.
 
 Unknown, recorded rather than fixed: the cache directory is writable by a
 confined block, so a block could in principle leave a crafted `.pyc` there for a

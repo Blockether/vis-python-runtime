@@ -49,7 +49,7 @@
       (is (= pycache-prefix (ffi/eval-str session "__import__('sys').pycache_prefix"))))
     (testing "and the default is the user's own directory"
       (when-not (System/getenv runtime/pycache-prefix-env)
-        (is (str/ends-with? (str pycache-prefix) "/.vis/python-cache"))))))
+        (is (str/ends-with? (str pycache-prefix) "/.vis/python/pycache"))))))
 
 (harness/defbuilt-test cached-bytecode-lands-in-the-prefix-test
   (let [{:keys [pycache-prefix]} (ffi/initialize!)

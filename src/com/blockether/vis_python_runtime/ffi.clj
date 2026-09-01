@@ -136,7 +136,7 @@
 (defn initialize!
   "Start the embedded interpreter, once per process, and put `:source-paths`
    (plus the defaults) on `sys.path`. Returns
-   `{:library … :source-paths … :python-home … :pycache-prefix …}`.
+   `{:library … :source-paths … :python-home … :pycache-prefix … :packages …}`.
 
    `:python-home` is the vendored CPython tree the interpreter is rooted at,
    defaulting to `runtime/resolve-python-home` and passing through to
@@ -149,26 +149,45 @@
    pays the compile and writes it there; an explicit nil turns caching off and
    pays that compile on every run.
 
+   `:packages` is the directory pip installs into, defaulting to
+   `runtime/resolve-packages-dir` and APPENDED to `sys.path`: the artifact
+   bundles no package, so this is where every real distribution the sandbox ever
+   imports comes from. It is appended rather than inserted because a source root
+   the host passed is the caller's own code and outranks an installed
+   distribution of the same name.
+
    Starting is process-wide; a SESSION is not. Sessions are namespaces created
    on demand by `exec!`/`eval-str`, so many of them share one interpreter and
    one set of imported modules."
   ([] (initialize! {}))
-  ([{:keys [source-paths python-home pycache-prefix]
-     :or   {python-home ::vendored pycache-prefix ::default}}]
-   (let [home   (if (= ::vendored python-home)
-                  (runtime/resolve-python-home (:library @bridge))
-                  python-home)
-         pycache (if (= ::default pycache-prefix)
-                   (runtime/resolve-pycache-prefix)
-                   pycache-prefix)]
+  ([{:keys [source-paths python-home pycache-prefix packages]
+     :or   {python-home ::vendored pycache-prefix ::default packages ::default}}]
+   (let [home     (if (= ::vendored python-home)
+                    (runtime/resolve-python-home (:library @bridge))
+                    python-home)
+         pycache  (if (= ::default pycache-prefix)
+                    (runtime/resolve-pycache-prefix)
+                    pycache-prefix)
+         packages (if (= ::default packages)
+                    (runtime/resolve-packages-dir)
+                    packages)]
      (call "vis_python_initialize" (or home "") (or pycache ""))
      (let [roots (source-roots source-paths)]
-       (when (seq roots)
+       (when (or (seq roots) packages)
+       ;; Starting is idempotent, so wiring `sys.path` has to be: a suite or a
+       ;; host that calls this once per session would otherwise grow the path by
+       ;; a copy of every root each time, and a path with a hundred duplicates is
+       ;; a hundred stat calls on every import that misses.
          (call "vis_python_exec" default-session
                (str "import sys\n"
-                    (str/join "\n" (map #(str "sys.path.insert(0, " (pr-str %) ")") roots)))))
+                    "for _vis_root in [" (str/join ", " (map pr-str roots)) "]:\n"
+                    "    if _vis_root not in sys.path:\n"
+                    "        sys.path.insert(0, _vis_root)\n"
+                    (when packages
+                      (str "if " (pr-str packages) " not in sys.path:\n"
+                           "    sys.path.append(" (pr-str packages) ")\n")))))
        {:library (:library @bridge) :source-paths roots :python-home home
-        :pycache-prefix pycache}))))
+        :pycache-prefix pycache :packages packages}))))
 
 (defn version
   "The running interpreter's version string. Requires `initialize!`."
