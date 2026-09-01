@@ -232,3 +232,46 @@ One case changed shape on purpose: Vis proved the registry tracks the raw layer
 by reading through `raw` AFTER dropping the wrapper. CPython closes the whole
 stack when the wrapper dies, so the port asserts the identity — which is the
 contract — and reads while the stack is alive.
+
+## The Vis side, after the pin
+
+The ledger above is what MOVED here. This is what is left on the other side, in
+order, so the work survives an interrupted session. It lives here because vis'
+own `PLAN.md` holds an unfinished plan already, and one plan is in flight there
+at a time.
+
+Branch `cpython-runtime` in vis, off `origin/main`.
+
+1. **One door back into vis — DONE** (`9d7add1e`). `internal/python_host.clj`
+   registers `{session {name fn}}`, `dispatch` reads the `{"session","args"}`
+   envelope and answers `{"value"}`/`{"error"}`, `bind!` hands it to
+   `bind-host!`, `install-tools!` calls `install-tool!` per name.
+   `python_host_test` runs `print(await greet('world'))` through the real
+   interpreter. The `:local/root` pin has to become a released coordinate before
+   the PR.
+2. **`env_python.clj` over this runtime.** 3,686 lines collapse into a driver:
+   a session is a NAMESPACE STRING, host to guest is one `exec!` of a JSON
+   literal, guest to host is that door. Deleted there: `->py`/`->clj`,
+   `new-engine!` and the engine cache, the GC options, the GraalVM version
+   check, `retire-context!`, every Python-source string (this repository ships
+   each one as a file) and all shim machinery. The one gap: `run_block` answers
+   `{"stdout","error"}` with a one-line error, while vis renders a position and
+   a traceback — read back from the `__vis_err_pos__`/`__vis_err_obj__` this
+   runtime stashes for exactly that lookup.
+3. **Confinement, threads, network.** `confine!` from the session's roots,
+   `threads!` for cap and pool, `network_guard` + `proxy_env` as modules so real
+   `requests`/`httpx` route through vis' egress proxy and trust its CA. Two
+   things `sandbox_fs.clj` did have no equivalent yet: the per-path access gate
+   and the syntax gate on guest writes, with mutation reporting. Both want the
+   same seam — a write gate the audit hook asks the host about. The open
+   decision is that confinement is PROCESS state while sessions have different
+   roots: per-thread policy in C defaulting to DENY, or a process per session.
+4. **Delete the shims from vis** — `resources/vis-shims/`,
+   `resources/vis-python/` and the parity test here, per the deletion protocol —
+   and let `pip-install!` serve what a block imports.
+5. **Remove GraalPy from vis' tree**: `deps.edn` (root and extensions),
+   `build.clj`, the reachability metadata, workflows, the audit record and the
+   docs. About 150 files carry the token today.
+6. **The binary and the deployment**: a linux-x64 prebuild of this runtime,
+   `clojure -T:build native`, `-M:test-native`, then the gateway rollout the
+   private operations repository describes.
