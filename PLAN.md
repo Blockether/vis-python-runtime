@@ -17,11 +17,20 @@ Size is not the only cost. GraalPy does not refcount: dropping a wrapper runs no
 `resources/vis-python/async_runtime.py` has to carry a hand-maintained
 `__vis_handle_kind__` / `__vis_own__` registry.
 
-The Python side is barely coupled to the engine: a scan of `resources/vis-shims/`
-and `resources/vis-python/` for `import java`, `__graalpython__` and `polyglot`
-found 12 hits in 5 files, 8 of them in `async_runtime.py`, and
-`async_runtime.py:1411` already carries a "no `polyglot` module, e.g. non-GraalPy"
-branch. The ~1.5 MB of shims is portable as written.
+The engine's price is measured in `bench/pre-cpython.md`, not estimated: the
+binary is 612 MiB, a Python session costs ~270-320 MB RSS and 0.6-1.1 s of boot
+before user code runs, while the whole engine without Python answers in 0.01 s
+at 27 MB. Shims are not the cost — `pass` and `import numpy, pandas` differ by
+~0.3 s and ~27 MB.
+
+Coupling to the engine is small but wider than a first scan suggested: `import
+java`, `__graalpython__`, `polyglot`, `GraalPy` across `resources/vis-shims/`
+and `resources/vis-python/` is 35 hits in 11 files, and most of them are
+WORKAROUNDS that CPython deletes rather than ports — `hard_link.py` (GraalPy
+loses the destination), `process_redirect.py` (a file redirect degrades to
+INHERIT), `__vis_check_compile_traps__` (ordinary SyntaxErrors that arrive as
+uncatchable host faults), and the flush/ownership machinery that exists only
+because nothing refcounts. The ~1.5 MB of shims is portable as written.
 
 Alternatives considered:
 
@@ -72,12 +81,14 @@ rewrite of Vis' Python surface.
 Data: `packages/vis-agent/src/vis/__init__.py`, `resources/vis-python/`, all of
 `resources/vis-shims/`, and Vis' own `run_tests({"language": "python"})`.
 
-Acceptance criteria: that suite passes with no shim edited, and the 12
-GraalPy-specific call sites resolve through the already-present non-GraalPy
-branches.
+Acceptance criteria: that suite passes with no shim edited, the GraalPy-specific
+call sites resolve through the already-present non-GraalPy branches, and
+`bench/run.py` against the new engine beats every target row in
+`bench/pre-cpython.md`.
 
-Unknowns: how much of `async_runtime.py`'s ownership registry can be deleted
-once refcounting is real.
+Unknowns: how much of `async_runtime.py`'s ownership registry, the deterministic
+flush pass, `hard_link.py` and `process_redirect.py` can be deleted outright
+once refcounting and a real POSIX layer are underneath.
 
 ## Phase 4 — Ship it
 
@@ -94,5 +105,7 @@ for glibc/musl.
 
 ## State
 
-Phase 0 done: repository, resolution, version, build and test scaffolding.
+Phase 0 done: repository, resolution, version, build and test scaffolding, plus
+the measured GraalPy baseline in `bench/pre-cpython.md` and the harness that
+produced it.
 Phase 1 not started — it is the gate for everything after it.
