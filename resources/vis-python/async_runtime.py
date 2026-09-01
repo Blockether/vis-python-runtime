@@ -1311,11 +1311,43 @@ def __vis_pyify__(x):
         return x
 
 
+def __vis_slot_thunk__(index, aw):
+    # ONE gather slot, wrapped so its failure names the slot it came from.
+    # `gather` is all-or-nothing: without this the block sees a bare
+    # "ValueError: boom" and no way to tell which of three members raised it.
+    # The exception TYPE and traceback are left alone - only the message gains a
+    # `[i]` prefix, which is what every transport down to the block's error text
+    # carries.
+    def __vis_slot__():
+        try:
+            return __vis_settle_child__(aw)
+        except BaseException as exc:
+            __vis_mark_slot__(exc, index)
+            raise
+
+    return __vis_slot__
+
+
+def __vis_mark_slot__(exc, index):
+    marker = "[" + str(index) + "]"
+    try:
+        text = str(exc)
+    except BaseException:
+        return
+    if text.startswith(marker):
+        # A nested gather already attributed it; the INNER slot is the precise one.
+        return
+    try:
+        exc.args = (marker + " " + text,) + tuple(exc.args[1:])
+    except BaseException:
+        pass
+
+
 def __vis_settle_gather__(v):
     # Normal gather uses the host's bounded worker pool and aggregated failure
     # contract. `return_exceptions=True` settles each slot in guest Python so a
-    # native exception keeps its exact Python type instead of crossing the
-    # polyglot boundary as a host exception. This uncommon diagnostic mode is
+    # native exception keeps its exact Python type instead of crossing the host
+    # boundary. This uncommon diagnostic mode is
     # intentionally serial; ordinary gather remains concurrent.
     try:
         if v.return_exceptions:
@@ -1334,7 +1366,7 @@ def __vis_settle_gather__(v):
                     out.append(__vis_clean_exception__(failure))
                     failure = None
             return out
-        thunks = [(lambda a=a: __vis_settle_child__(a)) for a in v.aws]
+        thunks = [__vis_slot_thunk__(i, a) for i, a in enumerate(v.aws)]
         return __vis_pyify__(__vis_par__(thunks))
     except BaseException:
         # The host cancels outstanding futures, but user-retained guest Tasks would

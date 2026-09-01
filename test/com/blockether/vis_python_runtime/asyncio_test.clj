@@ -400,6 +400,20 @@ res = await gather(asyncio.to_thread(row, 'a'),
 print([type(v).__name__ for v in res])
 print(json.dumps(res, sort_keys=True))")
 
+(def ^:private slot-src
+  "async def ok(n):
+    return n
+
+
+async def boom():
+    raise ValueError('DISTINCT_BOOM_42')
+
+
+try:
+    await gather(ok(1), boom(), ok(3))
+except ValueError as exc:
+    print(type(exc).__name__, str(exc))")
+
 (harness/defbuilt-test asyncio-shim-test
   (testing "asyncio.run(main()) drives a coroutine that awaits tools"
     (is (= "<x><y>" (ran run-src))))
@@ -416,6 +430,13 @@ print(json.dumps(res, sort_keys=True))")
   (testing "an event-loop-only name refuses BY NAME and leaves hasattr answering"
     (is (= "True False True True" (ran refusal-src)))))
 
+(harness/defbuilt-test asyncio-gather-slot-test
+  ;; gather is all-or-nothing, so the ONE failure it raises has to say which
+  ;; member raised it: a bare "ValueError: boom" left three-way gathers with no
+  ;; way to tell [0] from [2], and the block's error text is the only thing the
+  ;; caller ever sees.
+  (testing "a failing member keeps its own type and message and names its slot"
+    (is (= "ValueError [1] DISTINCT_BOOM_42" (ran slot-src)))))
 (harness/defbuilt-test asyncio-sleep-test
   (testing "asyncio.sleep really sleeps and returns its result"
     (let [started  (System/nanoTime)
