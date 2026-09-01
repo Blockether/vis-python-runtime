@@ -87,8 +87,11 @@ docstring or a test can state lives there, not here.
   `vispython_drain_log` as NDJSON, because the host it is linked into already
   owns a file, a rotation and a format for them, and because pushing would mean
   calling out of a pool worker — through one pinned JVM thread, possibly under
-  the pool lock — which is the inversion the pool exists to avoid. A full ring
-  overwrites its oldest and reports the gap as `log_dropped`; recording is `:off`
+  the pool lock — which is the inversion the pool exists to avoid. The ring holds
+  1024 records and overwrites its oldest, reporting the gap as `log_dropped`, so
+  the Java half keeps taking: `Interpreter.drainTo` drains on its own thread —
+  the ONE downcall that does not take the interpreter's, because it touches no
+  PyObject and a block may hold that thread for minutes. Recording is `:off`
   until a host asks. An event carries counts, durations and names the HOST chose:
   a payload, a thunk's argument, a path a block asked for and the text of an
   exception are the block's, and this log ends up in files people paste into bug

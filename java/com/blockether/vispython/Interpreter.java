@@ -18,6 +18,9 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * The JVM half of the boundary: FFM downcalls into {@code native/vispython}.
@@ -313,6 +316,14 @@ public final class Interpreter {
   }
 
   /**
+   * Bytes one drain copies out. A record is at most 256 bytes, so a pass carries
+   * dozens of them and repeats until the ring is empty.
+   */
+  private static final int DRAIN_CAPACITY = 16384;
+
+  private static ScheduledExecutorService drainer;
+
+  /**
    * Take what has been recorded since the last call: NDJSON, one object per
    * line, oldest first.
    *
@@ -322,9 +333,68 @@ public final class Interpreter {
    * under its own lock. The answer is what fits one buffer and the rest waits,
    * so a host drains in a loop until the answer is empty; records lost to a
    * full ring arrive first, as a {@code log_dropped} event of their own.
+   *
+   * <p>This is the ONE downcall that does not take the interpreter's thread. It
+   * touches no PyObject and takes no GIL - only the log's own leaf mutex - and
+   * it must not queue behind the interpreter: a block holding that thread for
+   * minutes is exactly when these records matter.
    */
   public static String drainLog() {
-    return call("vispython_drain_log");
+    MethodHandle handle = handles().get("vispython_drain_log");
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment out = arena.allocate(DRAIN_CAPACITY);
+      int status;
+      try {
+        status = (int) handle.invokeExact(out, DRAIN_CAPACITY);
+      } catch (RuntimeException | Error e) {
+        throw e;
+      } catch (Throwable t) {
+        throw new VisPythonException("vis-python: vispython_drain_log did not invoke: " + t,
+            Map.of("symbol", "vispython_drain_log"), t);
+      }
+      if (status < 0) {
+        throw new VisPythonException("vis-python: the records could not be drained",
+            Map.of("symbol", "vispython_drain_log", "status", status));
+      }
+      return out.getString(0);
+    }
+  }
+
+  /** Drain into {@code sink} every 250 ms. */
+  public static void drainTo(Consumer<String> sink) {
+    drainTo(sink, 250);
+  }
+
+  /**
+   * Drain continuously into {@code sink}, which receives NDJSON text. This is
+   * how a host is meant to read the runtime: the ring drops its OLDEST when
+   * nobody takes them, so somebody has to keep taking. Each pass empties the
+   * ring. {@code null} stops the drainer and a second call replaces the first.
+   */
+  public static synchronized void drainTo(Consumer<String> sink, long everyMillis) {
+    if (drainer != null) {
+      drainer.shutdownNow();
+      drainer = null;
+    }
+    if (sink == null) {
+      return;
+    }
+    drainer = Executors.newSingleThreadScheduledExecutor(runnable -> {
+      Thread thread = new Thread(runnable, "vis-python-log");
+      thread.setDaemon(true);
+      return thread;
+    });
+    drainer.scheduleWithFixedDelay(() -> {
+      try {
+        for (String text = drainLog(); !text.isEmpty(); text = drainLog()) {
+          sink.accept(text);
+        }
+      } catch (RuntimeException | Error ignored) {
+        // Neither a sink that threw nor an interpreter that went away may kill
+        // the drainer: the next pass takes what this one left, and a ring that
+        // overflowed meanwhile says so itself.
+      }
+    }, everyMillis, everyMillis, TimeUnit.MILLISECONDS);
   }
 
   /** Evaluate {@code code} as an expression, answering {@code str(result)}. */

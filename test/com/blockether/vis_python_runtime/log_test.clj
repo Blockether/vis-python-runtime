@@ -18,6 +18,7 @@
            ;; Recording is PROCESS state and a drained record is gone: leave both
            ;; the way the next case expects to find them.
            (when harness/built?
+             (runtime/logs! nil)
              (runtime/logging! :off)
              (runtime/drain-log!))
            (harness/close-sessions!)))))
@@ -62,5 +63,37 @@
   (testing "a ring nobody drains overwrites its oldest and reports the gap"
     (let [session (harness/block-session)]
       (runtime/logging! :debug)
-      (dotimes [_ 300] (runtime/run session "1"))
-      (is (str/starts-with? (drained) "{\"level\":\"warn\",\"event\":\"log_dropped\"")))))
+      (dotimes [_ 1200] (runtime/run session "1"))
+      (let [log   (drained)
+            lines (str/split-lines log)]
+        (is (str/starts-with? log "{\"level\":\"warn\",\"event\":\"log_dropped\""))
+        ;; 1024 records: a quarter of a megabyte that never grows, and enough
+        ;; that a host draining on its own schedule loses nothing.
+        (is (= 1024 (count (filter #(str/includes? % "\"event\":\"run\"") lines))))))))
+
+(harness/defbuilt-test drain-beside-the-interpreter-test
+  (testing "a block holding the interpreter does not hold its own records back"
+    (let [session (harness/block-session)]
+      (runtime/logging! :info)
+      (let [running (future (harness/block session "import time\ntime.sleep(1.5)"))]
+        (Thread/sleep 300)
+        (let [began (System/nanoTime)]
+          (runtime/drain-log!)
+          (is (< (/ (- (System/nanoTime) began) 1e6) 500)
+              "the drain answered while the block still had the interpreter"))
+        @running))))
+
+(harness/defbuilt-test drain-to-test
+  (testing "a host keeps taking on its own, because the ring drops what nobody took"
+    (let [session (harness/block-session)
+          seen    (atom [])]
+      (runtime/logging! :info)
+      (runtime/logs! #(swap! seen conj %) 25)
+      (try
+        (harness/block session "print('watched')")
+        (is (loop [tries 60]
+              (cond (str/includes? (str/join @seen) "\"event\":\"block\"") true
+                    (zero? tries)                                        false
+                    :else (do (Thread/sleep 50) (recur (dec tries)))))
+            "the drainer handed the block's record over without being asked")
+        (finally (runtime/logs! nil))))))

@@ -24,7 +24,8 @@
    `prebuilds/<platform>/<file>` that `com.blockether/vis-python-runtime-native-<platform>`
    carries. A failure anywhere below is a `VisPythonException` whose `.data`
    names the symbol, status, platform or path it is about."
-  (:import [com.blockether.vispython HostFunction Interpreter Locations Native Pip]))
+  (:import [com.blockether.vispython HostFunction Interpreter Locations Native Pip]
+           [java.util.function Consumer]))
 
 (def native-path-env
   "Name of the environment variable that overrides library resolution."
@@ -169,6 +170,20 @@
    arrive first as a `log_dropped` event."
   []
   (Interpreter/drainLog))
+
+(defn logs!
+  "Drain the runtime's records continuously into `sink`, a function of one NDJSON
+   string, every `every-ms` (250 by default). `nil` stops it and a second call
+   replaces the first.
+
+   This is how a host reads the runtime rather than `drain-log!` by hand: the
+   ring drops its OLDEST record when nobody takes it, so somebody has to keep
+   taking. Draining does not use the interpreter's thread, so a block that runs
+   for minutes does not hold its own records back."
+  ([sink] (logs! sink 250))
+  ([sink every-ms]
+   (Interpreter/drainTo (when sink (reify Consumer (accept [_ text] (sink text))))
+                        (long every-ms))))
 
 (defn eval-str
   "Evaluate `code` as a Python EXPRESSION, answering `str(result)`."

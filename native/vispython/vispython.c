@@ -96,9 +96,14 @@ static int vis_py_take_error(char *out, int cap)
  * so recording under any other lock stays safe.
  *
  * The ring is bounded and overwrites its OLDEST record when nobody drains,
- * because a diagnostic buffer that grows without a reader is a leak with a
- * good excuse. Drops are counted and reported at the head of the next drain,
- * so a gap in the log names itself instead of lying by omission.
+ * because a diagnostic buffer that grows without a reader is a leak with a good
+ * excuse. 1024 records of 256 bytes is a quarter of a megabyte that never grows,
+ * and enough that a host draining on its own schedule loses nothing; the host
+ * that owns this one drains continuously (`Interpreter.drainTo`), off the
+ * interpreter's thread, since a block may hold that thread for minutes and its
+ * records are exactly the ones worth having. Drops are counted and reported at
+ * the head of the next drain, so a gap in the log names itself instead of lying
+ * by omission.
  *
  * NEVER a guest value. An event carries counts, durations and names the HOST
  * chose; a payload, a thunk's argument, a path a block asked for and the text
@@ -106,7 +111,7 @@ static int vis_py_take_error(char *out, int cap)
  * into bug reports.
  * ------------------------------------------------------------------------ */
 
-#define VIS_PY_LOG_SLOTS 256
+#define VIS_PY_LOG_SLOTS 1024
 #define VIS_PY_LOG_LINE 256
 
 #define VIS_PY_LOG_OFF 0
