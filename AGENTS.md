@@ -21,8 +21,10 @@ docstring or a test can state lives there, not here.
   green JVM suite never catches: it fails in a user's terminal. So new bridge
   work, process pinning, the trust export and pip go in Java, and
   `src/com/blockether/vis_python_runtime.clj` stays a skin: argument shapes,
-  keyword maps, EDN. A Clojure function there that is longer than three lines is
-  a sign the logic belongs on the other side. Java is compiled by
+  keyword maps, EDN. A Clojure function there that is longer than three lines of
+  CODE is a sign the logic belongs on the other side, and
+  `vis-python-runtime-test/skin-test` fails when the ratio slips or a body grows.
+  Java is compiled by
   `clojure -T:build javac` into `target/classes`, which is on `:paths`.
 - **No runtime dependencies in `deps.edn`.** This library is linked into someone
   else's GraalVM native image; every dependency declared here becomes reachable

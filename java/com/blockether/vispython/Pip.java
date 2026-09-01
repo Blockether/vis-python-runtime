@@ -49,6 +49,9 @@ public final class Pip {
   /** What an install did: pip's own verdict, its output, and the argv that ran. */
   public record Result(int exit, String out, List<String> command) {}
 
+  /** How long an install may take before it is killed, when the caller says 0. */
+  public static final long DEFAULT_TIMEOUT_MS = 600_000L;
+
   /**
    * Every certificate the JVM trusts, from the DEFAULT trust manager - so a root
    * an operator added to {@code cacerts}, or pointed at with
@@ -141,12 +144,11 @@ public final class Pip {
    *
    * <p>Nulls take the runtime's own answers: the vendored interpreter, the
    * packages directory, the bytecode cache prefix, and the JVM's certificates
-   * exported to a file.
+   * exported to a file. A {@code timeoutMs} of 0 takes {@link #DEFAULT_TIMEOUT_MS}.
    */
   public static Result install(String python, String target, String cert, String pycachePrefix,
       boolean upgrade, long timeoutMs, List<String> specs) {
-    String interpreter = python != null ? python
-        : Locations.pythonExecutable(Locations.pythonHome(Interpreter.library().path()));
+    String interpreter = python != null ? python : Interpreter.pythonExecutable();
     String directory = target != null ? target : Locations.packagesDir();
     String certificates = cert != null ? cert : certificatesPem();
     String cache = pycachePrefix != null ? pycachePrefix : Locations.pycachePrefix();
@@ -179,7 +181,8 @@ public final class Pip {
       try (InputStream in = process.getInputStream()) {
         out = new String(in.readAllBytes(), StandardCharsets.UTF_8);
       }
-      boolean done = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
+      boolean done = process.waitFor(timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS,
+          TimeUnit.MILLISECONDS);
       if (!done) {
         process.destroyForcibly();
         return new Result(-1, out, command);

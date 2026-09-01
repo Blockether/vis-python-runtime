@@ -75,7 +75,7 @@
   "The vendored CPython tree to root the interpreter at, or nil to let CPython
    search for itself. `VIS_PYTHON_HOME` wins; otherwise it is the `python/`
    directory beside the resolved cdylib."
-  ([] (resolve-python-home (resolve-library)))
+  ([] (Interpreter/pythonHome))
   ([{:keys [path]}] (Locations/pythonHome path)))
 
 (defn resolve-packages-dir
@@ -93,7 +93,7 @@
 
 (defn resolve-python-executable
   "The vendored interpreter's own executable, for the host to RUN."
-  ([] (resolve-python-executable (resolve-python-home)))
+  ([] (Interpreter/pythonExecutable))
   ([python-home] (Locations/pythonExecutable python-home)))
 
 (defn initialize!
@@ -101,18 +101,16 @@
    (plus the defaults) on `sys.path`. Answers
    `{:library … :source-paths … :python-home … :pycache-prefix … :packages …}`.
 
-   `:python-home`, `:pycache-prefix` and `:packages` default to what this
-   namespace resolves; an explicit nil turns each one off — CPython's own
-   standard-library search, no bytecode cache, no package directory. Starting is
-   process-wide and idempotent; a SESSION is not."
+   `:python-home`, `:pycache-prefix` and `:packages` default to what the runtime
+   resolves; an explicit nil turns each one off — CPython's own standard-library
+   search, no bytecode cache, no package directory. Starting is process-wide and
+   idempotent; a SESSION is not."
   ([] (initialize! {}))
   ([{:keys [source-paths python-home pycache-prefix packages]
-     :or   {python-home ::default pycache-prefix ::default packages ::default}}]
-   (let [default  (fn [value fallback] (if (= ::default value) (fallback) value))
-         startup  (Interpreter/initialize (vec source-paths)
-                                          (default python-home #(resolve-python-home))
-                                          (default pycache-prefix resolve-pycache-prefix)
-                                          (default packages resolve-packages-dir))]
+     :or   {python-home     Interpreter/DEFAULT
+            pycache-prefix  Interpreter/DEFAULT
+            packages        Interpreter/DEFAULT}}]
+   (let [startup (Interpreter/initialize (vec source-paths) python-home pycache-prefix packages)]
      {:library        (.library startup)
       :source-paths   (vec (.sourcePaths startup))
       :python-home    (.pythonHome startup)
@@ -230,9 +228,7 @@
    and the exported certificates. A non-zero `:exit` is data, not a throw,
    because the caller is a CLI that has to print pip's own words."
   ([specs] (pip-install! {} specs))
-  ([{:keys [python target cert pycache-prefix upgrade? timeout-ms]
-     :or   {timeout-ms 600000}}
-    specs]
+  ([{:keys [python target cert pycache-prefix upgrade? timeout-ms]} specs]
    (let [result (Pip/install python target cert pycache-prefix (boolean upgrade?)
-                             (long timeout-ms) (vec specs))]
+                             (long (or timeout-ms 0)) (vec specs))]
      {:exit (.exit result) :out (.out result) :command (vec (.command result))})))

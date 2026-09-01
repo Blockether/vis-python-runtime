@@ -1,5 +1,6 @@
 (ns com.blockether.vis-python-runtime-test
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [com.blockether.vis-python-runtime :as runtime])
   (:import [com.blockether.vispython VisPythonException]))
@@ -38,3 +39,26 @@
         (is (= "linux-riscv" (get data "platform")))
         (is (= runtime/native-path-env (get data "env")))
         (is (str/starts-with? (get data "resource") "prebuilds/linux-riscv/"))))))
+
+(defn- line-count [dir extension]
+  (->> (file-seq (io/file dir))
+       (filter #(str/ends-with? (.getName %) extension))
+       (map #(count (remove str/blank? (str/split-lines (slurp %)))))
+       (reduce + 0)))
+
+;; The bridge is Java and this namespace is its skin: argument shapes, keyword
+;; maps, EDN. Nothing else is a compiler error, so it is a test.
+(deftest skin-test
+  (let [java  (line-count "java" ".java")
+        clj   (line-count "src" ".clj")
+        forms (->> (str/split (slurp "src/com/blockether/vis_python_runtime.clj") #"\n(?=\()")
+                   (filter #(str/starts-with? % "(defn"))
+                   (map (juxt #(first (str/split-lines %))
+                              #(count (remove str/blank? (str/split-lines %))))))]
+    (testing "most of the runtime is Java"
+      (is (<= 4.0 (/ (double java) clj))
+          (str "java " java " lines against clojure " clj " - logic belongs in the bridge")))
+    (testing "no function in the skin grows a body"
+      ;; The bound counts the docstring too, which is where a skin's lines belong.
+      (is (empty? (map first (filter #(< 22 (second %)) forms)))
+          (str "too long: " (pr-str (map first (filter #(< 22 (second %)) forms))))))))

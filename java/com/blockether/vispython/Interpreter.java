@@ -52,6 +52,12 @@ public final class Interpreter {
   public static final String DEFAULT_SESSION = "__main__";
 
   /**
+   * Ask {@link #initialize} to resolve a location itself. Absence and OFF are
+   * different answers - null means "no python home", "no cache", "no packages" -
+   * so absence needs a value of its own. No path contains a NUL.
+   */
+  public static final String DEFAULT = "\u0000vispython-default";
+  /**
    * Bytes reserved for a result or an error message. Results that matter travel
    * as handles; this buffer only has to hold a repr or an exception line.
    */
@@ -202,17 +208,19 @@ public final class Interpreter {
   /**
    * Start the embedded interpreter, once per process, and wire {@code sys.path}.
    *
-   * <p>A null {@code pythonHome} starts the interpreter with CPython's own
-   * standard-library search; a null {@code pycachePrefix} leaves caching where
-   * CPython would put it; a null {@code packages} adds no package directory.
-   * Starting is process-wide; a SESSION is not.
+   * <p>Each location takes one of three answers: {@link #DEFAULT} resolves what
+   * this runtime decides, null turns it OFF - CPython's own standard-library
+   * search, caching where CPython would put it, no package directory - and any
+   * other string is used as given. Starting is process-wide; a SESSION is not.
    */
   public static Startup initialize(List<String> sourcePaths, String pythonHome,
       String pycachePrefix, String packages) {
-    call("vispython_initialize", pythonHome == null ? "" : pythonHome,
-        pycachePrefix == null ? "" : pycachePrefix);
+    String home = DEFAULT.equals(pythonHome) ? Locations.pythonHome(library().path()) : pythonHome;
+    String cache = DEFAULT.equals(pycachePrefix) ? Locations.pycachePrefix() : pycachePrefix;
+    String target = DEFAULT.equals(packages) ? Locations.packagesDir() : packages;
+    call("vispython_initialize", home == null ? "" : home, cache == null ? "" : cache);
     List<String> roots = Locations.sourceRoots(sourcePaths);
-    if (!roots.isEmpty() || packages != null) {
+    if (!roots.isEmpty() || target != null) {
       // Starting is idempotent, so wiring sys.path has to be: a host that calls
       // this once per session would otherwise grow the path by a copy of every
       // root each time, and a path with a hundred duplicates is a hundred stat
@@ -225,13 +233,23 @@ public final class Interpreter {
       wiring.append("]:\n");
       wiring.append("    if _vis_root not in sys.path:\n");
       wiring.append("        sys.path.insert(0, _vis_root)\n");
-      if (packages != null) {
-        wiring.append("if ").append(literal(packages)).append(" not in sys.path:\n");
-        wiring.append("    sys.path.append(").append(literal(packages)).append(")\n");
+      if (target != null) {
+        wiring.append("if ").append(literal(target)).append(" not in sys.path:\n");
+        wiring.append("    sys.path.append(").append(literal(target)).append(")\n");
       }
       call("vispython_exec", DEFAULT_SESSION, wiring.toString());
     }
-    return new Startup(library().path(), roots, pythonHome, pycachePrefix, packages);
+    return new Startup(library().path(), roots, home, cache, target);
+  }
+
+  /** The vendored CPython tree beside the resolved cdylib, or null for none. */
+  public static String pythonHome() {
+    return Locations.pythonHome(library().path());
+  }
+
+  /** The vendored interpreter's own executable, for the host to RUN. */
+  public static String pythonExecutable() {
+    return Locations.pythonExecutable(pythonHome());
   }
 
   /** The running interpreter's version string. Requires a start. */
