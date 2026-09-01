@@ -39,12 +39,11 @@ import java.util.function.Consumer;
  * downcall below is an {@code invokeExact} against a signature the compiler
  * knows, not a reflective invocation the image would have to be told about.
  *
- * <p>EVERY call runs on ONE dedicated thread. {@code Py_InitializeEx} leaves the
- * GIL held by the thread that started the interpreter and never releases it, so
- * a call arriving on another thread walks into CPython without the lock and
- * crashes the process rather than throwing. Pinning is therefore part of the
- * contract, not an optimization; the thread is a daemon so it never holds the
- * JVM open.
+ * <p>Calls arrive on the CALLING thread. The C entry points take the GIL
+ * themselves, so nothing serializes on a bridge thread and a session never
+ * queues behind another session's host call. Two exceptions live on one pinned
+ * daemon thread, because CPython binds them to whoever started it: starting the
+ * interpreter and finalizing it.
  *
  * <p>Nothing is loaded until the first call, and a checkout with no build simply
  * throws from {@link Native#library()}.
@@ -61,8 +60,10 @@ public final class Interpreter {
    */
   public static final String DEFAULT = "\u0000vispython-default";
   /**
-   * Bytes reserved for a result or an error message. Results that matter travel
-   * as handles; this buffer only has to hold a repr or an exception line.
+   * Bytes reserved for an answer or an error message. Most answers are a repr,
+   * a status word or an exception line and fit here with room to spare; a block
+   * that printed a megabyte does not, so an answer too big for this buffer is
+   * kept by the runtime and fetched whole - see {@code vispython_take_result}.
    */
   private static final int MESSAGE_CAPACITY = 8192;
 
@@ -83,10 +84,13 @@ public final class Interpreter {
       Map.entry("vispython_run", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_run_block", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_confine", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_network", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_host", descriptor(ValueLayout.ADDRESS)),
       Map.entry("vispython_threads", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_logging", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_drain_log", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_take_result", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_interrupt", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_finalize", descriptor()));
 
   private static final ExecutorService THREAD = Executors.newSingleThreadExecutor(runnable -> {
@@ -94,7 +98,6 @@ public final class Interpreter {
     thread.setDaemon(true);
     return thread;
   });
-
   /**
    * A reply that did not fit the buffer C offered, per thread. C grows its
    * buffer and calls straight back, on the same thread, for the same arguments -
@@ -164,35 +167,63 @@ public final class Interpreter {
    * text on success and throwing with it on a negative status.
    */
   private static String call(String symbol, String... args) {
+    return invoke(symbol, args);
+  }
+
+  private static String invoke(String symbol, String... args) {
     MethodHandle handle = handles().get(symbol);
-    return onRuntimeThread(() -> {
-      try (Arena arena = Arena.ofConfined()) {
-        MemorySegment out = arena.allocate(MESSAGE_CAPACITY);
-        int status;
-        try {
-          status = switch (args.length) {
-            case 0 -> (int) handle.invokeExact(out, MESSAGE_CAPACITY);
-            case 1 -> (int) handle.invokeExact(arena.allocateFrom(args[0]), out, MESSAGE_CAPACITY);
-            case 2 -> (int) handle.invokeExact(arena.allocateFrom(args[0]),
-                arena.allocateFrom(args[1]), out, MESSAGE_CAPACITY);
-            case 3 -> (int) handle.invokeExact(arena.allocateFrom(args[0]),
-                arena.allocateFrom(args[1]), arena.allocateFrom(args[2]), out, MESSAGE_CAPACITY);
-            default -> throw new IllegalArgumentException(symbol + " takes no " + args.length + " arguments");
-          };
-        } catch (RuntimeException | Error e) {
-          throw e;
-        } catch (Throwable t) {
-          throw new VisPythonException("vis-python: " + symbol + " did not invoke: " + t,
-              Map.of("symbol", symbol), t);
-        }
-        String text = out.getString(0);
-        if (status < 0) {
-          throw new VisPythonException("vis-python: " + (text.isEmpty() ? symbol : text),
-              Map.of("symbol", symbol, "status", status, "message", text));
-        }
-        return text;
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment out = arena.allocate(MESSAGE_CAPACITY);
+      int status;
+      try {
+        status = switch (args.length) {
+          case 0 -> (int) handle.invokeExact(out, MESSAGE_CAPACITY);
+          case 1 -> (int) handle.invokeExact(arena.allocateFrom(args[0]), out, MESSAGE_CAPACITY);
+          case 2 -> (int) handle.invokeExact(arena.allocateFrom(args[0]),
+              arena.allocateFrom(args[1]), out, MESSAGE_CAPACITY);
+          case 3 -> (int) handle.invokeExact(arena.allocateFrom(args[0]),
+              arena.allocateFrom(args[1]), arena.allocateFrom(args[2]), out, MESSAGE_CAPACITY);
+          default -> throw new IllegalArgumentException(symbol + " takes no " + args.length + " arguments");
+        };
+      } catch (RuntimeException | Error e) {
+        throw e;
+      } catch (Throwable t) {
+        throw new VisPythonException("vis-python: " + symbol + " did not invoke: " + t,
+            Map.of("symbol", symbol), t);
       }
-    });
+      String text = out.getString(0);
+      if (status < 0) {
+        throw new VisPythonException("vis-python: " + (text.isEmpty() ? symbol : text),
+            Map.of("symbol", symbol, "status", status, "message", text));
+      }
+      // The status is the answer's WHOLE length: at or past the buffer it holds a
+      // prefix, and the rest waits in the runtime. Calling again to make room
+      // would run the block a second time, so the text is fetched, not remade.
+      return status < MESSAGE_CAPACITY ? text : takeResult(symbol, status);
+    }
+  }
+
+  /** Fetch the answer a call could not fit, whole, in one buffer of its size. */
+  private static String takeResult(String symbol, int length) {
+    MethodHandle handle = handles().get("vispython_take_result");
+    int capacity = length + 1;
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment out = arena.allocate(capacity);
+      int status;
+      try {
+        status = (int) handle.invokeExact(out, capacity);
+      } catch (RuntimeException | Error e) {
+        throw e;
+      } catch (Throwable t) {
+        throw new VisPythonException("vis-python: vispython_take_result did not invoke: " + t,
+            Map.of("symbol", symbol), t);
+      }
+      if (status < 0) {
+        throw new VisPythonException("vis-python: the answer of " + symbol + " was not kept",
+            Map.of("symbol", symbol, "status", status, "length", length));
+      }
+      return out.getString(0);
+    }
   }
 
   /** A Python string literal for a path or a name the host decides. */
@@ -224,7 +255,8 @@ public final class Interpreter {
     String home = DEFAULT.equals(pythonHome) ? Locations.pythonHome(library().path()) : pythonHome;
     String cache = DEFAULT.equals(pycachePrefix) ? Locations.pycachePrefix() : pycachePrefix;
     String target = DEFAULT.equals(packages) ? Locations.packagesDir() : packages;
-    call("vispython_initialize", home == null ? "" : home, cache == null ? "" : cache);
+    onRuntimeThread(() -> invoke("vispython_initialize", home == null ? "" : home,
+        cache == null ? "" : cache));
     List<String> roots = Locations.sourceRoots(sourcePaths);
     if (!roots.isEmpty() || target != null) {
       // Starting is idempotent, so wiring sys.path has to be: a host that calls
@@ -242,16 +274,6 @@ public final class Interpreter {
       if (target != null) {
         wiring.append("if ").append(literal(target)).append(" not in sys.path:\n");
         wiring.append("    sys.path.append(").append(literal(target)).append(")\n");
-      }
-      String shims = Sources.shims();
-      if (shims != null) {
-        // The runtime finds a shim by PATH, and its own default is derived from
-        // where `vis_runtime.py` sits - true in a checkout, false the moment the
-        // sources are extracted somewhere flat. So the artifact says where they
-        // are; `setdefault` keeps an explicit environment override winning.
-        wiring.append("import os\n");
-        wiring.append("os.environ.setdefault(\"VIS_PYTHON_SHIMS_PATH\", ")
-            .append(literal(shims)).append(")\n");
       }
       call("vispython_exec", DEFAULT_SESSION, wiring.toString());
     }
@@ -294,6 +316,22 @@ public final class Interpreter {
   }
 
   /**
+   * Grant or refuse the guest the network as a whole, answering the flag in force.
+   *
+   * <p>This is a CAPABILITY and not part of confinement: with {@code allowed}
+   * false the audit hook refuses every socket, name lookup and connection, so a
+   * session whose host granted no egress cannot even learn an address. WHICH hosts
+   * a session with egress may reach is the host proxy's decision, made where the
+   * request is visible; nothing here can see a URL. {@code refusal} is the sentence
+   * the guest reads; empty keeps the library's own. Like confinement this is
+   * PROCESS state, so it REPLACES the flag for every session.
+   */
+  public static boolean network(boolean allowed, String refusal) {
+    String answer = call("vispython_network", allowed ? "1" : "0", refusal == null ? "" : refusal);
+    return !"0".equals(answer.trim());
+  }
+
+  /**
    * Set the process's thread policy, answering the {@code {cap, workers, quota}}
    * in force; a zero keeps what is already set.
    *
@@ -315,6 +353,25 @@ public final class Interpreter {
     String[] numbers = answer.trim().split("\\s+");
     return new int[] {Integer.parseInt(numbers[0]), Integer.parseInt(numbers[1]),
         Integer.parseInt(numbers[2])};
+  }
+
+  /**
+   * Raise {@code KeyboardInterrupt} in the thread running guest code, answering
+   * whether a thread state took it.
+   *
+   * <p>The one way out of a runaway block. A host future's cancel only reaches
+   * the JAVA side and {@code Thread.interrupt} is invisible to guest code, so a
+   * spinning {@code while True:} burns a core until the process dies. CPython
+   * delivers the exception at a bytecode boundary: the block unwinds, its
+   * {@code finally} blocks run and the session stays usable. A thread blocked in
+   * a host call or inside C sees it only when it returns, which is what a
+   * {@code false} - and a block that keeps running - means.
+   *
+   * <p>It takes the GIL the running block keeps dropping at its switch interval,
+   * so it must never be called from the thread it interrupts.
+   */
+  public static boolean interrupt() {
+    return "1".equals(call("vispython_interrupt").trim());
   }
 
   /**
@@ -347,10 +404,9 @@ public final class Interpreter {
    * so a host drains in a loop until the answer is empty; records lost to a
    * full ring arrive first, as a {@code log_dropped} event of their own.
    *
-   * <p>This is the ONE downcall that does not take the interpreter's thread. It
-   * touches no PyObject and takes no GIL - only the log's own leaf mutex - and
-   * it must not queue behind the interpreter: a block holding that thread for
-   * minutes is exactly when these records matter.
+   * <p>It touches no PyObject and takes no GIL - only the log's own leaf mutex -
+   * so it answers while a block still runs, which is exactly when these records
+   * matter.
    */
   public static String drainLog() {
     MethodHandle handle = handles().get("vispython_drain_log");
@@ -452,12 +508,6 @@ public final class Interpreter {
         eval(session, "vis_runtime.install(globals(), " + literal(session) + ")"));
   }
 
-  /** Make the sandbox shim {@code name} importable, answering its source file. */
-  public static String installShim(String session, String name) {
-    exec(session, "import vis_runtime");
-    return eval(session, "vis_runtime.install_shim(" + literal(name) + ")");
-  }
-
   /**
    * Execute the sandbox module {@code name} INTO the session's own globals,
    * answering the source file that ran. This is how a CONFIGURED part of the
@@ -478,6 +528,17 @@ public final class Interpreter {
   public static String installTool(String session, String name) {
     exec(session, "import vis_runtime");
     return eval(session, "vis_runtime.install_tool(globals(), " + literal(name) + ")");
+  }
+
+  /**
+   * Bind the host tool {@code name} into {@code session} as an ORDINARY
+   * function, answering the name bound. Same boundary as {@link #installTool},
+   * without the deferral: trusted host-side Python calls a tool and expects its
+   * answer, having no block runner to settle a thunk for it.
+   */
+  public static String installSyncTool(String session, String name) {
+    exec(session, "import vis_runtime");
+    return eval(session, "vis_runtime.install_sync_tool(globals(), " + literal(name) + ")");
   }
 
   /**
@@ -561,7 +622,6 @@ public final class Interpreter {
     }
     return hostStub;
   }
-
   /**
    * Bind {@code function} as THE host this interpreter calls back into; null
    * unbinds. One stub behind one function: rebinding swaps the function, never

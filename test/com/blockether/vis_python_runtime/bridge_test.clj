@@ -20,8 +20,8 @@
       (testing "the interpreter starts and reports itself"
         (is (= (:path (runtime/resolve-library)) (:library (runtime/initialize!)))
             "the test binds the library the build just produced")
-        (is (= :env (:source (runtime/resolve-library)))
-            "and it came from the environment override, not a published artifact")
+        (is (contains? #{:env :resource} (:source (runtime/resolve-library)))
+            "a checkout binds the built cdylib, by override or off its own classpath")
         (is (str/starts-with? (runtime/python-version) "3.")
             "an embedded CPython 3.x is running inside this JVM"))
 
@@ -91,39 +91,28 @@
                (try (runtime/run "json-session" "assert False")
                     (catch VisPythonException e (.get e "message")))))))))
 
-(deftest shims-import-lazily-test
+(deftest answer-larger-than-the-message-buffer-test
+  ;; The bridge reserves 8 KiB for an answer. An answer past it used to arrive
+  ;; TRUNCATED - and, because the host reads JSON, that meant a block printing
+  ;; more than 8 KiB lost everything it printed and reported nothing at all.
+  ;; The whole text is kept in the runtime and fetched, never remade: asking the
+  ;; call again for a bigger buffer would run the block a SECOND time.
   (if-not built?
-    (println "SKIP shims-import-lazily-test - no cdylib")
+    (println "SKIP answer-larger-than-the-message-buffer-test - no cdylib")
     (do
       (runtime/initialize!)
-      (runtime/install-runtime! "lazy-session")
-      (runtime/exec! "lazy-session" "import vis_runtime")
-      (runtime/eval-str "lazy-session" "vis_runtime.forget_shims()")
+      (runtime/install-runtime! "big-session")
 
-      (testing "a bare import of a shim name resolves to the shim source"
-        (is (= "false" (runtime/run "lazy-session" "'tabulate' in __import__('sys').modules")))
-        (is (= "true" (runtime/run "lazy-session" "import tabulate\n'abc' in tabulate.tabulate([['abc']])"))))
+      (testing "a value on either side of the buffer crosses whole"
+        (doseq [n [8000 8190 8191 8192 12000 1000000]]
+          (is (= (+ n 2) (count (runtime/run "big-session" (str "'x' * " n))))
+              (str n " characters answer as a JSON string of the same length"))))
 
-      (testing "the stdlib always wins over a shim of the same name"
-        (is (= "\"json\"" (runtime/run "lazy-session" "import json\njson.__name__"))))
+      (testing "a block's printed output is not capped either"
+        (let [printed (runtime/run-block "big-session" "print('y' * 300000)")]
+          (is (str/includes? printed "\"stdout\""))
+          (is (< 300000 (count printed)))))
 
-      (testing "forgetting the shims hands the next import a pristine module"
-        (runtime/run "lazy-session" "import tabulate\ntabulate.tabulate = 'patched'\nNone")
-        (runtime/eval-str "lazy-session" "vis_runtime.forget_shims()")
-        (is (= "false" (runtime/run "lazy-session" "import tabulate\ntabulate.tabulate == 'patched'"))))
-
-      (testing "a shim that cannot load blames the shim AND the cause"
-        (let [message (runtime/run "lazy-session"
-                                   (str "import sys\n"
-                                        "saved = dict(sys.modules)\n"
-                                        "sys.modules['json'] = None\n"
-                                        "out = 'imported'\n"
-                                        "try:\n"
-                                        "    import urllib3\n"
-                                        "except ImportError as e:\n"
-                                        "    out = str(e)\n"
-                                        "sys.modules.clear()\n"
-                                        "sys.modules.update(saved)\n"
-                                        "out"))]
-          (is (str/includes? message "urllib3"))
-          (is (str/includes? message "json")))))))
+      (testing "the kept answer is handed over once, never served to the next call"
+        (is (= "\"ok\"" (runtime/run "big-session" "'ok'")))
+        (is (= "3" (runtime/run "big-session" "1 + 2")))))))

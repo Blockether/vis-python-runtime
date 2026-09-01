@@ -34,8 +34,38 @@
 static int vis_py_started = 0;
 static int vis_py_inittab = 0;
 
-/* Copy a NUL-terminated UTF-8 string into the caller's buffer, truncating to
-   fit. Returns the byte count written, not counting the terminator. */
+/* When an answer does not fit, the WHOLE text is kept here for one follow-up
+   fetch, per thread. Asking the caller to retry with a bigger buffer is what a
+   snprintf-shaped API would do, but a retry would run the block a SECOND time,
+   and a block is not idempotent - so the text waits instead of the work. */
+static pthread_key_t vis_py_stash_key;
+static pthread_once_t vis_py_stash_once = PTHREAD_ONCE_INIT;
+
+static void vis_py_stash_free(void *text)
+{
+    free(text);
+}
+
+static void vis_py_stash_key_make(void)
+{
+    pthread_key_create(&vis_py_stash_key, vis_py_stash_free);
+}
+
+/* Hand the stash a copy of `s`, or clear it when `s` is NULL. A stash that
+   outlived its fetch would answer some later, unrelated call. */
+static void vis_py_stash(const char *s)
+{
+    char *kept;
+    pthread_once(&vis_py_stash_once, vis_py_stash_key_make);
+    kept = pthread_getspecific(vis_py_stash_key);
+    free(kept);
+    pthread_setspecific(vis_py_stash_key, s == NULL ? NULL : strdup(s));
+}
+
+/* Copy a NUL-terminated UTF-8 string into the caller's buffer. Returns the
+   FULL byte count of the string, not counting the terminator - so a return
+   value of `cap` or more says the buffer holds a truncated prefix and the
+   whole text is waiting in `vispython_take_result`. */
 static int vis_py_copy_out(const char *s, char *out, int cap)
 {
     int n;
@@ -44,19 +74,28 @@ static int vis_py_copy_out(const char *s, char *out, int cap)
     }
     n = (int)strlen(s);
     if (n > cap - 1) {
-        n = cap - 1;
+        vis_py_stash(s);
+        memcpy(out, s, (size_t)(cap - 1));
+        out[cap - 1] = '\0';
+        return n;
     }
+    vis_py_stash(NULL);
     memcpy(out, s, (size_t)n);
     out[n] = '\0';
     return n;
 }
 
 /* Drain the raised exception into the caller's buffer. Always clears it: a
-   pending exception left behind poisons the next unrelated call. */
+   pending exception left behind poisons the next unrelated call.
+
+   The text is `TYPE: message`, the shape a traceback's last line has, because
+   the TYPE is what a host classifies on — a `SyntaxError` has to be tellable
+   from a `ValueError` once the message is a plain string. */
 static int vis_py_take_error(char *out, int cap)
 {
     PyObject *exc = PyErr_GetRaisedException();
     PyObject *text = NULL;
+    PyObject *named = NULL;
     const char *utf8 = NULL;
     int written;
 
@@ -66,9 +105,15 @@ static int vis_py_take_error(char *out, int cap)
     text = PyObject_Str(exc);
     if (text != NULL && PyUnicode_GET_LENGTH(text) == 0) {
         /* `assert x` and friends raise with no message at all; the TYPE is
-           then the only thing the caller can act on, so send that instead. */
+           then the only thing the caller can act on, so send that alone. */
         Py_DECREF(text);
         text = PyUnicode_FromString(Py_TYPE(exc)->tp_name);
+    } else if (text != NULL) {
+        named = PyUnicode_FromFormat("%s: %U", Py_TYPE(exc)->tp_name, text);
+        if (named != NULL) {
+            Py_DECREF(text);
+            text = named;
+        }
     }
     utf8 = (text == NULL) ? NULL : PyUnicode_AsUTF8(text);
     written = vis_py_copy_out(utf8 == NULL ? "unprintable Python exception" : utf8, out, cap);
@@ -505,6 +550,14 @@ static vis_py_roots vis_py_read_roots;
 static vis_py_roots vis_py_write_roots;
 static int vis_py_confined = 0;
 
+/* Whether the guest may reach the network AT ALL. This is a CAPABILITY, not part
+   of confinement: a session whose host granted no egress must not resolve a name
+   or dial an address, and that is a different question from which directories it
+   may read. WHICH hosts a session with egress may reach is decided by the host's
+   proxy, which sees the request; a guard written in Python is advice the block it
+   guards can rebind. */
+static int vis_py_net_allowed = 1;
+
 /* Where CPython writes the bytecode it compiles, set at startup and remembered
    here so confinement can keep it writable. The artifact ships no `__pycache__`
    - bytecode is per-machine cache, not artifact weight - so the interpreter
@@ -525,6 +578,14 @@ static char vis_py_process_refusal[512];
     "vis sandbox: reaching a native symbol through ctypes is refused here - an " \
     "extension module the interpreter imports is native code the host chose, " \
     "and this is not"
+
+#define VIS_PY_NETWORK_REFUSAL \
+    "vis sandbox: the network is off for this session - no address can be " \
+    "resolved and no connection opened from here"
+
+/* The sentence a guest reads when it reaches for a network it was not given,
+   worded by the host for the same reason the process refusal is. */
+static char vis_py_network_refusal[512];
 
 static void vis_py_roots_clear(vis_py_roots *roots)
 {
@@ -785,6 +846,15 @@ static const char *const vis_py_process_events[] = {
 static const char *const vis_py_native_events[] = {
     "ctypes.dlsym", "ctypes.dlsym/handle", "ctypes.call_function", NULL};
 
+/* Every audited step from "make a socket" to "send a datagram". Refusing the
+   lookups as well as the dial is deliberate: a session with no egress should not
+   learn an address either, and `socket.__new__` is what makes a raw socket
+   refusable before it has an address at all. */
+static const char *const vis_py_network_events[] = {
+    "socket.__new__",       "socket.bind",         "socket.connect",
+    "socket.getaddrinfo",   "socket.gethostbyname", "socket.gethostbyaddr",
+    "socket.sendto",        NULL};
+
 static int vis_py_event_in(const char *event, const char *const *events)
 {
     int i;
@@ -809,6 +879,14 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
        it answers whether a filesystem policy is in force or not. */
     if (event != NULL && vis_py_event_in(event, vis_py_thread_events)) {
         return vis_py_thread_refused();
+    }
+    /* Network is the process's capability too, so like the thread budget it is
+       answered whether a filesystem policy is in force or not. */
+    if (event != NULL && !vis_py_net_allowed && vis_py_event_in(event, vis_py_network_events)) {
+        PyErr_SetString(PyExc_PermissionError, vis_py_network_refusal[0] != '\0'
+                                                   ? vis_py_network_refusal
+                                                   : VIS_PY_NETWORK_REFUSAL);
+        return -1;
     }
     if (!vis_py_confined || event == NULL || args == NULL || !PyTuple_Check(args)) {
         return 0;
@@ -1263,6 +1341,27 @@ static void vis_py_add_interpreter_roots(void)
     Py_DECREF(sys);
     PyGILState_Release(gil);
 }
+/* The character devices a confined guest still reaches. They carry no
+   information about the machine and hold no state a guest could read back:
+   `/dev/null` is the bit bucket the standard library opens on its own (pytest's
+   capture, `subprocess.DEVNULL`, `os.devnull`), `/dev/zero` answers zeroes, and
+   the random devices answer entropy the guest can already get from
+   `os.urandom`. Refusing them does not narrow the sandbox, it only breaks
+   ordinary Python - measured: `pytest` cannot start global capture without
+   `/dev/null` and dies in its own plugin manager. Null is writable as well,
+   because discarding output is what it is for. */
+static void vis_py_add_device_roots(void)
+{
+    static const char *const readable[] = {"/dev/null", "/dev/zero", "/dev/urandom", "/dev/random",
+                                           NULL};
+    int i;
+
+    for (i = 0; readable[i] != NULL; i++) {
+        vis_py_roots_add(&vis_py_read_roots, readable[i]);
+    }
+    vis_py_roots_add(&vis_py_write_roots, "/dev/null");
+}
+
 /* Confine the interpreter to `read_roots` and `write_roots`, each a
    newline-separated list of paths, and shut the process surface and `ctypes`
    for as long as that policy is in force. Replaces whatever was in force; two
@@ -1290,8 +1389,32 @@ int vispython_confine(const char *read_roots, const char *write_roots, const cha
     if (vis_py_confined) {
         vis_py_roots_add(&vis_py_write_roots, vis_py_pycache_prefix);
         vis_py_add_interpreter_roots();
+        vis_py_add_device_roots();
     }
     snprintf(summary, sizeof summary, "%d %d", vis_py_read_roots.count, vis_py_write_roots.count);
+    return vis_py_copy_out(summary, out, cap);
+}
+
+/* Set whether the guest may reach the network: `policy` is 1 to allow and 0 to
+   refuse every socket, name lookup and connection from the same audit hook that
+   answers confinement. `refusal` is the sentence the guest reads; empty keeps the
+   library's own. Answers the flag in force.
+
+   What this decides is the CAPABILITY, never a domain policy: a host that lets a
+   session out decides WHERE at its proxy, which sees the request and can say no
+   to one URL. Here there is nothing to see yet - only whether a socket may exist. */
+int vispython_network(const char *policy, const char *refusal, char *out, int cap)
+{
+    int want = 1;
+    char summary[8];
+
+    if (policy != NULL && sscanf(policy, "%d", &want) == 1) {
+        vis_py_net_allowed = (want != 0);
+    }
+    if (refusal != NULL) {
+        snprintf(vis_py_network_refusal, sizeof vis_py_network_refusal, "%s", refusal);
+    }
+    snprintf(summary, sizeof summary, "%d", vis_py_net_allowed);
     return vis_py_copy_out(summary, out, cap);
 }
 
@@ -1359,6 +1482,34 @@ int vispython_logging(const char *policy, char *out, int cap)
     return vis_py_copy_out(summary, out, cap);
 }
 
+/* Take the answer a previous call on THIS thread could not fit. The call
+   reports the length it needed, so the host allocates that much and asks once;
+   the text is handed over and dropped. Answers 0 with an empty buffer when
+   nothing is waiting, which is the normal case. */
+int vispython_take_result(char *out, int cap)
+{
+    char *kept;
+    int n;
+
+    if (out == NULL || cap <= 0) {
+        return VIS_PY_ERR_BUFFER;
+    }
+    pthread_once(&vis_py_stash_once, vis_py_stash_key_make);
+    kept = pthread_getspecific(vis_py_stash_key);
+    if (kept == NULL) {
+        out[0] = '\0';
+        return 0;
+    }
+    n = (int)strlen(kept);
+    if (n > cap - 1) {
+        return VIS_PY_ERR_BUFFER;
+    }
+    memcpy(out, kept, (size_t)n);
+    out[n] = '\0';
+    pthread_setspecific(vis_py_stash_key, NULL);
+    free(kept);
+    return n;
+}
 /* Take what has been recorded since the last call: NDJSON, one object per
    line, oldest first. Answers what FITS the buffer and leaves the rest, so a
    host drains in a loop until the answer is empty. Records lost to a full ring
@@ -1396,6 +1547,15 @@ int vispython_drain_log(char *out, int cap)
     out[written] = '\0';
     return written;
 }
+/* The thread state parked at the end of initialization, while nobody is running
+   Python. `Py_InitializeEx` leaves the GIL HELD by the thread that started the
+   interpreter; keeping it that way would force every entry point onto that one
+   thread, and a host upcall parking it would stall every other session. So
+   initialization ends with `PyEval_SaveThread` and each entry point takes the
+   GIL for itself - the ordinary embedding shape. Finalization restores this
+   state on the thread that parked it. */
+static PyThreadState *vis_py_main_state = NULL;
+
 /* Start the interpreter, rooted at `home` when one is given.
 
    `home` is a VENDORED CPython tree — the directory holding `lib/python3.14/`.
@@ -1463,6 +1623,8 @@ int vispython_initialize(const char *home, const char *pycache_prefix, char *out
     vis_py_started = 1;
     vis_py_record(VIS_PY_LOG_INFO, "init", "\"cap\":%d,\"workers\":%d", vis_py_thread_cap,
                   vis_py_worker_target());
+    /* Hand the GIL back: see `vis_py_main_state`. */
+    vis_py_main_state = PyEval_SaveThread();
     return 0;
 }
 
@@ -1504,15 +1666,11 @@ static PyObject *vis_py_namespace(const char *module_name, char *out, int cap)
 /* Evaluate `code` as an EXPRESSION in `module_name` and write str(result).
    Statements belong in vispython_exec; keeping the two apart is what lets the
    JVM side stay free of Py_eval_input / Py_file_input constants. */
-int vispython_eval(const char *module_name, const char *code, char *out, int cap)
+static int vis_py_eval_locked(const char *module_name, const char *code, char *out, int cap)
 {
     PyObject *globals, *result, *text;
     const char *utf8;
     int written;
-
-    if (!vis_py_started) {
-        return VIS_PY_ERR_INIT;
-    }
     globals = vis_py_namespace(module_name, out, cap);
     if (globals == NULL) {
         return VIS_PY_ERR_PYTHON;
@@ -1531,13 +1689,9 @@ int vispython_eval(const char *module_name, const char *code, char *out, int cap
 }
 
 /* Run `code` as a module body in `module_name`, for its side effects. */
-int vispython_exec(const char *module_name, const char *code, char *out, int cap)
+static int vis_py_exec_locked(const char *module_name, const char *code, char *out, int cap)
 {
     PyObject *globals, *result;
-
-    if (!vis_py_started) {
-        return VIS_PY_ERR_INIT;
-    }
     globals = vis_py_namespace(module_name, out, cap);
     if (globals == NULL) {
         return VIS_PY_ERR_PYTHON;
@@ -1551,21 +1705,59 @@ int vispython_exec(const char *module_name, const char *code, char *out, int cap
     return 0;
 }
 
+/* The interpreter thread ident of whatever the HOST is running right now, and 0
+   between calls. A block that spins holds the interpreter thread, so the only
+   way to reach it is from another thread - which needs to know WHICH thread to
+   raise in. Written under the GIL by the runner, read by `vispython_interrupt`
+   with the GIL held, so the value a caller acts on is a thread that was running
+   when it looked. */
+static volatile unsigned long vis_py_running_thread = 0;
+
+/* Raise `KeyboardInterrupt` in the thread running guest code, answering "1" when
+   a thread state took it and "0" when there was nothing to interrupt.
+
+   The one way OUT of a runaway block. `Thread.interrupt` cannot reach guest
+   code, and the host's own worker future only cancels the JAVA side: the block
+   keeps burning a core until the process dies. CPython delivers an async
+   exception at a bytecode boundary, so a spinning `while True:` unwinds, its
+   `finally` blocks run and the session stays usable - while a thread blocked in
+   a host call or inside C sees it only when it returns, which is why the caller
+   treats "0", and a block that keeps running, as the interpreter it can no
+   longer reach.
+
+   Called from ANY thread, and never from the one it interrupts: it takes the GIL
+   the running block keeps dropping at its switch interval. */
+int vispython_interrupt(char *out, int cap)
+{
+    PyGILState_STATE gil;
+    unsigned long target;
+    int landed;
+
+    if (!vis_py_started) {
+        return VIS_PY_ERR_INIT;
+    }
+    target = vis_py_running_thread;
+    if (target == 0) {
+        return vis_py_copy_out("0", out, cap);
+    }
+    gil = PyGILState_Ensure();
+    landed = PyThreadState_SetAsyncExc(target, PyExc_KeyboardInterrupt);
+    PyGILState_Release(gil);
+    vis_py_record(VIS_PY_LOG_WARN, "interrupt", "\"threads\":%d", landed);
+    return vis_py_copy_out(landed > 0 ? "1" : "0", out, cap);
+}
+
 /* Run `code` the way the sandbox does: statements execute, and the value of a
    trailing EXPRESSION is what comes back. The split is Python's own `ast` work,
    so it lives in `vis_runtime.run`. The value comes back as JSON text, because
    the ABI carries strings and the host reads data, not a repr; this function
    only hands the source over as a Python string, never as interpolated text. */
-int vispython_run(const char *module_name, const char *code, char *out, int cap)
+static int vis_py_run_locked(const char *module_name, const char *code, char *out, int cap)
 {
     PyObject *globals, *runtime, *result, *text;
     const char *utf8;
     long long began;
     int written;
-
-    if (!vis_py_started) {
-        return VIS_PY_ERR_INIT;
-    }
     began = vis_py_now_ms();
     globals = vis_py_namespace(module_name, out, cap);
     if (globals == NULL) {
@@ -1576,7 +1768,9 @@ int vispython_run(const char *module_name, const char *code, char *out, int cap)
         vis_py_take_error(out, cap);
         return VIS_PY_ERR_PYTHON;
     }
+    vis_py_running_thread = PyThread_get_thread_ident();
     result = PyObject_CallMethod(runtime, "run_json", "sO", code, globals);
+    vis_py_running_thread = 0;
     Py_DECREF(runtime);
     if (result == NULL) {
         vis_py_take_error(out, cap);
@@ -1598,16 +1792,12 @@ int vispython_run(const char *module_name, const char *code, char *out, int cap)
    captured stdout, with the reapers at the boundary. Policy is Python's
    (`vis_runtime.run_block`); this only carries the source over and brings the
    JSON object — stdout and error — back. */
-int vispython_run_block(const char *module_name, const char *code, char *out, int cap)
+static int vis_py_run_block_locked(const char *module_name, const char *code, char *out, int cap)
 {
     PyObject *globals, *runtime, *result, *text;
     const char *utf8;
     long long began;
     int written;
-
-    if (!vis_py_started) {
-        return VIS_PY_ERR_INIT;
-    }
     began = vis_py_now_ms();
     globals = vis_py_namespace(module_name, out, cap);
     if (globals == NULL) {
@@ -1618,7 +1808,9 @@ int vispython_run_block(const char *module_name, const char *code, char *out, in
         vis_py_take_error(out, cap);
         return VIS_PY_ERR_PYTHON;
     }
+    vis_py_running_thread = PyThread_get_thread_ident();
     result = PyObject_CallMethod(runtime, "run_block_json", "sO", code, globals);
+    vis_py_running_thread = 0;
     Py_DECREF(runtime);
     if (result == NULL) {
         vis_py_take_error(out, cap);
@@ -1637,11 +1829,73 @@ int vispython_run_block(const char *module_name, const char *code, char *out, in
     return written;
 }
 
+/* The four entry points that RUN Python code. Each takes the GIL for its own
+   caller and gives it back, so ANY host thread may enter and no session waits
+   behind another's upcall. `PyGILState_Ensure` is per thread and re-entrant: a
+   thread that already holds the GIL pays nothing, which is what makes a host
+   tool calling back INTO the interpreter - while the block that called it sits
+   parked in `vis_py_host_call` - a nested acquire instead of a deadlock. The
+   `_locked` bodies above assume the GIL is already held. */
+int vispython_eval(const char *module_name, const char *code, char *out, int cap)
+{
+    PyGILState_STATE gil;
+    int status;
+
+    if (!vis_py_started) {
+        return VIS_PY_ERR_INIT;
+    }
+    gil = PyGILState_Ensure();
+    status = vis_py_eval_locked(module_name, code, out, cap);
+    PyGILState_Release(gil);
+    return status;
+}
+
+int vispython_exec(const char *module_name, const char *code, char *out, int cap)
+{
+    PyGILState_STATE gil;
+    int status;
+
+    if (!vis_py_started) {
+        return VIS_PY_ERR_INIT;
+    }
+    gil = PyGILState_Ensure();
+    status = vis_py_exec_locked(module_name, code, out, cap);
+    PyGILState_Release(gil);
+    return status;
+}
+
+int vispython_run(const char *module_name, const char *code, char *out, int cap)
+{
+    PyGILState_STATE gil;
+    int status;
+
+    if (!vis_py_started) {
+        return VIS_PY_ERR_INIT;
+    }
+    gil = PyGILState_Ensure();
+    status = vis_py_run_locked(module_name, code, out, cap);
+    PyGILState_Release(gil);
+    return status;
+}
+
+int vispython_run_block(const char *module_name, const char *code, char *out, int cap)
+{
+    PyGILState_STATE gil;
+    int status;
+
+    if (!vis_py_started) {
+        return VIS_PY_ERR_INIT;
+    }
+    gil = PyGILState_Ensure();
+    status = vis_py_run_block_locked(module_name, code, out, cap);
+    PyGILState_Release(gil);
+    return status;
+}
+
 /* Stop the interpreter. Idempotent. Returns 0, or VIS_PY_ERR_INIT if CPython
    reported a non-zero finalization status. */
 int vispython_finalize(void)
 {
-    PyThreadState *save;
     int status;
 
     if (!vis_py_started) {
@@ -1649,9 +1903,11 @@ int vispython_finalize(void)
     }
     /* Workers first, and without the GIL: one of them may be inside a task and
        needs the GIL to leave it. Finalizing under a live worker is a crash. */
-    save = PyEval_SaveThread();
     vis_py_pool_stop();
-    PyEval_RestoreThread(save);
+    /* Take back the state parked at initialization, on the thread that parked
+       it: `Py_FinalizeEx` runs under the GIL and wants the main thread state. */
+    PyEval_RestoreThread(vis_py_main_state);
+    vis_py_main_state = NULL;
     status = Py_FinalizeEx();
     vis_py_started = 0;
     return (status == 0) ? 0 : VIS_PY_ERR_INIT;
