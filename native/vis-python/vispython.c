@@ -54,6 +54,12 @@ static int vis_py_take_error(char *out, int cap)
         return vis_py_copy_out("Python failed without raising", out, cap);
     }
     text = PyObject_Str(exc);
+    if (text != NULL && PyUnicode_GET_LENGTH(text) == 0) {
+        /* `assert x` and friends raise with no message at all; the TYPE is
+           then the only thing the caller can act on, so send that instead. */
+        Py_DECREF(text);
+        text = PyUnicode_FromString(Py_TYPE(exc)->tp_name);
+    }
     utf8 = (text == NULL) ? NULL : PyUnicode_AsUTF8(text);
     written = vis_py_copy_out(utf8 == NULL ? "unprintable Python exception" : utf8, out, cap);
     Py_XDECREF(text);
@@ -162,6 +168,43 @@ int vis_python_exec(const char *module_name, const char *code, char *out, int ca
     }
     Py_DECREF(result);
     return 0;
+}
+
+/* Run `code` the way the sandbox does: statements execute, and the value of a
+   trailing EXPRESSION is what comes back. The split is Python's own `ast` work,
+   so it lives in `vis_runtime.run`. The value comes back as EDN text, because
+   the ABI carries strings and the host reads data, not a repr; this function
+   only hands the source over as a Python string, never as interpolated text. */
+int vis_python_run(const char *module_name, const char *code, char *out, int cap)
+{
+    PyObject *globals, *runtime, *result, *text;
+    const char *utf8;
+    int written;
+
+    if (!vis_py_started) {
+        return VIS_PY_ERR_INIT;
+    }
+    globals = vis_py_namespace(module_name, out, cap);
+    if (globals == NULL) {
+        return VIS_PY_ERR_PYTHON;
+    }
+    runtime = PyImport_ImportModule("vis_runtime");
+    if (runtime == NULL) {
+        vis_py_take_error(out, cap);
+        return VIS_PY_ERR_PYTHON;
+    }
+    result = PyObject_CallMethod(runtime, "run_edn", "sO", code, globals);
+    Py_DECREF(runtime);
+    if (result == NULL) {
+        vis_py_take_error(out, cap);
+        return VIS_PY_ERR_PYTHON;
+    }
+    text = PyObject_Str(result);
+    utf8 = (text == NULL) ? NULL : PyUnicode_AsUTF8(text);
+    written = vis_py_copy_out(utf8 == NULL ? "" : utf8, out, cap);
+    Py_XDECREF(text);
+    Py_DECREF(result);
+    return written;
 }
 
 /* Stop the interpreter. Idempotent. Returns 0, or VIS_PY_ERR_INIT if CPython

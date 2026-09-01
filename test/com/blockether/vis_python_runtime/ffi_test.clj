@@ -48,3 +48,67 @@
         (ffi/exec! "session-a" "import json")
         (is (= "True" (ffi/eval-str "session-b" "'json' in __import__('sys').modules"))
             "imported modules ARE shared: a session is a namespace, not an interpreter")))))
+
+(deftest run-answers-edn-data-test
+  (if-not built?
+    (println "SKIP run-answers-edn-data-test - no cdylib")
+    (do
+      (ffi/initialize!)
+      (ffi/install-runtime! "edn-session")
+
+      (testing "a trailing expression's value comes back as Clojure data"
+        (is (= 3 (ffi/run "edn-session" "a = 1\nb = 2\na + b")))
+        (is (= [1 2.5 "x" true nil] (ffi/run "edn-session" "[1, 2.5, 'x', True, None]")))
+        (is (= {"q" "1"} (ffi/run "edn-session" "{'q': '1'}")))
+        (is (= #{1 2} (ffi/run "edn-session" "{1, 2}")))
+        (is (= 0.0 (ffi/run "edn-session" "0.0"))
+            "an integral float stays a float - the value Python actually has"))
+
+      (testing "a program with no trailing expression answers nil"
+        (is (nil? (ffi/run "edn-session" "x = 41\nx += 1"))))
+
+      (testing "a value with no EDN shape crosses as its str"
+        (is (str/starts-with? (ffi/run "edn-session" "object()") "<object object at")))
+
+      (testing "a raise names the exception even when it carries no message"
+        (is (= "AssertionError"
+               (-> (try (ffi/run "edn-session" "assert False")
+                        (catch clojure.lang.ExceptionInfo e (ex-data e)))
+                   :message)))))))
+
+(deftest shims-import-lazily-test
+  (if-not built?
+    (println "SKIP shims-import-lazily-test - no cdylib")
+    (do
+      (ffi/initialize!)
+      (ffi/install-runtime! "lazy-session")
+      (ffi/exec! "lazy-session" "import vis_runtime")
+      (ffi/eval-str "lazy-session" "vis_runtime.forget_shims()")
+
+      (testing "a bare import of a shim name resolves to the shim source"
+        (is (false? (ffi/run "lazy-session" "'tabulate' in __import__('sys').modules")))
+        (is (true? (ffi/run "lazy-session" "import tabulate\n'abc' in tabulate.tabulate([['abc']])"))))
+
+      (testing "the stdlib always wins over a shim of the same name"
+        (is (= "json" (ffi/run "lazy-session" "import json\njson.__name__"))))
+
+      (testing "forgetting the shims hands the next import a pristine module"
+        (ffi/run "lazy-session" "import tabulate\ntabulate.tabulate = 'patched'\nNone")
+        (ffi/eval-str "lazy-session" "vis_runtime.forget_shims()")
+        (is (= false (ffi/run "lazy-session" "import tabulate\ntabulate.tabulate == 'patched'"))))
+
+      (testing "a shim that cannot load blames the shim AND the cause"
+        (let [message (ffi/run "lazy-session"
+                               (str "import sys\n"
+                                    "saved = dict(sys.modules)\n"
+                                    "sys.modules['json'] = None\n"
+                                    "out = 'imported'\n"
+                                    "try:\n"
+                                    "    import urllib3\n"
+                                    "except ImportError as e:\n"
+                                    "    out = str(e)\n"
+                                    "sys.modules.clear()\n"
+                                    "sys.modules.update(saved)\n"
+                                    "out"))]
+          (is (str/includes? message "urllib3"))
+          (is (str/includes? message "json")))))))

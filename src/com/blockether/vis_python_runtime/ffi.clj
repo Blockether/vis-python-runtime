@@ -1,8 +1,8 @@
 (ns com.blockether.vis-python-runtime.ffi
   "The JVM half of the boundary: FFM downcalls into `native/vis-python`.
 
-   Five entry points, mirroring the C source one to one, all of them
-   integers-and-bytes: `initialize!`, `version`, `eval-str`, `exec!`,
+   A handful of entry points, mirroring the C source one to one, all of them
+   integers-and-bytes: `initialize!`, `version`, `eval-str`, `exec!`, `run`,
    `finalize!`. A negative return from C is a failure whose reason CPython
    already wrote into the out-buffer, so a call yields the verdict and the
    message together and this namespace never has to ask the interpreter what
@@ -17,7 +17,8 @@
 
    Nothing is loaded until the first call: `resolve-library` decides where the
    cdylib is, and a checkout with no build simply throws from there."
-  (:require [clojure.java.io :as io]
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [com.blockether.vis-python-runtime :as runtime])
   (:import [java.lang.foreign Arena FunctionDescriptor Linker Linker$Option MemoryLayout MemorySegment SymbolLookup ValueLayout]
@@ -40,6 +41,7 @@
    "vis_python_version"    (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_eval"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_exec"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
+   "vis_python_run"        (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_finalize"   (descriptor ValueLayout/JAVA_INT)})
 
 (defn- link-handles
@@ -158,6 +160,17 @@
   ([code] (exec! default-session code))
   ([session code] (call "vis_python_exec" session code) nil))
 
+(defn run
+  "Run `code` the way the sandbox does — statements execute and a trailing
+   expression's value comes back — answering that value as Clojure data.
+
+   The value crosses the ABI as EDN (`vis_runtime/to_edn`), so a dict is a map
+   and a list a vector; anything with no EDN shape arrives as its `str`. This
+   is the call a caller wants; `eval-str` and `exec!` are the primitives
+   underneath it."
+  ([code] (run default-session code))
+  ([session code] (edn/read-string (call "vis_python_run" session code))))
+
 (defn install-runtime!
   "Equip `session` with the sandbox runtime and answer how many names it got.
 
@@ -168,6 +181,15 @@
   ([session]
    (exec! session "import vis_runtime")
    (Long/parseLong (eval-str session "vis_runtime.install(globals())"))))
+
+(defn install-shim!
+  "Make the sandbox shim `name` importable in this interpreter, answering the
+   source file it loaded. Shims are process-wide once loaded, the same as any
+   other module: a second session imports, it does not reinstall."
+  ([name] (install-shim! default-session name))
+  ([session name]
+   (exec! session "import vis_runtime")
+   (eval-str session (str "vis_runtime.install_shim(" (pr-str name) ")"))))
 
 (defn finalize!
   "Stop the interpreter. Idempotent."

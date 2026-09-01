@@ -17,21 +17,43 @@ candidates to move and 17 803 lines are engine tests that stay.
 - [x] the loading model: source roots on `sys.path`, `import vis_runtime`,
       `install` per session
 
-## Wave 1 — shim tests whose shim calls no host callable (4526 lines)
+## Wave 1 — shim tests whose shim calls no host callable (2907 lines) — LANDED
 
-These are the cheap ones: the Python under test needs nothing from the JVM, so
-the test becomes `install-runtime!` plus `eval-str` in this repository and stops
-paying for a GraalPy context entirely.
+The cheap ones: the Python under test needs nothing from the JVM, so a test is
+`harness/session` plus `ev` in this repository and pays for no GraalPy context
+at all. All eight run here, 68 tests and 310 assertions, against the embedded
+CPython.
 
-- [ ] `bs4_compat_shim_test.clj` — 917 lines — `bs4.py` (6208 lines) calls no host callable
-- [ ] `numpy_compat_shim_test.clj` — 395 lines — `numpy.py` is pure Python
-- [ ] `pandas_compat_shim_test.clj` — 211 lines — `pandas.py` is pure Python
-- [ ] `pil_compat_shim_test.clj` — 1619 lines — `pil.py` touches only the handle registry (`__vis_own__`), never the host
-- [ ] `tabulate_compat_shim_test.clj` — 193 lines — `tabulate.py` is pure Python
-- [ ] `toml_compat_shim_test.clj` — 59 lines — `toml.py` is pure Python
-- [ ] `urllib3_compat_shim_test.clj` — 569 lines — `urllib3.py` is pure Python
-- [ ] `httpx_compat_shim_test.clj` — 420 lines — `httpx.py` is pure Python over the socket layer
-- [ ] `fonttools_compat_shim_test.clj` — 143 lines — `fonttools.py` keeps its error state in Python
+- [x] `bs4_compat_shim_test.clj` — 917 lines — `bs4.py` (6208 lines) calls no host callable
+- [x] `numpy_compat_shim_test.clj` — 395 lines — `numpy.py` is pure Python
+- [x] `pandas_compat_shim_test.clj` — 211 lines — `pandas.py` is pure Python
+- [x] `tabulate_compat_shim_test.clj` — 193 lines — `tabulate.py` is pure Python
+- [x] `toml_compat_shim_test.clj` — 59 lines — `toml.py` is pure Python
+- [x] `urllib3_compat_shim_test.clj` — 569 lines — `urllib3.py` is pure Python
+- [x] `httpx_compat_shim_test.clj` — 420 lines — `httpx.py` is pure Python over the socket layer
+- [x] `fonttools_compat_shim_test.clj` — 143 lines — `fonttools.py` keeps its error state in Python
+
+What the wave demanded of the runtime, each of it now pinned by `ffi_test`:
+
+- results cross as EDN (`vis_runtime/to_edn`, `ffi/run`), because the moved
+  assertions compare Clojure data, not a repr. GraalPy coerced an integral
+  float to an integer; the three numpy expectations that baked that in now
+  carry the float CPython actually has.
+- `import <shim>` resolves lazily through `vis_runtime.ShimFinder`, appended to
+  `sys.meta_path` so the stdlib always wins, and a shim that fails to load is
+  blamed BY NAME together with its cause (`ShimLoader`).
+- one interpreter means one module table, so `harness/session` drops every
+  loaded shim per test (`vis_runtime.forget_shims`) — a test that monkeypatches
+  a shim hands nothing to the next one — and `harness/ev-guarded` restores
+  `sys.modules` around the tests that break an import on purpose.
+
+Two shim bugs the move exposed, fixed in BOTH copies (parity holds):
+
+- `bs4.py` used a bare `re` in three places while importing `re as _re`; it only
+  worked because Vis' sandbox namespace happens to carry `re`.
+- `bs4.py` overrode `HTMLParser.set_cdata_mode(self, elem)`, whose signature
+  grew a keyword-only `escapable` after 3.11 — invisible on GraalPy, fatal on
+  CPython 3.14.
 
 ## Wave 2 — sandbox runtime behaviour (6026 lines)
 
@@ -47,11 +69,15 @@ process surface). Each one moves the day its op exists here.
 - [ ] `env_python_test.clj` — 1711 lines — context construction end to end
 - [ ] `env_python_engine_test.clj` — 236 lines — engine selection and options
 
-## Wave 3 — shims with a host bridge (2988 lines)
+## Wave 3 — shims with a host bridge (4607 lines)
 
 The Python half can move; the assertions that prove the JVM capability stay in
 Vis. Split them, never copy them.
 
+- [ ] `pil_compat_shim_test.clj` — 1619 lines — `pil.py` is pure Python, but the
+      test asserts from the JVM side on the host handle registry
+      (`foundation.shim-pil/images`, live raster counts), so it splits like the
+      rest of this wave
 - [ ] `anydoc_compat_shim_test.clj` — 837 lines — `__vis_anydoc_detect__`, `__vis_anydoc_markdown__`
 - [ ] `matplotlib_compat_shim_test.clj` — 755 lines — `__vis_mpl_render__`, `__vis_mpl_render_file__`
 - [ ] `nippy_compat_shim_test.clj` — 93 lines — `__vis_nippy_encode__`, `__vis_nippy_decode__`
