@@ -108,14 +108,17 @@
 
 (defn- source-roots
   "Directories CPython may import from, in order: what the caller passed, then
-   `VIS_PYTHON_SOURCE_PATH`, then this repository's own `python/` in a dev
-   checkout. A packaged build extracts its sources and passes them explicitly,
-   the same way the cdylib is resolved."
+   `VIS_PYTHON_SOURCE_PATH`, then this repository's own `python/` and
+   `resources/vis-python/` in a dev checkout. A packaged build extracts its
+   sources and passes them explicitly, the same way the cdylib is resolved."
   [extra]
-  (let [env  (some-> (System/getenv "VIS_PYTHON_SOURCE_PATH")
-                     (str/split (re-pattern (java.util.regex.Pattern/quote java.io.File/pathSeparator))))
-        repo (io/file (System/getProperty "user.dir") "python")]
-    (->> (concat extra env (when (.isDirectory repo) [(.getAbsolutePath repo)]))
+  (let [env   (some-> (System/getenv "VIS_PYTHON_SOURCE_PATH")
+                      (str/split (re-pattern (java.util.regex.Pattern/quote java.io.File/pathSeparator))))
+        here  (System/getProperty "user.dir")
+        repos (->> [(io/file here "python") (io/file here "resources" "vis-python")]
+                   (filter #(.isDirectory ^java.io.File %))
+                   (mapv #(.getAbsolutePath ^java.io.File %)))]
+    (->> (concat extra env repos)
          (remove str/blank?)
          (distinct)
          (vec))))

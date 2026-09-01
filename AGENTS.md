@@ -35,6 +35,11 @@ docstring or a test can state lives there, not here.
   and idempotent; a session is a module namespace created on demand, so sessions
   keep separate globals while sharing imported modules — the second session's
   runtime install costs nothing. Sub-interpreters are not the mechanism.
+- **The sandbox Python lives here now** — `resources/vis-python/` and
+  `resources/vis-shims/`, at the very resource paths Vis already reads, so the
+  pin is the only change Vis makes. Until that pin exists Vis still carries its
+  own copy and `sandbox-parity-test` compares every file byte for byte; edit a
+  file on one side only and the suite fails. Delete that test with the last copy.
 - **The consumer contract is the existing sandbox, unchanged.** Success is Vis'
   ~1.5 MB of shims in `resources/vis-shims/`, `resources/vis-python/async_runtime.py`
   and `packages/vis-agent/src/vis/__init__.py` running with no edit beyond the

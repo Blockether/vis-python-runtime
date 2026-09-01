@@ -126,7 +126,9 @@ Still open in Phase 1, and the actual gate: the same downcalls under
 static libpython, since today's cdylib is 34 KB because it links the Homebrew
 interpreter dynamically.
 
-Blocked, not forgotten: physically moving Vis' Python sources here needs Vis to
-consume this repository as a dependency, which needs a remote. Until then the
-sources stay in Vis and are imported from the sibling checkout, which is what
-`sandbox-source-test` proves.
+Moved: all 36 sandbox Python sources (1.77 MB) — `resources/vis-python/` (13
+files) and `resources/vis-shims/` (23 files) — now live here at the resource
+paths Vis already reads, and the runtime imports `async_runtime` from this
+repository. Vis keeps its copy until it can pin this library, which needs a
+remote; `sandbox-parity-test` hashes both sides so the two cannot drift while
+the copies coexist.
