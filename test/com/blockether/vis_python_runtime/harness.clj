@@ -206,24 +206,13 @@
   (str (.toRealPath (Files/createTempDirectory prefix (make-array FileAttribute 0))
                     (make-array LinkOption 0))))
 
-(defn interpreter-roots
-  "What the interpreter must keep READING to stay alive under confinement: its
-   own installation and the source roots it was started with. A policy without
-   them refuses the next stdlib import, which is not a sandbox - it is a broken
-   interpreter."
-  []
-  (runtime/initialize!)
-  (->> (json/read-str (runtime/run "import sys\n[sys.prefix, sys.base_prefix, sys.exec_prefix] + list(sys.path)"))
-       (map str)
-       (remove str/blank?)
-       (distinct)
-       (vec)))
-
 (defn confined-session
   "A block session running under `read-roots` / `write-roots`, answering a reach
-   for a process with `refusal` when the caller supplies one."
+   for a process with `refusal` when the caller supplies one. The interpreter's
+   own installation is NOT named here: `vispython_confine` adds it to the
+   readable roots itself, the way a host that never read this file would get it."
   ([read-roots write-roots] (confined-session read-roots write-roots ""))
   ([read-roots write-roots refusal]
    (let [session (block-session)]
-     (runtime/confine! (into (interpreter-roots) read-roots) write-roots refusal)
+     (runtime/confine! read-roots write-roots refusal)
      session)))

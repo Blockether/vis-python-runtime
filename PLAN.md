@@ -411,3 +411,19 @@ and worker sizing no longer clamps to a cap that is not there. That is the whole
 shape of a process that is not the sandbox's — unconfined by two empty lists,
 uncapped by -1, its own GIL, pool and ring. The spawn itself is Vis' change and
 waits on the pin. Suite: 132 tests / 619 assertions.
+
+Parity with the GraalPy mechanism it replaces was checked against
+`~/vis/src/com/blockether/vis/internal/sandbox_fs.clj`, and one divergence was
+real: GraalPy wrapped the confined FileSystem with `allowLanguageHomeAccess`, so
+a confined context read its own stdlib, while here the import machinery opens
+source through the same audited event as the guest. A cold import under a policy
+that named only the session's roots was refused — measured, not reasoned: the
+suite only passed because the bytecode cache prefix is a writable root and the
+`.pyc` was warm. `vispython_confine` now adds `sys.prefix`, `sys.base_prefix`,
+`sys.exec_prefix` and every absolute `sys.path` entry to the readable roots
+itself, so no host can forget them, and the test harness stopped composing them.
+Three divergences remain the CONSUMER's to compose, recorded here rather than
+guessed: `/tmp` and `$TMPDIR` (always writable in `sandbox-fs`), `~/.vis` (the
+same), and the empty policy — `sandbox-fs` denies everything, this library runs
+unconfined, which is now deliberate and is why a host must never map "no roots
+configured" to `confine! [] []`. Suite: 133 tests / 622 assertions.

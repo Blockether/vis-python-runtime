@@ -70,8 +70,11 @@ docstring or a test can state lives there, not here.
   (PEP 578) installed before `Py_InitializeEx` over a policy the host sets
   through `vispython_confine`; guest code cannot see it, remove it or reach
   around it. A Python-side guard — a rebound `open`, a wrapper in a shim — is
-  advice, not a boundary, and never becomes one. `confinement_test.clj` is what
-  proves the difference.
+  advice, not a boundary, and never becomes one. A host names only the SESSION's
+  directories: the interpreter's own installation and its bytecode cache are the
+  library's duty, added by `vispython_confine` itself, because a policy without
+  them refuses the next cold import — a broken interpreter, not a sandbox.
+  `confinement_test.clj` is what proves the difference.
 - **Every policy here is the SANDBOX's; extension Python is trusted and does not
   belong under it.** Confinement, the thread cap and the pool are PROCESS state —
   `vispython_confine` replaces the policy for every session, and a session is a

@@ -273,7 +273,8 @@ public final class Interpreter {
    * policy shuts the process surface and {@code ctypes}. {@code refusal} is the
    * sentence the guest reads; empty means the library's own. Confinement is the
    * PROCESS's: calling this REPLACES the policy for every session, and two empty
-   * lists lift it.
+   * lists lift it. The interpreter's own installation and its bytecode cache are
+   * added to the roots here, so a host names only the session's directories.
    */
   public static int[] confine(List<String> readRoots, List<String> writeRoots, String refusal) {
     String answer = call("vispython_confine", String.join("\n", readRoots),

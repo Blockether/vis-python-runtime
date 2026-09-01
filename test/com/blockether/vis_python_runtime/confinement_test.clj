@@ -88,12 +88,28 @@
       (is (= "OUTSIDE" (str/trim (str (:stdout (block session
                                                       (str "print(open('" outside "/out.txt').read())"))))))))))
 
+;; GraalPy wrapped the confined FileSystem with `allowLanguageHomeAccess`, so a
+;; confined context could still read its own stdlib. Here the roots are the
+;; host's, and a policy naming only the session's directories would refuse the
+;; interpreter's next import — which is not a sandbox, it is a broken
+;; interpreter. Deriving them is the runtime's job, not every host's.
+(harness/defbuilt-test interpreter-roots-test
+  (testing "a policy the host set without them still lets the interpreter import"
+    (let [inside  (temp-dir "vis-import")
+          session (harness/block-session)]
+      (runtime/confine! [inside] [])
+      (is (= "ok" (str/trim (str (:stdout (block session "import colorsys\nprint('ok')"))))))
+      (testing "and its source is readable, so a cold import does not need the cache"
+        (is (= "True" (str/trim (str (:stdout (block session (str "import colorsys\n"
+                                                                  "print(len(open(colorsys.__file__).read()) > 0)"))))))))
+      (is (refused? (block session "print(open('/etc/hosts').read())"))))))
+
 ;; The process surface used to be refused by `resources/vis-shims/posix.py`,
 ;; which put a module of fakes in `sys.modules["subprocess"]`: a guard written in
 ;; the language it guards, covering only the doors it knew to name. It lives in
 ;; the audit hook now, where a block cannot reach it.
 (harness/defbuilt-test process-surface-test
-  (let [session (confined-session [] [])]
+  (let [session (confined-session [(temp-dir "vis-process")] [])]
     (testing "subprocess never spawns"
       (is (refused? (block session "import subprocess\nsubprocess.run(['/bin/echo', 'hi'])"))))
     (testing "os.system never spawns"
@@ -109,12 +125,12 @@
 
 (harness/defbuilt-test process-refusal-wording-test
   (testing "a host that words the refusal its own way is what the guest reads"
-    (let [session (confined-session [] [] "use shell(...) instead")]
+    (let [session (confined-session [(temp-dir "vis-worded")] [] "use shell(...) instead")]
       (is (str/includes? (str (:error (block session "import os\nos.system('/bin/echo hi')")))
                          "use shell(...) instead")))))
 
 (harness/defbuilt-test native-symbol-test
-  (let [session (confined-session [] [])]
+  (let [session (confined-session [(temp-dir "vis-native")] [])]
     (testing "ctypes still IMPORTS, because a package that merely imports it must run"
       (is (= "ok" (str/trim (str (:stdout (block session "import ctypes\nprint('ok')")))))))
     (testing "reaching a symbol out of a loaded library is refused"

@@ -130,7 +130,9 @@
    C state behind an audit hook installed before the interpreter started. The
    same policy shuts the process surface and `ctypes`. `refusal` is the sentence
    the guest reads. Confinement is the PROCESS's: this REPLACES the policy for
-   every session, and two empty lists lift it."
+   every session, and two empty lists lift it. The interpreter's own installation
+   and its bytecode cache are added to the roots here, so a host names only the
+   session's directories."
   ([read-roots write-roots] (confine! read-roots write-roots ""))
   ([read-roots write-roots refusal]
    (let [[read write] (Interpreter/confine (vec read-roots) (vec write-roots) refusal)]

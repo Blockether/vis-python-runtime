@@ -633,12 +633,18 @@ static void vis_py_roots_add(vis_py_roots *roots, const char *path)
 {
     char canon[PATH_MAX];
     char *kept;
+    int i;
 
     if (path == NULL || path[0] == '\0' || roots->count >= VIS_PY_MAX_ROOTS) {
         return;
     }
     if (!vis_py_canonical(path, canon, sizeof canon)) {
         return;
+    }
+    for (i = 0; i < roots->count; i++) {
+        if (strcmp(roots->item[i], canon) == 0) {
+            return;
+        }
     }
     kept = strdup(canon);
     if (kept != NULL) {
@@ -1187,6 +1193,76 @@ int vispython_host(void *fn)
     vis_py_host = host;
     return 0;
 }
+
+/* The interpreter's own installation, added to the READABLE roots whenever a
+   policy comes into force: `sys.prefix`, `sys.base_prefix`, `sys.exec_prefix`
+   and every absolute `sys.path` entry - the vendored stdlib, the shipped
+   Python and whatever directory the host appended for installed packages.
+
+   GraalPy wrapped its confined FileSystem with `allowLanguageHomeAccess`, so a
+   confined context could still read its own stdlib; here the import machinery
+   opens source through the same audited event as the guest, and a policy that
+   names only the session's directories refuses the next cold import. That is
+   not a sandbox, it is a broken interpreter - and deriving these paths is the
+   runtime's job, since only the runtime knows where it was installed. Read at
+   CONFINE time, because a host appends its package directory to `sys.path`
+   after startup. */
+static void vis_py_add_interpreter_roots(void)
+{
+    static const char *const names[] = {"prefix", "base_prefix", "exec_prefix", NULL};
+    PyGILState_STATE gil;
+    PyObject *sys;
+    PyObject *value;
+    PyObject *entry;
+    Py_ssize_t count;
+    Py_ssize_t i;
+    int n;
+
+    if (!Py_IsInitialized()) {
+        return;
+    }
+    gil = PyGILState_Ensure();
+    sys = PyImport_ImportModule("sys");
+    if (sys == NULL) {
+        PyErr_Clear();
+        PyGILState_Release(gil);
+        return;
+    }
+    for (n = 0; names[n] != NULL; n++) {
+        value = PyObject_GetAttrString(sys, names[n]);
+        if (value == NULL) {
+            PyErr_Clear();
+            continue;
+        }
+        if (PyUnicode_Check(value)) {
+            vis_py_roots_add(&vis_py_read_roots, PyUnicode_AsUTF8(value));
+        }
+        Py_DECREF(value);
+    }
+    value = PyObject_GetAttrString(sys, "path");
+    if (value == NULL) {
+        PyErr_Clear();
+    } else {
+        if (PyList_Check(value)) {
+            count = PyList_GET_SIZE(value);
+            for (i = 0; i < count; i++) {
+                entry = PyList_GET_ITEM(value, i);
+                /* An entry that is not absolute is the process's working
+                   directory, which belongs to the host and not to the
+                   interpreter. */
+                if (entry != NULL && PyUnicode_Check(entry)) {
+                    const char *text = PyUnicode_AsUTF8(entry);
+                    if (text != NULL && text[0] == '/') {
+                        vis_py_roots_add(&vis_py_read_roots, text);
+                    }
+                }
+            }
+        }
+        Py_DECREF(value);
+    }
+    Py_DECREF(sys);
+    PyGILState_Release(gil);
+}
 /* Confine the interpreter to `read_roots` and `write_roots`, each a
    newline-separated list of paths, and shut the process surface and `ctypes`
    for as long as that policy is in force. Replaces whatever was in force; two
@@ -1194,9 +1270,13 @@ int vispython_host(void *fn)
    only the host can call this. `refusal` is the sentence the guest reads when
    it reaches for a process; empty keeps the library's own. Answers the policy
    in force, so a caller can log what it actually got after unresolvable roots
-   were dropped. The bytecode cache prefix given at startup is added to the
-   writable roots for as long as a policy is in force: it is the interpreter's
-   own cache, not guest data, and it is counted in the answer. */
+   were dropped. Two things the INTERPRETER owns are added for as long as a
+   policy is in force, because a host cannot be expected to know them and a
+   policy without them refuses the interpreter's own next import: the bytecode
+   cache prefix given at startup, writable because it is cache and not guest
+   data, and the installation itself - `sys.prefix`, `sys.base_prefix`,
+   `sys.exec_prefix` and every absolute `sys.path` entry - readable. Both are
+   counted in the answer. */
 int vispython_confine(const char *read_roots, const char *write_roots, const char *refusal,
                        char *out, int cap)
 {
@@ -1209,6 +1289,7 @@ int vispython_confine(const char *read_roots, const char *write_roots, const cha
     vis_py_confined = (vis_py_read_roots.count + vis_py_write_roots.count) > 0;
     if (vis_py_confined) {
         vis_py_roots_add(&vis_py_write_roots, vis_py_pycache_prefix);
+        vis_py_add_interpreter_roots();
     }
     snprintf(summary, sizeof summary, "%d %d", vis_py_read_roots.count, vis_py_write_roots.count);
     return vis_py_copy_out(summary, out, cap);
