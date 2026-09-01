@@ -61,15 +61,11 @@
   (true? (ev session code)))
 
 (defn block-session
-  "A session that runs BLOCKS: the runtime in its own globals and an empty
-   handle registry, which is process-wide and would otherwise carry whatever an
-   earlier block pinned."
+  "A session that runs BLOCKS: the runtime installed in its own globals."
   []
   (runtime/initialize!)
   (let [s (str "block-" (System/nanoTime))]
     (runtime/install-runtime! s)
-    (runtime/exec! s "import vis_runtime")
-    (runtime/eval-str s "vis_runtime.reset_handles()")
     (track! s)))
 
 (defn block

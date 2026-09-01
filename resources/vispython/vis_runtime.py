@@ -341,30 +341,6 @@ def to_json(value):
         return json.dumps(str(value))
 
 
-def reset_handles():
-    """Empty the handle registry, which no session owns.
-
-    The registries survive an install by design (`__vis_survivor__` keeps them
-    on builtins), so in ONE interpreter they outlive a session too: a test that
-    wants to assert on what a block freed must start from an empty table, or it
-    inherits whatever an earlier block left pinned.
-    """
-    import builtins
-
-    for name in ("__vis_handles__", "__vis_handle_freers__"):
-        table = getattr(builtins, name, None)
-        if table is not None:
-            table.clear()
-    state = getattr(builtins, "__vis_handle_state__", None)
-    if state is not None:
-        for key in ("live_bytes", "new_bytes", "new_owners"):
-            if key in state:
-                state[key] = 0
-        for key in ("sweeping", "owned_since_sweep"):
-            if key in state:
-                state[key] = False
-
-
 def rewrite_imports(source, namespace):
     """Rewrite the block's imports the way the sandbox needs them.
 
@@ -416,9 +392,6 @@ def run_block(source, namespace):
             runner(source)
         except BaseException as exc:
             error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-    reapers = namespace.get("__vis_run_reapers__")
-    if reapers is not None:
-        reapers()
     return {"stdout": stream.getvalue(), "error": error}
 
 

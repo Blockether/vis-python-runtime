@@ -32,5 +32,5 @@
             "the code executed into the session came from THIS repository's resources")
         (is (= "True" (runtime/eval-str session "'__VisShell__' in globals()"))
             "the shell handle type the host drives is defined")
-        (is (= "True" (runtime/eval-str session "callable(__vis_own__)"))
-            "the handle-ownership registry is present, the one GraalPy needed a workaround for")))))
+        (is (= "True" (runtime/eval-str session "callable(__vis_reclaim_fds__)"))
+            "the descriptor registry the sandbox sweeps with is present")))))

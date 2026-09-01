@@ -66,7 +66,7 @@ registry reclaims on CPython exactly as it was written to on GraalPy.
 - [x] `env_python_fd_test.clj` — 512 lines — descriptor discipline for the sandbox `open`
       (the sqlite3 case moves with its shim, the socket cases with the shims that
       open connections)
-- [x] `env_python_handles_test.clj` — 180 lines — the `__vis_own__` registry — the reason for the whole project
+- [x] `env_python_handles_test.clj` — 180 lines — DELETED with the `__vis_own__` registry itself
 - [ ] `env_python_grep_paging_test.clj` — 118 lines — a capped search pages itself
 - [x] `network_guard_test.clj` — 144 lines — `network_guard.py` (policy only; the
       capability and the proxy/CA environment are the host's and stay in Vis)
@@ -85,22 +85,24 @@ registry reclaims on CPython exactly as it was written to on GraalPy.
 - [ ] `env_python_test.clj` — 1711 lines — context construction end to end
 - [ ] `env_python_engine_test.clj` — 236 lines — engine selection and options
 
-What the handles test demanded of the runtime:
+The handle registry is GONE, in both repositories. It existed because GraalPy does
+not refcount: a shim handed the block a wrapper around a host id, dropping the wrapper
+ran no `__del__`, and the host kept the raster or the connection for the life of the
+JVM. CPython refcounts, so the last reference dying IS the release, and there is no
+shim left to hand out such a handle — Vis keeps only host-call doors. Deleted with it:
+`__vis_handle_kind__` / `__vis_own__` / `__vis_forget__` / `__vis_disown__` /
+`__vis_reclaim_handles__` / `__vis_handle_census__`, `__vis_run_reapers__` and its call
+in `run_block`, `vis_runtime.reset_handles`, and both suites that pinned them.
 
-- a BLOCK is not an expression: `vis_runtime.run_block` redirects stdout,
-  awaits `__vis_run_async__` and then runs `__vis_run_reapers__`, which is where
-  reclamation happens. `ffi/run-block` answers `{:stdout … :error …}`.
+What the block seam still demands of the runtime:
+
+- a BLOCK is not an expression: `vis_runtime.run_block` redirects stdout and awaits
+  `__vis_run_async__`. `ffi/run-block` answers `{:stdout … :error …}`.
 - `install` EXECUTES the runtime's source into the session namespace instead of
-  copying names out of an imported module, because the registry's own globals
-  and the block's globals have to be the same dictionary.
+  copying names out of an imported module, because the runtime's own globals and the
+  block's globals have to be the same dictionary.
 - `auto_imports` is imported at install, so a block writes `json.dumps(...)`
   without an import, as it does in Vis.
-- `vis_runtime.reset_handles` clears the registry between tests; one
-  interpreter means one set of builtins for the whole suite.
-
-One case did NOT move: `sandbox-handle-registry-is-shared-test` proves PIL and
-sqlite3 share the registry, and PIL is host-bridged — it belongs to Wave 3 and
-stays in Vis until the JVM side of that bridge exists here.
 
 What the network guard demanded, and it is the sharpest difference the move has
 produced so far: GraalPy gave every session its own interpreter, CPython gives

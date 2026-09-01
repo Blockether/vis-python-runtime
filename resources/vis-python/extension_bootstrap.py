@@ -62,8 +62,8 @@ def __vis_unseal_host__(value):
     provider's `auth(printer)` — an ordinary call for the extension author.
     """
     if isinstance(value, dict):
-        if len(value) == 1 and "__vis_host_callable__" in value:
-            return globals()[value["__vis_host_callable__"]]
+        if len(value) == 1 and "__vis_callback__" in value:
+            return globals()[value["__vis_callback__"]]
         return {k: __vis_unseal_host__(v) for k, v in value.items()}
     if isinstance(value, list):
         return [__vis_unseal_host__(v) for v in value]
@@ -79,7 +79,7 @@ def __vis_call__(cid, args_json):
 import sys as _vis_sys, types as _vis_types
 
 
-def __vis_host_member__(op):
+def __vis_member__(op):
     """Answer `op` with every Python callable in its arguments SEALED.
 
     A callable cannot cross to Clojure — JSON text crosses — so an argument
@@ -97,20 +97,20 @@ def __vis_host_member__(op):
 
 _vis_mod = _vis_types.ModuleType("vis")
 _vis_mod.__dict__["_host"] = _vis_types.SimpleNamespace(
-    state_get=__vis_host_member__(__vis_host_state_get__),
-    state_put=__vis_host_member__(__vis_host_state_put__),
-    state_del=__vis_host_member__(__vis_host_state_del__),
-    state_keys=__vis_host_member__(__vis_host_state_keys__),
-    log=__vis_host_member__(__vis_host_log__),
-    notify=__vis_host_member__(__vis_host_notify__),
-    shell=__vis_host_member__(__vis_host_shell__),
-    jailed_shell=__vis_host_member__(__vis_host_jailed_shell__),
-    jailed_shell_session=__vis_host_member__(__vis_host_jailed_shell_session__),
-    request_input=__vis_host_member__(__vis_host_request_input__),
-    live=__vis_host_member__(__vis_host_live__),
-    reveal_secret=__vis_host_member__(__vis_host_reveal_secret__),
-    forget_secret=__vis_host_member__(__vis_host_forget_secret__),
-    declare_env=__vis_host_member__(__vis_host_declare_env__),
+    state_get=__vis_member__(__vis_host_state_get__),
+    state_put=__vis_member__(__vis_host_state_put__),
+    state_del=__vis_member__(__vis_host_state_del__),
+    state_keys=__vis_member__(__vis_host_state_keys__),
+    log=__vis_member__(__vis_host_log__),
+    notify=__vis_member__(__vis_host_notify__),
+    shell=__vis_member__(__vis_host_shell__),
+    jailed_shell=__vis_member__(__vis_host_jailed_shell__),
+    jailed_shell_session=__vis_member__(__vis_host_jailed_shell_session__),
+    request_input=__vis_member__(__vis_host_request_input__),
+    live=__vis_member__(__vis_host_live__),
+    reveal_secret=__vis_member__(__vis_host_reveal_secret__),
+    forget_secret=__vis_member__(__vis_host_forget_secret__),
+    declare_env=__vis_member__(__vis_host_declare_env__),
 )
 exec(compile(_vis_body, "vis/__init__.py", "exec"), _vis_mod.__dict__)
 _vis_sys.modules["vis"] = _vis_mod
