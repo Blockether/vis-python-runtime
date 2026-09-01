@@ -72,6 +72,16 @@ docstring or a test can state lives there, not here.
   around it. A Python-side guard — a rebound `open`, a wrapper in a shim — is
   advice, not a boundary, and never becomes one. `confinement_test.clj` is what
   proves the difference.
+- **Threads are C's too, and there is ONE pool.** `par` is `_vis_host.par`: the
+  workers, the per-call quota and the hard cap on live threads are C state the
+  host sets through `vispython_threads`, and the cap is checked from the SAME
+  audit hook as confinement, so a thread a block starts for itself spends from
+  the same budget. Never a pool in `vis_runtime` — a module global a block can
+  resize or walk past — and never a pool per SESSION: sessions share the
+  interpreter, so they share its GIL, and a pool each would multiply threads by
+  sessions for no overlap at all. A `par` raises the first failure AT ONCE,
+  while the siblings run on, because `gather` cancels children it has been told
+  about. `threads_test.clj` is what proves all of it.
 
 ## Verifying
 

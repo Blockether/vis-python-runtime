@@ -18,6 +18,7 @@
 #include <Python.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -73,6 +74,284 @@ static int vis_py_take_error(char *out, int cap)
     return written;
 }
 
+/* --------------------------------------------------------------------------
+ * Guest threads.
+ *
+ * Concurrency in the sandbox is threads, not an event loop: `gather` hands the
+ * runtime zero-argument thunks, and the ones that OVERLAP are the ones that
+ * release the GIL - a host call, a socket, a subprocess, an extension doing
+ * its work in C. Bytecode never overlaps, and no pool anywhere changes that.
+ *
+ * The pool is HERE, in C, for the one thing Python cannot do to itself: a
+ * bound the guest is unable to raise. A pool in `vis_runtime` is a module
+ * global a block can resize, rebind or walk straight past with
+ * `threading.Thread`, while a budget checked from the audit hook counts EVERY
+ * thread the interpreter has, whoever started it, and refuses the one that
+ * would cross the line.
+ *
+ * Three numbers, all the host's through `vispython_threads`:
+ *   cap     - live threads the process may have at once, guest and pool alike,
+ *             shared by every session, because sessions share the interpreter.
+ *   workers - threads the pool runs. The default is how a pool for BLOCKING
+ *             work is normally sized, `min(32, cpus + 4)`: these threads spend
+ *             their lives waiting on the host, not competing for a core, so
+ *             sizing them by core count would bound the wrong resource.
+ *   quota   - tasks ONE `par` call may have running at once, so one session's
+ *             wide `gather` cannot take the pool away from the others.
+ * ------------------------------------------------------------------------ */
+
+#define VIS_PY_WORKERS_MAX 32
+#define VIS_PY_THREAD_CAP 100
+#define VIS_PY_PAR_QUOTA 8
+
+/* The events CPython raises when a thread starts: `threading.Thread.start()`
+   and a bare `_thread.start_new_thread` alike. */
+static const char *const vis_py_thread_events[] = {
+    "_thread.start_new_thread", "_thread.start_joinable_thread", NULL};
+
+static int vis_py_thread_cap = VIS_PY_THREAD_CAP;
+static int vis_py_worker_setting = 0; /* 0 = size from the machine */
+static int vis_py_par_quota = VIS_PY_PAR_QUOTA;
+
+/* One `par` call's work. A failing thunk makes `par` raise AT ONCE, while its
+   siblings are still running - that is what the sandbox's `gather` promises,
+   and what lets it cancel them - so a batch OUTLIVES the call that made it and
+   whoever finishes last frees it. */
+typedef struct vis_py_batch vis_py_batch;
+
+typedef struct vis_py_task {
+    PyObject *thunk;
+    PyObject *value;
+    PyObject *error;
+    vis_py_batch *batch;
+    int finished;
+    struct vis_py_task *next;
+} vis_py_task;
+
+struct vis_py_batch {
+    PyObject *thunks; /* the sequence every thunk is borrowed from */
+    vis_py_task *task;
+    int count;
+    int done;        /* tasks finished */
+    int outstanding; /* tasks queued or running, still touching this batch */
+    int abandoned;   /* `par` has returned; the last one out frees */
+};
+
+/* Drop everything a batch still owns. Needs the GIL: what a thunk answered
+   after nobody was left to want it is a Python object like any other. */
+static void vis_py_batch_free(vis_py_batch *batch)
+{
+    int i;
+
+    for (i = 0; i < batch->count; i++) {
+        Py_XDECREF(batch->task[i].value);
+        Py_XDECREF(batch->task[i].error);
+    }
+    Py_XDECREF(batch->thunks);
+    free(batch->task);
+    free(batch);
+}
+
+static struct {
+    pthread_mutex_t lock;
+    pthread_cond_t work;     /* a task was queued, or the pool is stopping */
+    pthread_cond_t finished; /* a task finished */
+    pthread_t worker[VIS_PY_WORKERS_MAX];
+    vis_py_task *head;
+    vis_py_task *tail;
+    int running; /* workers created */
+    int idle;    /* workers waiting for a task, holding no thread state */
+    int started;
+    int stopping;
+} vis_py_pool = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER,
+                 {0},                       NULL,                    NULL,
+                 0,                         0,                       0,
+                 0};
+
+static pthread_key_t vis_py_worker_key;
+static pthread_once_t vis_py_worker_once = PTHREAD_ONCE_INIT;
+
+static void vis_py_worker_key_make(void)
+{
+    pthread_key_create(&vis_py_worker_key, NULL);
+}
+
+/* Whether THIS thread is a pool worker. A `gather` inside a `gather` child runs
+   sequentially: the outer children hold the pool, so submitting to it from one
+   of them is exactly how a bounded pool deadlocks. */
+static int vis_py_in_worker(void)
+{
+    pthread_once(&vis_py_worker_once, vis_py_worker_key_make);
+    return pthread_getspecific(vis_py_worker_key) != NULL;
+}
+
+/* How many workers the pool should run, never more than the cap allows. */
+static int vis_py_worker_target(void)
+{
+    long cpus;
+    int workers = vis_py_worker_setting;
+
+    if (workers <= 0) {
+        cpus = sysconf(_SC_NPROCESSORS_ONLN);
+        workers = (int)(cpus < 1 ? 1 : cpus) + 4;
+    }
+    if (workers > VIS_PY_WORKERS_MAX) {
+        workers = VIS_PY_WORKERS_MAX;
+    }
+    if (workers > vis_py_thread_cap) {
+        workers = vis_py_thread_cap;
+    }
+    return workers < 1 ? 1 : workers;
+}
+
+/* Threads alive in this interpreter. A thread the guest started holds a thread
+   state for its whole life and so does a worker RUNNING a task; a worker
+   waiting for work holds none, so it is counted by hand. Needs the GIL. */
+static int vis_py_live_threads(void)
+{
+    PyThreadState *state;
+    int live = 0;
+    int idle;
+
+    for (state = PyInterpreterState_ThreadHead(PyInterpreterState_Get()); state != NULL;
+         state = PyThreadState_Next(state)) {
+        live++;
+    }
+    pthread_mutex_lock(&vis_py_pool.lock);
+    idle = vis_py_pool.idle;
+    pthread_mutex_unlock(&vis_py_pool.lock);
+    return live + idle;
+}
+
+/* The verdict the audit hook needs: -1, with the reason raised, when one more
+   thread would cross the cap. */
+static int vis_py_thread_refused(void)
+{
+    char refusal[128];
+
+    if (vis_py_live_threads() < vis_py_thread_cap) {
+        return 0;
+    }
+    snprintf(refusal, sizeof refusal,
+             "the sandbox may run %d threads at once and they are all taken",
+             vis_py_thread_cap);
+    PyErr_SetString(PyExc_RuntimeError, refusal);
+    return -1;
+}
+
+static void *vis_py_worker_main(void *arg)
+{
+    vis_py_task *task;
+    vis_py_batch *batch;
+    PyObject *value;
+    PyObject *error;
+    PyGILState_STATE gil;
+    int last;
+
+    (void)arg;
+    pthread_once(&vis_py_worker_once, vis_py_worker_key_make);
+    pthread_setspecific(vis_py_worker_key, &vis_py_pool);
+#if defined(__APPLE__)
+    pthread_setname_np("vis-par");
+#endif
+    for (;;) {
+        pthread_mutex_lock(&vis_py_pool.lock);
+        while (vis_py_pool.head == NULL && !vis_py_pool.stopping) {
+            vis_py_pool.idle++;
+            pthread_cond_wait(&vis_py_pool.work, &vis_py_pool.lock);
+            vis_py_pool.idle--;
+        }
+        task = vis_py_pool.head;
+        if (task == NULL) {
+            pthread_mutex_unlock(&vis_py_pool.lock);
+            return NULL;
+        }
+        vis_py_pool.head = task->next;
+        if (vis_py_pool.head == NULL) {
+            vis_py_pool.tail = NULL;
+        }
+        pthread_mutex_unlock(&vis_py_pool.lock);
+
+        /* The pool lock is never taken while WAITING for the GIL, only while
+           already holding it, so a worker and a `par` cannot hold one and want
+           the other. */
+        gil = PyGILState_Ensure();
+        value = PyObject_CallNoArgs(task->thunk);
+        error = (value == NULL) ? PyErr_GetRaisedException() : NULL;
+        batch = task->batch;
+
+        pthread_mutex_lock(&vis_py_pool.lock);
+        task->value = value;
+        task->error = error;
+        task->finished = 1;
+        batch->done++;
+        batch->outstanding--;
+        last = batch->abandoned && batch->outstanding == 0;
+        pthread_cond_broadcast(&vis_py_pool.finished);
+        pthread_mutex_unlock(&vis_py_pool.lock);
+
+        if (last) {
+            vis_py_batch_free(batch);
+        }
+        PyGILState_Release(gil);
+    }
+}
+
+/* Start the workers, once, when the first `par` needs them: a session that
+   never gathers pays for no thread at all. Needs the GIL; answers -1 with the
+   reason raised when the machine gave none. */
+static int vis_py_pool_start(void)
+{
+    int wanted;
+    int made = 0;
+
+    pthread_mutex_lock(&vis_py_pool.lock);
+    if (vis_py_pool.started) {
+        pthread_mutex_unlock(&vis_py_pool.lock);
+        return 0;
+    }
+    wanted = vis_py_worker_target();
+    while (made < wanted &&
+           pthread_create(&vis_py_pool.worker[made], NULL, vis_py_worker_main, NULL) == 0) {
+        made++;
+    }
+    vis_py_pool.running = made;
+    vis_py_pool.started = made > 0;
+    pthread_mutex_unlock(&vis_py_pool.lock);
+    if (made == 0) {
+        PyErr_SetString(PyExc_RuntimeError, "no worker thread could be started");
+        return -1;
+    }
+    return 0;
+}
+
+/* Stop the workers and join them. The caller must NOT hold the GIL: a worker
+   finishing its task needs it. */
+static void vis_py_pool_stop(void)
+{
+    pthread_t worker[VIS_PY_WORKERS_MAX];
+    int count;
+    int i;
+
+    pthread_mutex_lock(&vis_py_pool.lock);
+    if (!vis_py_pool.started) {
+        pthread_mutex_unlock(&vis_py_pool.lock);
+        return;
+    }
+    vis_py_pool.stopping = 1;
+    count = vis_py_pool.running;
+    memcpy(worker, vis_py_pool.worker, sizeof worker[0] * (size_t)count);
+    pthread_cond_broadcast(&vis_py_pool.work);
+    pthread_mutex_unlock(&vis_py_pool.lock);
+    for (i = 0; i < count; i++) {
+        pthread_join(worker[i], NULL);
+    }
+    pthread_mutex_lock(&vis_py_pool.lock);
+    vis_py_pool.started = 0;
+    vis_py_pool.stopping = 0;
+    vis_py_pool.running = 0;
+    pthread_mutex_unlock(&vis_py_pool.lock);
+}
 /* --------------------------------------------------------------------------
  * Confinement.
  *
@@ -392,6 +671,11 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
     int writing;
 
     (void)userdata;
+    /* The thread budget is not part of confinement - it bounds the PROCESS - so
+       it answers whether a filesystem policy is in force or not. */
+    if (event != NULL && vis_py_event_in(event, vis_py_thread_events)) {
+        return vis_py_thread_refused();
+    }
     if (!vis_py_confined || event == NULL || args == NULL || !PyTuple_Check(args)) {
         return 0;
     }
@@ -513,9 +797,150 @@ static PyObject *vis_py_host_call(PyObject *self, PyObject *args)
     return answer;
 }
 
+/* Call every thunk on THIS thread, in order: the answer when there are fewer
+   than two of them, or when the caller is itself a worker. */
+static PyObject *vis_py_par_inline(PyObject *thunks, Py_ssize_t count)
+{
+    PyObject *values = PyList_New(count);
+    PyObject *value;
+    Py_ssize_t i;
+
+    if (values == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < count; i++) {
+        value = PyObject_CallNoArgs(PySequence_Fast_GET_ITEM(thunks, i));
+        if (value == NULL) {
+            Py_DECREF(values);
+            return NULL;
+        }
+        PyList_SET_ITEM(values, i, value);
+    }
+    return values;
+}
+
+/* `_vis_host.par(thunks)` -> their values IN ORDER, raising the FIRST failure
+   the moment that thunk fails. Waiting for the siblings first would be tidier
+   to write and wrong to use: the runtime's `gather` cancels what is still
+   running when a child fails, and it cannot cancel what it has not been told
+   about yet. The siblings keep running into a batch nobody reads. */
+static PyObject *vis_py_par(PyObject *self, PyObject *args)
+{
+    PyObject *sequence = NULL;
+    PyObject *thunks;
+    PyObject *values = NULL;
+    PyObject *failure = NULL;
+    vis_py_batch *batch;
+    PyThreadState *save;
+    Py_ssize_t count;
+    Py_ssize_t i;
+    int submitted = 0;
+    int outstanding;
+    int quota;
+
+    (void)self;
+    if (!PyArg_ParseTuple(args, "O", &sequence)) {
+        return NULL;
+    }
+    thunks = PySequence_Fast(sequence, "par() wants a sequence of thunks");
+    if (thunks == NULL) {
+        return NULL;
+    }
+    count = PySequence_Fast_GET_SIZE(thunks);
+    if (count < 2 || vis_py_in_worker()) {
+        values = vis_py_par_inline(thunks, count);
+        Py_DECREF(thunks);
+        return values;
+    }
+    if (vis_py_pool_start() != 0) {
+        Py_DECREF(thunks);
+        return NULL;
+    }
+    batch = (vis_py_batch *)calloc(1, sizeof *batch);
+    if (batch != NULL) {
+        batch->task = (vis_py_task *)calloc((size_t)count, sizeof *batch->task);
+    }
+    if (batch == NULL || batch->task == NULL) {
+        free(batch);
+        Py_DECREF(thunks);
+        return PyErr_NoMemory();
+    }
+    batch->thunks = thunks; /* the batch owns the sequence from here on */
+    batch->count = (int)count;
+    for (i = 0; i < count; i++) {
+        batch->task[i].thunk = PySequence_Fast_GET_ITEM(thunks, i);
+        batch->task[i].batch = batch;
+    }
+    quota = vis_py_par_quota < 1 ? 1 : vis_py_par_quota;
+    for (i = 0; i < count; i++) {
+        pthread_mutex_lock(&vis_py_pool.lock);
+        while (submitted < (int)count && submitted - batch->done < quota) {
+            if (vis_py_pool.tail == NULL) {
+                vis_py_pool.head = &batch->task[submitted];
+            } else {
+                vis_py_pool.tail->next = &batch->task[submitted];
+            }
+            vis_py_pool.tail = &batch->task[submitted];
+            batch->outstanding++;
+            submitted++;
+            pthread_cond_signal(&vis_py_pool.work);
+        }
+        pthread_mutex_unlock(&vis_py_pool.lock);
+
+        /* The GIL goes back while this call waits, or no worker could run. */
+        save = PyEval_SaveThread();
+        pthread_mutex_lock(&vis_py_pool.lock);
+        while (!batch->task[i].finished) {
+            pthread_cond_wait(&vis_py_pool.finished, &vis_py_pool.lock);
+        }
+        pthread_mutex_unlock(&vis_py_pool.lock);
+        PyEval_RestoreThread(save);
+
+        if (batch->task[i].error != NULL) {
+            failure = batch->task[i].error;
+            batch->task[i].error = NULL;
+            break;
+        }
+    }
+    if (failure == NULL) {
+        values = PyList_New(count);
+        if (values != NULL) {
+            for (i = 0; i < count; i++) {
+                PyList_SET_ITEM(values, i, batch->task[i].value);
+                batch->task[i].value = NULL; /* the list owns it now */
+            }
+        }
+    }
+    pthread_mutex_lock(&vis_py_pool.lock);
+    batch->abandoned = 1;
+    outstanding = batch->outstanding;
+    pthread_mutex_unlock(&vis_py_pool.lock);
+    if (outstanding == 0) {
+        vis_py_batch_free(batch);
+    }
+    if (failure != NULL) {
+        PyErr_SetRaisedException(failure);
+        return NULL;
+    }
+    return values;
+}
+
+/* `_vis_host.threads()` -> the policy in force and what is alive under it. */
+static PyObject *vis_py_threads(PyObject *self, PyObject *args)
+{
+    (void)self;
+    (void)args;
+    return Py_BuildValue("{s:i,s:i,s:i,s:i}", "cap", vis_py_thread_cap, "workers",
+                         vis_py_worker_target(), "quota", vis_py_par_quota, "live",
+                         vis_py_live_threads());
+}
 static PyMethodDef vis_py_host_methods[] = {
     {"call", vis_py_host_call, METH_VARARGS,
      "call(name, payload) -> str: run the host callable `name` over a text payload."},
+    {"par", vis_py_par, METH_VARARGS,
+     "par(thunks) -> list: run zero-argument thunks on the host's worker pool."},
+    {"threads", vis_py_threads, METH_NOARGS,
+     "threads() -> dict: the thread policy in force and what is alive under it."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -576,6 +1001,40 @@ int vispython_confine(const char *read_roots, const char *write_roots, const cha
     return vis_py_copy_out(summary, out, cap);
 }
 
+/* Set the thread policy: `policy` is up to three integers - cap, workers,
+   quota - separated by spaces, where 0 or a missing number keeps what is in
+   force. Answers the three in force, so a caller can log what it got.
+
+   `cap` is the hard one: it counts every thread the interpreter has, so a guest
+   that starts its own is refused by the same budget the pool spends from, and
+   every session shares it because every session shares the interpreter.
+   `workers` sizes the pool when it FIRST runs; a later change is for the next
+   process, because resizing a pool with work in it is a way to lose a task. */
+int vispython_threads(const char *policy, char *out, int cap)
+{
+    int want_cap = 0;
+    int want_workers = 0;
+    int want_quota = 0;
+    int matched;
+    char summary[64];
+
+    if (policy != NULL) {
+        matched = sscanf(policy, "%d %d %d", &want_cap, &want_workers, &want_quota);
+        (void)matched;
+    }
+    if (want_cap > 0) {
+        vis_py_thread_cap = want_cap;
+    }
+    if (want_workers > 0) {
+        vis_py_worker_setting = want_workers;
+    }
+    if (want_quota > 0) {
+        vis_py_par_quota = want_quota;
+    }
+    snprintf(summary, sizeof summary, "%d %d %d", vis_py_thread_cap, vis_py_worker_target(),
+             vis_py_par_quota);
+    return vis_py_copy_out(summary, out, cap);
+}
 /* Start the interpreter, rooted at `home` when one is given.
 
    `home` is a VENDORED CPython tree — the directory holding `lib/python3.14/`.
@@ -806,10 +1265,17 @@ int vispython_run_block(const char *module_name, const char *code, char *out, in
    reported a non-zero finalization status. */
 int vispython_finalize(void)
 {
+    PyThreadState *save;
     int status;
+
     if (!vis_py_started) {
         return 0;
     }
+    /* Workers first, and without the GIL: one of them may be inside a task and
+       needs the GIL to leave it. Finalizing under a live worker is a crash. */
+    save = PyEval_SaveThread();
+    vis_py_pool_stop();
+    PyEval_RestoreThread(save);
     status = Py_FinalizeEx();
     vis_py_started = 0;
     return (status == 0) ? 0 : VIS_PY_ERR_INIT;

@@ -135,6 +135,19 @@
    (let [[read write] (Interpreter/confine (vec read-roots) (vec write-roots) refusal)]
      {:read read :write write})))
 
+(defn threads!
+  "Set the process's thread policy, answering `{:cap n :workers n :quota n}` in
+   force. A zero keeps what is already set.
+
+   Like confinement this is C state, not Python: `:cap` is checked from the audit
+   hook, so it counts a thread a block started for itself as well as the pool's
+   own, and every session shares it because every session shares the interpreter.
+   `:workers` sizes the pool `gather` dispatches on, `:quota` is how many of them
+   one gather may hold."
+  [cap workers quota]
+  (let [[c w q] (Interpreter/threads cap workers quota)]
+    {:cap c :workers w :quota q}))
+
 (defn eval-str
   "Evaluate `code` as a Python EXPRESSION, answering `str(result)`."
   ([code] (eval-str default-session code))

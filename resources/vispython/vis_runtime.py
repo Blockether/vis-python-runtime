@@ -17,7 +17,6 @@ and reaches the interpreter as a source root; Vis' copy is hashed against it
 
 import ast
 import builtins
-import concurrent.futures
 import contextlib
 import gc
 import importlib
@@ -27,7 +26,6 @@ import io
 import json
 import os
 import sys
-import threading
 
 #: Module that carries the sandbox runtime. Overridable so a port can point at
 #: the module in its new home without a code change.
@@ -82,42 +80,26 @@ def install_module(namespace, module):
     return code.co_filename
 
 
-PAR_WORKERS = 8
-
-_pool_lock = threading.Lock()
-_pool = None
-
-
-def _par_pool():
-    """The ONE bounded pool `par` dispatches on, created when first needed."""
-    global _pool
-    with _pool_lock:
-        if _pool is None:
-            _pool = concurrent.futures.ThreadPoolExecutor(
-                max_workers=PAR_WORKERS, thread_name_prefix="vis-par"
-            )
-        return _pool
-
-
 def par(thunks):
     """Run `thunks` at the same time, answering their values IN ORDER.
 
     `gather` hands the runtime a list of zero-argument thunks and expects a list
-    back; how they RUN is the embedder's, and the embedder is this library
-    unless a host binds `__vis_par__` over it. Threads are the whole mechanism:
-    a thunk waiting on a socket, a subprocess or a lock has released the GIL,
-    which is what a sandbox block's concurrency is made of.
+    back; how they RUN is the embedder's, and the embedder is the C boundary.
+    `_vis_host.par` dispatches on ONE pool of worker threads owned by the
+    PROCESS, whose size, per-call quota and the hard cap on live threads are
+    policy the host sets and no block can raise. A pool here would be a module
+    global a session could resize or walk past, and a pool per session would
+    multiply threads by sessions for nothing, because one interpreter has one
+    GIL however many sessions share it.
 
-    One bounded pool serves the process, because a pool per `gather` would let a
-    loop of gathers create threads without limit. A gather INSIDE a gather child
-    therefore runs sequentially: the outer children hold the pool, so submitting
-    to it from one of them is how a bounded pool deadlocks.
+    Threads are still the whole mechanism: a thunk waiting on a socket, a
+    subprocess or a host call has released the GIL, which is what a sandbox
+    block's concurrency is made of. A gather INSIDE a gather child runs
+    sequentially, because the outer children are holding the pool.
     """
-    thunks = list(thunks)
-    if len(thunks) < 2 or threading.current_thread().name.startswith("vis-par"):
-        return [thunk() for thunk in thunks]
-    running = [_par_pool().submit(thunk) for thunk in thunks]
-    return [future.result() for future in running]
+    import _vis_host
+
+    return _vis_host.par(list(thunks))
 
 
 def install(namespace):

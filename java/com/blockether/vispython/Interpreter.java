@@ -81,6 +81,7 @@ public final class Interpreter {
       "vispython_run_block", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
       "vispython_confine", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
       "vispython_host", descriptor(ValueLayout.ADDRESS),
+      "vispython_threads", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
       "vispython_finalize", descriptor());
 
   private static final ExecutorService THREAD = Executors.newSingleThreadExecutor(runnable -> {
@@ -274,6 +275,26 @@ public final class Interpreter {
         String.join("\n", writeRoots), refusal == null ? "" : refusal);
     String[] counts = answer.trim().split("\\s+");
     return new int[] {Integer.parseInt(counts[0]), Integer.parseInt(counts[1])};
+  }
+
+  /**
+   * Set the process's thread policy, answering the {@code {cap, workers, quota}}
+   * in force; a zero keeps what is already set.
+   *
+   * <p>Like confinement this is NOT Python. {@code cap} is checked from the audit
+   * hook, so it counts a thread a block started for itself as well as the pool's
+   * own, and every session shares it because every session shares the
+   * interpreter. {@code workers} sizes the pool the runtime's {@code gather}
+   * dispatches on, once, when it first runs - the default is {@code min(32, cpus
+   * + 4)}, the size for BLOCKING work, since a worker waits on the host rather
+   * than competing for a core. {@code quota} is how many of those workers ONE
+   * gather may hold, so a wide gather cannot take the pool from other sessions.
+   */
+  public static int[] threads(int cap, int workers, int quota) {
+    String answer = call("vispython_threads", cap + " " + workers + " " + quota);
+    String[] numbers = answer.trim().split("\\s+");
+    return new int[] {Integer.parseInt(numbers[0]), Integer.parseInt(numbers[1]),
+        Integer.parseInt(numbers[2])};
   }
 
   /** Evaluate {@code code} as an expression, answering {@code str(result)}. */

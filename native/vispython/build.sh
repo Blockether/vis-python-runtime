@@ -79,7 +79,7 @@ minor="${CPYTHON_VERSION%.*}"
 # `pycache_prefix` under the user's own directory, so the first run compiles what
 # it imports, every run after that is cached, and the shipped tree never changes.
 find "$home" -type d -name __pycache__ -prune -exec rm -rf {} +
-cc -O2 -fPIC -shared -Wall -Wextra \
+cc -O2 -fPIC -shared -pthread -Wall -Wextra \
    -I"$home/include/python$minor" \
    -o "$out/$lib" \
    "$here/vispython.c" \
