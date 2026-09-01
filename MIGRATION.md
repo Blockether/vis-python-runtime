@@ -60,14 +60,34 @@ Two shim bugs the move exposed, fixed in BOTH copies (parity holds):
 Blocked on the bridge growing the ops these exercise (handles, descriptors,
 process surface). Each one moves the day its op exists here.
 
+The first one is in, and it is the one the project exists for: the handle
+registry reclaims on CPython exactly as it was written to on GraalPy.
+
 - [ ] `env_python_fd_test.clj` — 512 lines — descriptor discipline for the sandbox `open`
-- [ ] `env_python_handles_test.clj` — 180 lines — the `__vis_own__` registry — the reason for the whole project
+- [x] `env_python_handles_test.clj` — 180 lines — the `__vis_own__` registry — the reason for the whole project
 - [ ] `env_python_grep_paging_test.clj` — 118 lines — a capped search pages itself
 - [ ] `network_guard_test.clj` — 144 lines — `network_guard.py`
 - [ ] `sandbox_fs_test.clj` — 1246 lines — sandbox filesystem surface
 - [ ] `env_python_form_eval_test.clj` — 1879 lines — expression/statement evaluation, printing, tracebacks
 - [ ] `env_python_test.clj` — 1711 lines — context construction end to end
 - [ ] `env_python_engine_test.clj` — 236 lines — engine selection and options
+
+What the handles test demanded of the runtime:
+
+- a BLOCK is not an expression: `vis_runtime.run_block` redirects stdout,
+  awaits `__vis_run_async__` and then runs `__vis_run_reapers__`, which is where
+  reclamation happens. `ffi/run-block` answers `{:stdout … :error …}`.
+- `install` EXECUTES the runtime's source into the session namespace instead of
+  copying names out of an imported module, because the registry's own globals
+  and the block's globals have to be the same dictionary.
+- `auto_imports` is imported at install, so a block writes `json.dumps(...)`
+  without an import, as it does in Vis.
+- `vis_runtime.reset_handles` clears the registry between tests; one
+  interpreter means one set of builtins for the whole suite.
+
+One case did NOT move: `sandbox-handle-registry-is-shared-test` proves PIL and
+sqlite3 share the registry, and PIL is host-bridged — it belongs to Wave 3 and
+stays in Vis until the JVM side of that bridge exists here.
 
 ## Wave 3 — shims with a host bridge (4607 lines)
 

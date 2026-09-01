@@ -42,6 +42,7 @@
    "vis_python_eval"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_exec"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_run"        (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
+   "vis_python_run_block"  (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_finalize"   (descriptor ValueLayout/JAVA_INT)})
 
 (defn- link-handles
@@ -170,6 +171,18 @@
    underneath it."
   ([code] (run default-session code))
   ([session code] (edn/read-string (call "vis_python_run" session code))))
+
+(defn run-block
+  "Run `code` as a sandbox BLOCK and answer `{:stdout … :error …}`.
+
+   A block's ONE success channel is what it PRINTED, so a caller that needs a
+   value back ends the block with `print(...)` and reads `:stdout`; `:error` is
+   nil unless the block raised. The reapers run at the boundary, so a handle the
+   block dropped is freed before this returns."
+  ([code] (run-block default-session code))
+  ([session code]
+   (let [answer (edn/read-string (call "vis_python_run_block" session code))]
+     {:stdout (get answer "stdout") :error (get answer "error")})))
 
 (defn install-runtime!
   "Equip `session` with the sandbox runtime and answer how many names it got.

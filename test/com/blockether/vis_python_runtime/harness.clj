@@ -5,7 +5,9 @@
    in a sandbox context, expect `True`. Here the context is a session in the
    embedded interpreter, so `truthy` is the whole harness — one interpreter for
    the suite, one session per shim, and a skip when no cdylib has been built."
-  (:require [clojure.test]
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
+            [clojure.test]
             [com.blockether.vis-python-runtime :as runtime]
             [com.blockether.vis-python-runtime.ffi :as ffi]))
 
@@ -49,6 +51,30 @@
   "Whether `code` answered Python `True`."
   [session code]
   (true? (ev session code)))
+
+(defn block-session
+  "A session that runs BLOCKS: the runtime in its own globals and an empty
+   handle registry, which is process-wide and would otherwise carry whatever an
+   earlier block pinned."
+  []
+  (ffi/initialize!)
+  (let [s (str "block-" (System/nanoTime))]
+    (ffi/install-runtime! s)
+    (ffi/exec! s "import vis_runtime")
+    (ffi/eval-str s "vis_runtime.reset_handles()")
+    s))
+
+(defn block
+  "Run `code` as a sandbox block in `session`: `{:stdout … :error …}`."
+  [session code]
+  (ffi/run-block session code))
+
+(defn printed
+  "The JSON value a block PRINTED. A block has ONE success channel — what it
+   printed — so a test that needs a value back ends with `print(json.dumps(…))`
+   and reads it here."
+  [answer]
+  (json/read-str (str/trim (str (:stdout answer)))))
 
 (defn ev-guarded
   "Like `ev`, with `sys.modules` restored afterwards. One interpreter means one

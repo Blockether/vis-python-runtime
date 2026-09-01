@@ -207,6 +207,42 @@ int vis_python_run(const char *module_name, const char *code, char *out, int cap
     return written;
 }
 
+/* Run `code` as a sandbox BLOCK: the runtime's own `__vis_run_async__` under
+   captured stdout, with the reapers at the boundary. Policy is Python's
+   (`vis_runtime.run_block`); this only carries the source over and brings the
+   EDN map — stdout and error — back. */
+int vis_python_run_block(const char *module_name, const char *code, char *out, int cap)
+{
+    PyObject *globals, *runtime, *result, *text;
+    const char *utf8;
+    int written;
+
+    if (!vis_py_started) {
+        return VIS_PY_ERR_INIT;
+    }
+    globals = vis_py_namespace(module_name, out, cap);
+    if (globals == NULL) {
+        return VIS_PY_ERR_PYTHON;
+    }
+    runtime = PyImport_ImportModule("vis_runtime");
+    if (runtime == NULL) {
+        vis_py_take_error(out, cap);
+        return VIS_PY_ERR_PYTHON;
+    }
+    result = PyObject_CallMethod(runtime, "run_block_edn", "sO", code, globals);
+    Py_DECREF(runtime);
+    if (result == NULL) {
+        vis_py_take_error(out, cap);
+        return VIS_PY_ERR_PYTHON;
+    }
+    text = PyObject_Str(result);
+    utf8 = (text == NULL) ? NULL : PyUnicode_AsUTF8(text);
+    written = vis_py_copy_out(utf8 == NULL ? "" : utf8, out, cap);
+    Py_XDECREF(text);
+    Py_DECREF(result);
+    return written;
+}
+
 /* Stop the interpreter. Idempotent. Returns 0, or VIS_PY_ERR_INIT if CPython
    reported a non-zero finalization status. */
 int vis_python_finalize(void)

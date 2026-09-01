@@ -17,9 +17,11 @@ below.
 """
 
 import ast
+import contextlib
 import importlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -28,34 +30,58 @@ import sys
 #: the module in its new home without a code change.
 SANDBOX_MODULE = os.environ.get("VIS_PYTHON_SANDBOX_MODULE", "async_runtime")
 
-#: Names every module has; not the runtime's, so never copied into a session.
-_MODULE_OWN = frozenset(
-    ["__name__", "__doc__", "__package__", "__loader__", "__spec__", "__file__",
-     "__path__", "__cached__", "__builtins__"]
-)
+#: Module that staples the stdlib conveniences a block may use without importing
+#: them (`json.dumps`, `Path`, `re`). It installs itself onto builtins when
+#: executed, so importing it once per PROCESS equips every session.
+AUTO_IMPORTS_MODULE = "auto_imports"
+
+#: The compiled runtime, kept once per process — see `sandbox_code`.
+_SANDBOX_CODE = None
+
+
+def sandbox_code():
+    """The compiled sandbox runtime, located through the import system.
+
+    The host never carries this source as a string: the import machinery finds
+    the file on the source roots, and the compiled result is kept because every
+    session pays for it.
+    """
+    global _SANDBOX_CODE
+    if _SANDBOX_CODE is None:
+        spec = importlib.util.find_spec(SANDBOX_MODULE)
+        origin = None if spec is None else spec.origin
+        if not origin or not os.path.isfile(origin):
+            raise ImportError(
+                "sandbox runtime module %r not on %r"
+                % (SANDBOX_MODULE, sys_path_snapshot())
+            )
+        with open(origin, "r", encoding="utf-8") as handle:
+            _SANDBOX_CODE = compile(handle.read(), origin, "exec")
+    return _SANDBOX_CODE
 
 
 def install(namespace):
-    """Copy the sandbox runtime's public names into `namespace`.
+    """Equip `namespace` with the sandbox runtime, IN its own globals.
 
-    Also puts the shim finder on `sys.meta_path`, because an equipped session
-    is one where `import bs4` finds the sandbox's bs4. Returns how many names
-    were installed, so the host can assert a session is equipped instead of
-    guessing. Raises `ImportError` naming the search path when the runtime
-    module is not on it — a silent half-installed session is the one failure
-    mode worth being loud about.
+    The runtime is EXECUTED here rather than copied in, because that is what it
+    is written for: `__vis_run_async__` and every reaper read `globals()`, so a
+    block must run against the SESSION's names, not against some module's. The
+    state that has to outlive an install — pending writes, the descriptor table,
+    the handle registry — is adopted from builtins by the runtime itself
+    (`__vis_survivor__`), so a second session shares those process-wide tables
+    instead of quietly resetting them.
+
+    Also puts the shim finder on `sys.meta_path`, because an equipped session is
+    one where `import bs4` finds the sandbox's bs4, and imports the auto-imports
+    module, because a block writes `json.dumps(...)` without importing json.
+    Returns how many names the
+    session ended up with, so the host can assert it is equipped instead of
+    guessing.
     """
     install_finder()
-    try:
-        module = importlib.import_module(SANDBOX_MODULE)
-    except ImportError as exc:
-        raise ImportError(
-            "sandbox runtime module %r not importable from %r: %s"
-            % (SANDBOX_MODULE, sys_path_snapshot(), exc)
-        ) from exc
-    installed = {k: v for k, v in vars(module).items() if k not in _MODULE_OWN}
-    namespace.update(installed)
-    return len(installed)
+    importlib.import_module(AUTO_IMPORTS_MODULE)
+    exec(sandbox_code(), namespace)
+    return len(namespace)
 
 
 def run(source, namespace):
@@ -112,6 +138,60 @@ def to_edn(value):
     if isinstance(value, dict):
         return "{" + " ".join(to_edn(k) + " " + to_edn(v) for k, v in value.items()) + "}"
     return json.dumps(str(value))
+
+
+def reset_handles():
+    """Empty the handle registry, which no session owns.
+
+    The registries survive an install by design (`__vis_survivor__` keeps them
+    on builtins), so in ONE interpreter they outlive a session too: a test that
+    wants to assert on what a block freed must start from an empty table, or it
+    inherits whatever an earlier block left pinned.
+    """
+    import builtins
+
+    for name in ("__vis_handles__", "__vis_handle_freers__"):
+        table = getattr(builtins, name, None)
+        if table is not None:
+            table.clear()
+    state = getattr(builtins, "__vis_handle_state__", None)
+    if state is not None:
+        for key in ("live_bytes", "new_bytes", "new_owners"):
+            if key in state:
+                state[key] = 0
+        for key in ("sweeping", "owned_since_sweep"):
+            if key in state:
+                state[key] = False
+
+
+def run_block(source, namespace):
+    """Run `source` the way `python_execution` runs a BLOCK.
+
+    A block has ONE success channel — what it PRINTED — so what comes back is
+    the captured stdout, plus the error text when it raised. The boundary is
+    real: the reapers run after it, which is where the handle registry earns its
+    keep, and a block that leaves a handle unreachable pays for it HERE and not
+    in whichever unrelated block allocates next.
+    """
+    runner = namespace.get("__vis_run_async__")
+    if runner is None:
+        raise RuntimeError("session is not equipped: install(namespace) first")
+    stream = io.StringIO()
+    error = None
+    with contextlib.redirect_stdout(stream):
+        try:
+            runner(source)
+        except BaseException as exc:
+            error = "%s: %s" % (type(exc).__name__, exc) if str(exc) else type(exc).__name__
+    reapers = namespace.get("__vis_run_reapers__")
+    if reapers is not None:
+        reapers()
+    return {"stdout": stream.getvalue(), "error": error}
+
+
+def run_block_edn(source, namespace):
+    """`run_block` rendered as EDN. What the C ABI calls."""
+    return to_edn(run_block(source, namespace))
 
 
 def run_edn(source, namespace):
