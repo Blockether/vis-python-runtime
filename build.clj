@@ -18,13 +18,10 @@
                   "windows-x64"  "vispython.dll"})
 
 (def version
-  "VERSION env (set by CI from the release tag) wins; otherwise the
-   resources/VERSION file tagged `-SNAPSHOT` for local builds."
-  (let [v (System/getenv "VERSION")]
-    (cond
-      (and v (str/starts-with? v "v")) (subs v 1)
-      v v
-      :else (str (str/trim (slurp "resources/VERSION")) "-SNAPSHOT"))))
+  "The repo-root VIS_PYTHON_VERSION file, verbatim — the single version source,
+   exactly as VIS_VERSION is for vis. No env override, no snapshot suffix, no git
+   sha: which build produced an artifact is the image tag's job, never this string."
+  (str/trim (slurp "VIS_PYTHON_VERSION")))
 
 (def class-dir "target/classes")
 (def native-class-dir "target/native-classes")
@@ -50,8 +47,9 @@
                 :src-dirs ["src"]
                 :pom-data (pom-data "Embedded CPython for the Vis sandbox — statically linked, reached over FFM, without Truffle.")})
   ;; src only: resources/prebuilds belongs to the per-platform native jars, and
-  ;; the root resources/VERSION would collide with another lib's on a shared
-  ;; classpath, so the namespaced copy below is the one that ships.
+  ;; VIS_PYTHON_VERSION is a repo-root file, not a resource — the namespaced copy
+  ;; below is the one that ships, because a bare `VERSION` resource would collide
+  ;; with another library's on a shared classpath.
   (b/copy-dir {:src-dirs ["src"] :target-dir class-dir})
   (let [vfile (io/file class-dir "vis-python-runtime" "VERSION")]
     (io/make-parents vfile)

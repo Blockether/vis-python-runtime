@@ -4,8 +4,10 @@
             [com.blockether.vis-python-runtime :as runtime]))
 
 (deftest version-test
-  (is (re-matches #"\d+\.\d+\.\d+(-SNAPSHOT)?" runtime/version)
-      "the VERSION resource must be on the classpath and semver-shaped"))
+  (is (re-matches #"\d+\.\d+\.\d+" (str/trim (slurp "VIS_PYTHON_VERSION")))
+      "repo-root VIS_PYTHON_VERSION is the single version source and is semver-shaped")
+  (is (contains? #{"dev"} runtime/version)
+      "a source checkout has no built VERSION resource, so the version reads dev"))
 
 (deftest platform-test
   (testing "os and architecture spellings we actually meet"

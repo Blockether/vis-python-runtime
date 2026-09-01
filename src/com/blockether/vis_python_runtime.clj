@@ -21,12 +21,11 @@
   "VIS_PYTHON_NATIVE_PATH")
 
 (def version
-  "This library's version, from the namespaced resource the build writes
-   (`vis-python-runtime/VERSION`), falling back to the repo's `resources/VERSION`
-   during development."
-  (some-> (or (io/resource "vis-python-runtime/VERSION") (io/resource "VERSION"))
-          slurp
-          str/trim))
+  "This library's version: the `vis-python-runtime/VERSION` resource the build
+   writes from the repo-root VIS_PYTHON_VERSION file, verbatim, else \"dev\" in a
+   source checkout where no build has run."
+  (or (some-> (io/resource "vis-python-runtime/VERSION") slurp str/trim)
+      "dev"))
 
 (defn- os-tag [^String os-name]
   (let [n (str/lower-case (or os-name ""))]

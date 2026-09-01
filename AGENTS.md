@@ -22,9 +22,11 @@ docstring or a test can state lives there, not here.
 - **`resources/prebuilds/` is build output, git-ignored.** It reaches consumers
   only as `com.blockether/vis-python-runtime-native-<platform>` jars built by
   `clojure -T:build native-jar :platform <tag>`.
-- **`resources/VERSION` is the single version source**; the build writes the
-  NAMESPACED `vis-python-runtime/VERSION` into the jar, because a root `VERSION`
-  resource collides with other libraries on a shared classpath.
+- **The repo-root `VIS_PYTHON_VERSION` file is the single version source**, the
+  same convention as vis' `VIS_VERSION`: verbatim, no env override, no snapshot
+  suffix. The build writes it into the jar as the NAMESPACED resource
+  `vis-python-runtime/VERSION`, because a bare `VERSION` resource collides with
+  other libraries on a shared classpath.
 - **The consumer contract is the existing sandbox, unchanged.** Success is Vis'
   ~1.5 MB of shims in `resources/vis-shims/`, `resources/vis-python/async_runtime.py`
   and `packages/vis-agent/src/vis/__init__.py` running with no edit beyond the
