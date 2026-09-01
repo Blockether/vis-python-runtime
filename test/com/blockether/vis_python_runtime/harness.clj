@@ -144,3 +144,22 @@
                     "__vis_denied_domains__ = " (json/write-str denied)))
     (ffi/install-module! s "network_guard")
     (track! s)))
+
+(defn tool!
+  "Publish `nm` in `session` as a DEFERRED tool over the Python `body`.
+
+   A tool is not an ordinary function: calling one hands back a thunk, and that
+   deferral is the seam `await`, `gather` and top-level auto-settle are built
+   on. The engine binds its own host callables through `__vis_deferred__`, so a
+   test that needs a tool declares one the same way, in Python. `body` is the
+   function body, already indented, for a function taking `params`.
+
+   The name joins `__vis_protected_names__` too, because that is what a bound
+   tool IS to the sandbox: a name a block may not shadow with an import or a
+   top-level def."
+  [session nm params body]
+  (ffi/exec! session
+             (str "def __vis_impl_" nm "__(" params "):\n" body "\n"
+                  nm " = __vis_deferred__(__vis_impl_" nm "__, " (pr-str nm) ")\n"
+                  "__vis_protected_names__ = sorted(set(__vis_protected_names__)"
+                  " | {" (pr-str nm) "})")))

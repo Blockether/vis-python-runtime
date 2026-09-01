@@ -17,6 +17,7 @@ and reaches the interpreter as a source root; Vis' copy is hashed against it
 
 import ast
 import builtins
+import concurrent.futures
 import contextlib
 import gc
 import importlib
@@ -26,6 +27,7 @@ import io
 import json
 import os
 import sys
+import threading
 
 #: Module that carries the sandbox runtime. Overridable so a port can point at
 #: the module in its new home without a code change.
@@ -80,6 +82,44 @@ def install_module(namespace, module):
     return code.co_filename
 
 
+PAR_WORKERS = 8
+
+_pool_lock = threading.Lock()
+_pool = None
+
+
+def _par_pool():
+    """The ONE bounded pool `par` dispatches on, created when first needed."""
+    global _pool
+    with _pool_lock:
+        if _pool is None:
+            _pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=PAR_WORKERS, thread_name_prefix="vis-par"
+            )
+        return _pool
+
+
+def par(thunks):
+    """Run `thunks` at the same time, answering their values IN ORDER.
+
+    `gather` hands the runtime a list of zero-argument thunks and expects a list
+    back; how they RUN is the embedder's, and the embedder is this library
+    unless a host binds `__vis_par__` over it. Threads are the whole mechanism:
+    a thunk waiting on a socket, a subprocess or a lock has released the GIL,
+    which is what a sandbox block's concurrency is made of.
+
+    One bounded pool serves the process, because a pool per `gather` would let a
+    loop of gathers create threads without limit. A gather INSIDE a gather child
+    therefore runs sequentially: the outer children hold the pool, so submitting
+    to it from one of them is how a bounded pool deadlocks.
+    """
+    thunks = list(thunks)
+    if len(thunks) < 2 or threading.current_thread().name.startswith("vis-par"):
+        return [thunk() for thunk in thunks]
+    running = [_par_pool().submit(thunk) for thunk in thunks]
+    return [future.result() for future in running]
+
+
 def install(namespace):
     """Equip `namespace` with the sandbox runtime, IN its own globals.
 
@@ -94,13 +134,23 @@ def install(namespace):
     Also puts the shim finder on `sys.meta_path`, because an equipped session is
     one where `import bs4` finds the sandbox's bs4, and imports the auto-imports
     module, because a block writes `json.dumps(...)` without importing json.
-    Returns how many names the
-    session ended up with, so the host can assert it is equipped instead of
-    guessing.
+    Two names the runtime READS but does not define arrive here, and only when
+    the host has not bound its own: `__vis_par__`, the pool `gather` dispatches
+    on, and `__vis_protected_names__`, the surface a block may not silently
+    shadow — a `from asyncio import gather` rebinds nothing, and a top-level
+    `def cat(...)` is refused, because those names are the sandbox's.
+
+    Returns how many names the session ended up with, so the host can assert it
+    is equipped instead of guessing.
     """
     install_finder()
     importlib.import_module(AUTO_IMPORTS_MODULE)
     exec(sandbox_code(), namespace)
+    namespace.setdefault("__vis_par__", par)
+    namespace.setdefault(
+        "__vis_protected_names__",
+        sorted(name for name in namespace if not name.startswith("_")),
+    )
     return len(namespace)
 
 
@@ -186,6 +236,29 @@ def reset_handles():
                 state[key] = False
 
 
+def rewrite_imports(source, namespace):
+    """Rewrite the block's imports the way the sandbox needs them.
+
+    `import asyncio` binds the runtime's own shim, and `from asyncio import
+    gather` binds nothing, because the sandbox's `gather` is the one that knows
+    about the pool. The rewrite is the runtime's own
+    `__vis_strip_protected_imports__`, and it happens HERE rather than in the
+    host: running a block is what needs it, so a host that calls `run_block`
+    gets it without owning a second copy of the rule.
+
+    A source the rewrite cannot parse comes back untouched — the block is about
+    to raise that same SyntaxError with its own line numbers, which is the
+    message worth showing.
+    """
+    stripper = namespace.get("__vis_strip_protected_imports__")
+    if stripper is None:
+        return source
+    try:
+        return stripper(source)
+    except BaseException:
+        return source
+
+
 def run_block(source, namespace):
     """Run `source` the way `python_execution` runs a BLOCK.
 
@@ -206,6 +279,7 @@ def run_block(source, namespace):
         runner = namespace.get("__vis_run_async__")
     if runner is None:
         raise RuntimeError("session is not equipped: install(namespace) first")
+    source = rewrite_imports(source, namespace)
     stream = io.StringIO()
     error = None
     with contextlib.redirect_stdout(stream):

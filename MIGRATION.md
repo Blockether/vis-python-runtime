@@ -71,7 +71,13 @@ registry reclaims on CPython exactly as it was written to on GraalPy.
 - [x] `network_guard_test.clj` — 144 lines — `network_guard.py` (policy only; the
       capability and the proxy/CA environment are the host's and stay in Vis)
 - [ ] `sandbox_fs_test.clj` — 1246 lines — sandbox filesystem surface
-- [ ] `env_python_form_eval_test.clj` — 1879 lines — expression/statement evaluation, printing, tracebacks
+- [x] `env_python_form_eval_test.clj` — 1879 lines — per-form evaluation, the
+      ambient stdlib surface, deferred tools and the whole `asyncio` shim
+      (`form_eval_test.clj` + `asyncio_test.clj` here). What stayed in Vis is the
+      HOST's half: prose-leading SyntaxError classification, the enrichment that
+      turns a NameError into an apropos hint, the op-error shapes
+      (`:python/host`, `:vis/tool-failure`), the polyglot-proxy cases, and
+      `import socket` refusing — GraalPy's sandbox, not a rule CPython has
 - [ ] `env_python_test.clj` — 1711 lines — context construction end to end
 - [ ] `env_python_engine_test.clj` — 236 lines — engine selection and options
 
@@ -110,6 +116,30 @@ Both changes are in Vis' copies too, and Vis' `network-guard-test`,
 `env-python-fd-test` and `env-python-handles-test` stay green on GraalPy (37
 tests), because per-context state makes the once-per-interpreter guards no-ops
 there.
+
+What the form-eval and asyncio tests demanded, and it is where the host's job
+starts moving here:
+
+- `gather` dispatches on `__vis_par__`, which Vis' loop supplies and nothing in
+  this library did — so a block that imported asyncio ran on the REAL asyncio
+  and died with "no running event loop". `vis_runtime.par` is that pool now: one
+  bounded `ThreadPoolExecutor` for the process, seeded by `install` only when
+  the host bound none. A `gather` inside a gather child runs sequentially,
+  because submitting to a pool the callers already hold is how one deadlocks.
+- `run_block` REWRITES the block's imports (`vis_runtime.rewrite_imports` over
+  the runtime's own `__vis_strip_protected_imports__`). Vis does this in Clojure
+  before it hands the source over (`env_python.clj/strip-protected-imports`);
+  running a block is what needs it, so it lands here and Vis' copy goes with the
+  pin.
+- `install` seeds `__vis_protected_names__` with the runtime's public surface,
+  which is what makes `from asyncio import gather` keep the sandbox's `gather`
+  and a top-level `def cat(...)` a refusal. The host adds its tool names to it,
+  the way it already does.
+
+One expectation changed on purpose: a tool's own dict arrives as a `dict`, not
+as `__VisDict__`. That type was what a GraalPy host PROXY got re-typed into so a
+block could subscript it; CPython hands the block a real dict and the JSON the
+case actually asserts on is byte for byte the same.
 
 ## Wave 3 — shims with a host bridge (4607 lines)
 
