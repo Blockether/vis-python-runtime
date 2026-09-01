@@ -203,6 +203,9 @@ static void vis_py_record(int level, const char *event, const char *fields, ...)
  * Three numbers, all the host's through `vispython_threads`:
  *   cap     - live threads the process may have at once, guest and pool alike,
  *             shared by every session, because sessions share the interpreter.
+ *             -1 is NO cap, for the process the EXTENSIONS run in: that one is
+ *             trusted and unconfined, so a budget it must never reach would
+ *             only cost a walk of the thread list on every start.
  *   workers - threads the pool runs. The default is how a pool for BLOCKING
  *             work is sized: 32, four wide gathers at once. These threads
  *             spend their lives waiting on the host rather than competing
@@ -317,7 +320,7 @@ static int vis_py_worker_target(void)
     if (workers > VIS_PY_WORKERS_MAX) {
         workers = VIS_PY_WORKERS_MAX;
     }
-    if (workers > vis_py_thread_cap) {
+    if (vis_py_thread_cap > 0 && workers > vis_py_thread_cap) {
         workers = vis_py_thread_cap;
     }
     return workers < 1 ? 1 : workers;
@@ -343,12 +346,13 @@ static int vis_py_live_threads(void)
 }
 
 /* The verdict the audit hook needs: -1, with the reason raised, when one more
-   thread would cross the cap. */
+   thread would cross the cap. An uncapped process pays nothing here, not even
+   the walk. */
 static int vis_py_thread_refused(void)
 {
     char refusal[128];
 
-    if (vis_py_live_threads() < vis_py_thread_cap) {
+    if (vis_py_thread_cap < 0 || vis_py_live_threads() < vis_py_thread_cap) {
         return 0;
     }
     snprintf(refusal, sizeof refusal,
@@ -1216,7 +1220,9 @@ int vispython_confine(const char *read_roots, const char *write_roots, const cha
 
    `cap` is the hard one: it counts every thread the interpreter has, so a guest
    that starts its own is refused by the same budget the pool spends from, and
-   every session shares it because every session shares the interpreter.
+   every session shares it because every session shares the interpreter. A cap
+   of -1 lifts it entirely - the one configuration for a process that is not the
+   sandbox's, where the code is the host's own and confinement is off.
    `workers` sizes the pool when it FIRST runs; a later change is for the next
    process, because resizing a pool with work in it is a way to lose a task. */
 int vispython_threads(const char *policy, char *out, int cap)
@@ -1231,7 +1237,7 @@ int vispython_threads(const char *policy, char *out, int cap)
         matched = sscanf(policy, "%d %d %d", &want_cap, &want_workers, &want_quota);
         (void)matched;
     }
-    if (want_cap > 0) {
+    if (want_cap != 0) {
         vis_py_thread_cap = want_cap;
     }
     if (want_workers > 0) {

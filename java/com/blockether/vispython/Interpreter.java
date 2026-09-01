@@ -289,7 +289,9 @@ public final class Interpreter {
    * <p>Like confinement this is NOT Python. {@code cap} is checked from the audit
    * hook, so it counts a thread a block started for itself as well as the pool's
    * own, and every session shares it because every session shares the
-   * interpreter. {@code workers} sizes the pool the runtime's {@code gather}
+   * interpreter; a {@code cap} of -1 lifts it entirely, the one shape for a
+   * process that is not the sandbox's, where the code is the host's own and
+   * confinement is off. {@code workers} sizes the pool the runtime's {@code gather}
    * dispatches on, once, when it first runs - the default is 32, the size for
    * BLOCKING work, since a worker waits on the host rather than competing for a
    * core. A gather that finds every worker busy runs its own thunks on the

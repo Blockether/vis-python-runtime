@@ -231,6 +231,37 @@ caller.
 Unknowns: `anydoc`, `attach`, `nippy` and `ruff` are not reimplementations of
 anything — they are host capabilities wearing a module's shape, and they stay.
 
+## Phase 8 — Two processes: the sandbox's and the extensions'
+
+Rationale: confinement and the thread cap are PROCESS state over ONE shared
+interpreter — `vispython_confine` replaces the policy for every session at once,
+and the cap is checked from the same audit hook for every thread the process has.
+Sessions are module namespaces, not sub-interpreters, so there is no per-session
+policy to reach for. Under GraalPy the two trust levels were two Contexts
+(`~/vis/src/com/blockether/vis/internal/env_python.clj:1646` trusted and probe,
+`:2194` the sandbox); CPython has no Context. So the split is a PROCESS: one
+confined and capped, running blocks, and one unconfined and uncapped, running
+extension code, which is the host's own and was never the thing the boundary
+guards against.
+
+Data: this library's half is one number. A cap of -1 lifts the budget entirely —
+`vispython_threads` takes it, the audit hook returns before it walks the thread
+list, and `vis_py_worker_target` clamps to the cap only when there is one, or the
+pool would collapse to a single worker with the budget. The other half is Vis':
+the same binary in another role, the way the gateway daemon already is, and it is
+blocked until Vis pins this library, because Vis still runs GraalPy and carries
+its own copy of the sandbox Python.
+
+Acceptance criteria: `(runtime/threads! -1 0 0)` answers `{:cap -1 :workers 32
+:quota 8}`; a thread a guest starts is not refused under it; `_vis_host.threads()`
+reports the lifted cap; and the pool keeps its full size. `uncapped-process-test`
+in `threads_test.clj` is what proves it.
+
+Unknowns: who owns the second process's diagnostics ring and how a host that files
+records from both tags them, since C cannot know which process it is; whether it is
+one process per host or one per extension; and what the host upcall becomes across a
+process boundary, since today it is an in-process JVM call.
+
 ## State
 
 Phase 0 done: repository, resolution, version, build and test scaffolding, plus
@@ -373,3 +404,10 @@ static method found by name. `com.blockether.vis-python-runtime.ffi` and
 `clojure -T:build javac` compiles into `target/classes`, which is on `:paths`,
 and `:deps/prep-lib` runs the same task for a consumer taking this as a git
 dependency. Suite: 116 tests / 584 assertions.
+
+Phase 8 has its runtime half. A cap of -1 is now a first-class configuration:
+`vispython_threads` accepts it, `vis_py_thread_refused` returns before it counts,
+and worker sizing no longer clamps to a cap that is not there. That is the whole
+shape of a process that is not the sandbox's — unconfined by two empty lists,
+uncapped by -1, its own GIL, pool and ring. The spawn itself is Vis' change and
+waits on the pin. Suite: 132 tests / 619 assertions.

@@ -120,6 +120,26 @@
   (testing "the cap is not a filesystem policy: it holds unconfined"
     (is (= {:read 0 :write 0} (runtime/confine! [] [])))))
 
+;; The EXTENSIONS' process is not the sandbox's: the code it runs is the host's
+;; own, so it runs unconfined and uncapped, and one call has to say that without
+;; the pool collapsing with the budget.
+(harness/defbuilt-test uncapped-process-test
+  (testing "a cap of -1 lifts the budget and leaves the pool its full size"
+    (is (= {:cap -1 :workers workers :quota 8} (runtime/threads! -1 0 0))))
+  (testing "a thread the guest starts for itself is not refused"
+    (let [session (harness/block-session)
+          answer  (block session (str "import threading\n"
+                                      "done = threading.Event()\n"
+                                      "threading.Thread(target=done.set).start()\n"
+                                      "print(done.wait(5))"))]
+      (is (nil? (:error answer)))
+      (is (str/includes? (str (:stdout answer)) "True"))))
+  (testing "the guest reads the lifted cap"
+    (let [session (harness/block-session)]
+      (is (= -1 (get (ev session "import _vis_host\n_vis_host.threads()") "cap")))))
+  (testing "an uncapped process is an unconfined one"
+    (is (= {:read 0 :write 0} (runtime/confine! [] [])))))
+
 ;; The pool is bounded and shared, so "every worker is busy" is a state a session
 ;; must survive without waiting on another session's work.
 (harness/defbuilt-test saturated-pool-test

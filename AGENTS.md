@@ -78,7 +78,7 @@ docstring or a test can state lives there, not here.
   module namespace sharing the one interpreter — so a single process cannot hold
   a confined block and unconfined extension code at once. Extension Python gets
   its OWN process: its own interpreter, confinement lifted with two empty lists,
-  a cap it never reaches, and its own diagnostics ring drained by whoever owns
+  no cap at all (`-1`), and its own diagnostics ring drained by whoever owns
   that process. So everything recorded here is about the sandbox — the pool, the
   cap, a refusal, a block's timing — and a host that files records from both
   tags them at the drain, because C cannot know which process it is.

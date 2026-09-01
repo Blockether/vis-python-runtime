@@ -143,6 +143,8 @@
    Like confinement this is C state, not Python: `:cap` is checked from the audit
    hook, so it counts a thread a block started for itself as well as the pool's
    own, and every session shares it because every session shares the interpreter.
+   A `:cap` of -1 lifts it entirely — the one shape for a process that is not the
+   sandbox's, where the code is the host's own and confinement is off.
    `:workers` sizes the pool `gather` dispatches on, `:quota` is how many of them
    one gather may hold."
   [cap workers quota]
