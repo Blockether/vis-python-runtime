@@ -74,10 +74,11 @@ process surface). Each one moves the day its op exists here.
 The Python half can move; the assertions that prove the JVM capability stay in
 Vis. Split them, never copy them.
 
-- [ ] `pil_compat_shim_test.clj` — 1619 lines — `pil.py` is pure Python, but the
-      test asserts from the JVM side on the host handle registry
-      (`foundation.shim-pil/images`, live raster counts), so it splits like the
-      rest of this wave
+- [ ] `pil_compat_shim_test.clj` — 1619 lines — `__vis_pil_*`: every image op
+      delegates to com.blockether/imaging on the JVM and the pixels never enter
+      Python, so the suite belongs to this wave and not to Wave 1 where it was
+      first listed. The JVM-side assertions (`foundation.shim-pil/images`, live
+      raster counts) stay in Vis when it splits
 - [ ] `anydoc_compat_shim_test.clj` — 837 lines — `__vis_anydoc_detect__`, `__vis_anydoc_markdown__`
 - [ ] `matplotlib_compat_shim_test.clj` — 755 lines — `__vis_mpl_render__`, `__vis_mpl_render_file__`
 - [ ] `nippy_compat_shim_test.clj` — 93 lines — `__vis_nippy_encode__`, `__vis_nippy_decode__`
