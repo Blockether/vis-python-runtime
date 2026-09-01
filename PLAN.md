@@ -439,3 +439,17 @@ using files where they already are and extracting once per version under
 `~/.vis/python/sources` otherwise, and the shim directory travels as
 `VIS_PYTHON_SHIMS_PATH` rather than on `sys.path`, where it would turn every
 `import <name>` into an ordinary file import. Suite: 139 tests / 633 assertions.
+
+The shims turned out to be REPLACEABLE, which is the finding this phase existed
+to produce. Measured, one pip run against PyPI on CPython 3.14 / macOS arm64:
+numpy 2.5.2, pandas 3.0.5, pillow 12.3.0, matplotlib 3.11.1, lxml 6.1.2 and
+fonttools 4.64.0 all resolve a `cp314` binary wheel, and requests, bs4,
+tabulate, PyYAML, XlsxWriter and python-pptx resolve pure-Python ones — the
+whole set the sandbox emulates. `distribution_test.clj` then pins the part that
+actually decides it: a wheel is bound by the SAME guards as the sandbox's own
+Python. numpy imports and runs under `confine!` (its directory is on `sys.path`
+before the policy is composed, so the roots include it) while
+`numpy.loadtxt("/etc/hosts")` is refused, and `requests.get` to a denied host
+comes back through the guarded socket as `vis: network host … is blocked`.
+Neither package knows this library exists; the guards are the interpreter's.
+Suite: 141 tests / 638 assertions.
