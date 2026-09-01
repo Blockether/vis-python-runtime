@@ -426,4 +426,16 @@ Three divergences remain the CONSUMER's to compose, recorded here rather than
 guessed: `/tmp` and `$TMPDIR` (always writable in `sandbox-fs`), `~/.vis` (the
 same), and the empty policy — `sandbox-fs` denies everything, this library runs
 unconfined, which is now deliberate and is why a host must never map "no roots
+unconfined, which is now deliberate and is why a host must never map "no roots
 configured" to `confine! [] []`. Suite: 133 tests / 622 assertions.
+
+The library became CONSUMABLE, which is what pinning it needs: the jar shipped
+no Python at all (`jar` copied `src` only) and `Locations/sourceRoots` found
+sources only in a dev checkout through `user.dir`, so from Vis the runtime
+started, ran a block, and then imported the HOST's mirrored copies of
+`vis-python/` and `vis-shims/` — measured, not reasoned. `Sources` now resolves
+the shipped roots from the `vis-python-runtime/SOURCES` manifest beside them,
+using files where they already are and extracting once per version under
+`~/.vis/python/sources` otherwise, and the shim directory travels as
+`VIS_PYTHON_SHIMS_PATH` rather than on `sys.path`, where it would turn every
+`import <name>` into an ordinary file import. Suite: 139 tests / 633 assertions.

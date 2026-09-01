@@ -33,7 +33,18 @@
 
 (def class-dir "target/classes")
 (def native-class-dir "target/native-classes")
+;; The jar is assembled somewhere ELSE than `target/classes`, which `:deps/prep-lib`
+;; owns: a consumer taking this library by :local/root has both on its classpath,
+;; and a packaged copy of the Python sitting in the prep output would be resolved
+;; in preference to `resources/` — a checkout would then run yesterday's files.
 (def jar-file (format "target/%s.jar" (name lib)))
+
+(def source-roots
+  "Resource directories carrying the Python the runtime executes. They ship in
+   the main jar under the SAME names a checkout has them on the classpath, so
+   `Sources` resolves one layout and never two — and `SOURCES` beside them names
+   every file, because a jar can be walked and a native image cannot."
+  ["vispython" "vis-python" "vis-shims"])
 (def basis (delay (b/create-basis {:project "deps.edn"})))
 
 (defn clean [_] (b/delete {:path "target"}))
@@ -63,24 +74,44 @@
     [:connection "scm:git:https://github.com/Blockether/vis-python-runtime.git"]
     [:developerConnection "scm:git:ssh://git@github.com/Blockether/vis-python-runtime.git"]]])
 
+(def jar-class-dir "target/jar-classes")
+
 (defn jar [_]
   (clean nil)
   (javac nil)
-  (b/write-pom {:class-dir class-dir
+  (b/copy-dir {:src-dirs [class-dir] :target-dir jar-class-dir})
+  (b/write-pom {:class-dir jar-class-dir
                 :lib lib
                 :version version
                 :basis @basis
                 :src-dirs ["src"]
                 :pom-data (pom-data "Embedded CPython for the Vis sandbox — vendored per platform, reached over FFM, without Truffle.")})
-  ;; src only: resources/prebuilds belongs to the per-platform native jars, and
-  ;; VIS_PYTHON_VERSION is a repo-root file, not a resource — the namespaced copy
-  ;; below is the one that ships, because a bare `VERSION` resource would collide
-  ;; with another library's on a shared classpath.
-  (b/copy-dir {:src-dirs ["src"] :target-dir class-dir})
-  (let [vfile (io/file class-dir "vis-python-runtime" "VERSION")]
+  ;; No prebuilds: the cdylib belongs to the per-platform native jars. The
+  ;; Python DOES ship here — a consumer that took a jar has no `resources/`
+  ;; directory to point `sys.path` at — and so does the namespaced VERSION,
+  ;; because a bare `VERSION` resource would collide with another library's on a
+  ;; shared classpath.
+  (b/copy-dir {:src-dirs ["src"] :target-dir jar-class-dir})
+  (doseq [root source-roots]
+    ;; SOURCE only: `__pycache__` is per-machine bytecode compiled against one
+    ;; interpreter and one absolute path, and a shipped copy of it is either
+    ;; ignored or wrong.
+    (b/copy-dir {:src-dirs   [(str "resources/" root)]
+                 :target-dir (str jar-class-dir "/" root)
+                 :ignores    [#".*__pycache__.*" #".*\.pyc$"]}))
+  (let [vfile  (io/file jar-class-dir "vis-python-runtime" "VERSION")
+        listed (->> source-roots
+                    (mapcat (fn [root]
+                              (let [dir (io/file jar-class-dir root)]
+                                (->> (file-seq dir)
+                                     (filter #(and (.isFile ^java.io.File %)
+                                                   (str/ends-with? (.getName ^java.io.File %) ".py")))
+                                     (map #(str root "/" (.relativize (.toPath dir) (.toPath ^java.io.File %))))))))
+                    sort)]
     (io/make-parents vfile)
-    (spit vfile version))
-  (b/jar {:class-dir class-dir :jar-file jar-file})
+    (spit vfile version)
+    (spit (io/file jar-class-dir "vis-python-runtime" "SOURCES") (str (str/join "\n" listed) "\n")))
+  (b/jar {:class-dir jar-class-dir :jar-file jar-file})
   (println "Built:" jar-file "version:" version))
 
 (defn- native-lib [platform]
@@ -112,7 +143,7 @@
 
 (defn deploy [_]
   (jar nil)
-  (dd/deploy {:installer :remote :artifact jar-file :pom-file (b/pom-path {:lib lib :class-dir class-dir})}))
+  (dd/deploy {:installer :remote :artifact jar-file :pom-file (b/pom-path {:lib lib :class-dir jar-class-dir})}))
 
 (defn deploy-native [{:keys [platform]}]
   (let [platform (some-> platform name)
@@ -122,7 +153,7 @@
 
 (defn install [_]
   (jar nil)
-  (dd/deploy {:installer :local :artifact jar-file :pom-file (b/pom-path {:lib lib :class-dir class-dir})}))
+  (dd/deploy {:installer :local :artifact jar-file :pom-file (b/pom-path {:lib lib :class-dir jar-class-dir})}))
 
 (defn install-native [{:keys [platform]}]
   (let [platform (some-> platform name)

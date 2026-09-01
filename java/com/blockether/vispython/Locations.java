@@ -97,6 +97,16 @@ public final class Locations {
     return override != null ? override : statePath("pycache");
   }
 
+  /**
+   * Where a packaged artifact extracts the Python it ships, beside the packages
+   * and the bytecode cache: per-machine, per-version, and rebuildable by
+   * deleting it. A checkout imports from its own {@code resources/} and never
+   * comes here.
+   */
+  public static String sourcesDir() {
+    return statePath("sources");
+  }
+
   /** Where the JVM's trust anchors are exported for pip, beside the packages. */
   public static String certificatesFile() {
     String packages = packagesDir();
@@ -128,11 +138,14 @@ public final class Locations {
 
   /**
    * Directories CPython may import from, in order: what the caller passed, then
-   * {@code VIS_PYTHON_SOURCE_PATH}, then this repository's own
-   * {@code resources/vispython/} and {@code resources/vis-python/} in a dev
-   * checkout. A packaged build
-   * extracts its sources and passes them explicitly, the same way the cdylib is
-   * resolved.
+   * {@code VIS_PYTHON_SOURCE_PATH}, then whatever this ARTIFACT carries
+   * ({@link Sources}), then this repository's own {@code resources/vispython/}
+   * and {@code resources/vis-python/} in a dev checkout.
+   *
+   * <p>The checkout fallback demands BOTH directories, because {@code user.dir}
+   * belongs to whoever started the JVM: an embedding host with a
+   * {@code resources/vis-python/} of its own would otherwise have its copy
+   * imported instead of this library's, silently and in preference.
    */
   public static List<String> sourceRoots(List<String> extra) {
     Set<String> roots = new LinkedHashSet<>();
@@ -151,12 +164,16 @@ public final class Locations {
         }
       }
     }
+    roots.addAll(Sources.importRoots());
     String here = System.getProperty("user.dir");
     if (here != null) {
-      for (Path candidate : List.of(Path.of(here, "resources", "vispython"),
-          Path.of(here, "resources", "vis-python"))) {
-        if (Files.isDirectory(candidate)) {
-          roots.add(candidate.toAbsolutePath().toString());
+      List<Path> checkout = List.of(Path.of(here, "resources", "vispython"),
+          Path.of(here, "resources", "vis-python"));
+      if (Files.isDirectory(checkout.get(0)) && Files.isDirectory(checkout.get(1))) {
+        for (Path candidate : checkout) {
+          if (Files.isDirectory(candidate)) {
+            roots.add(candidate.toAbsolutePath().toString());
+          }
         }
       }
     }

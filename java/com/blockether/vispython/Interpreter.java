@@ -243,6 +243,16 @@ public final class Interpreter {
         wiring.append("if ").append(literal(target)).append(" not in sys.path:\n");
         wiring.append("    sys.path.append(").append(literal(target)).append(")\n");
       }
+      String shims = Sources.shims();
+      if (shims != null) {
+        // The runtime finds a shim by PATH, and its own default is derived from
+        // where `vis_runtime.py` sits - true in a checkout, false the moment the
+        // sources are extracted somewhere flat. So the artifact says where they
+        // are; `setdefault` keeps an explicit environment override winning.
+        wiring.append("import os\n");
+        wiring.append("os.environ.setdefault(\"VIS_PYTHON_SHIMS_PATH\", ")
+            .append(literal(shims)).append(")\n");
+      }
       call("vispython_exec", DEFAULT_SESSION, wiring.toString());
     }
     return new Startup(library().path(), roots, home, cache, target);

@@ -123,3 +123,14 @@ consistent.
 A green JVM suite is not a green native image. Once downcalls exist, their
 registrations live in `resources/META-INF/native-image/com.blockether/vis-python-runtime/`
 and travel inside the jar — never as a command-line flag in a consumer's build.
+
+**The Python this library ships is addressed from its own manifest, never
+looked up by name.** `vis-python-runtime/SOURCES` lists every file the jar
+carries, and `Sources` resolves each one RELATIVE to that resource's URL. A
+lookup by name (`getResource("vis-python/async_runtime.py")`) answers whichever
+classpath entry comes first, and the host embedding this library carries a
+directory of the same name — measured: from a Vis checkout the runtime imported
+VIS' copies and its own `vis-shims` never won. The same rule is why an artifact
+with no manifest takes all three roots from the one directory holding
+`vispython/`, and why `target/classes` (which `:deps/prep-lib` owns) carries no
+Python: the jar is assembled in `target/jar-classes`.
