@@ -17,7 +17,11 @@
          (finally
            ;; Thread policy is PROCESS state: a case that narrows it would
            ;; narrow every case after it.
-           (when harness/built? (runtime/threads! 100 0 8))
+           (when harness/built?
+             (runtime/threads! 100 0 8)
+             ;; Recording is process state too, and a drained record is gone.
+             (runtime/logging! :off)
+             (runtime/drain-log!))
            (harness/close-sessions!)))))
 
 (def ^:private workers
@@ -123,6 +127,8 @@
     (let [session (harness/block-session)]
       ;; A quota wide enough for one gather to hold every worker at once.
       (runtime/threads! 0 0 40)
+      (runtime/logging! :info)
+      (runtime/drain-log!)
       (let [answer (block session (str "import _vis_host, threading, time, vis_runtime\n"
                                        "gate = threading.Event()\n"
                                        "def hold():\n"
@@ -145,4 +151,7 @@
                                        "print(answer.get('v'), queued > 0)"))]
         ;; Without caller-runs the second gather waits for a worker that only the
         ;; first gather can free, and the join times out with nothing to show.
-        (is (= "['ran', 'ran'] True" (str/trim (str (:stdout answer)))))))))
+        (is (= "['ran', 'ran'] True" (str/trim (str (:stdout answer)))))
+        ;; The caller taking its work back is the moment worth watching from
+        ;; outside, so it is the one the host's log has to carry.
+        (is (str/includes? (runtime/drain-log!) "\"event\":\"caller_runs\""))))))

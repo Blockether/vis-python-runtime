@@ -20,6 +20,8 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -76,6 +78,108 @@ static int vis_py_take_error(char *out, int cap)
     return written;
 }
 
+/* --------------------------------------------------------------------------
+ * Diagnostics.
+ *
+ * The runtime RECORDS events; it never writes a log. It is linked into a host
+ * that already has a file, a rotation and a format for lines like these, so a
+ * library opening its own would be deciding all three for somebody else. The
+ * host PULLS with `vispython_drain_log` and files what it gets wherever its
+ * own diagnostics already go.
+ *
+ * Pulled, never pushed, for the reason the "Guest threads" section gives: an
+ * event is recorded from a pool worker, and calling out to the host from there
+ * - through one pinned JVM thread, possibly under a pool lock - is the very
+ * inversion that section exists to avoid. Recording costs one small mutex of
+ * its own, a `vsnprintf` into a fixed slot, and nothing else: no allocation,
+ * no GIL, no upcall. That mutex is a LEAF, nothing is taken while it is held,
+ * so recording under any other lock stays safe.
+ *
+ * The ring is bounded and overwrites its OLDEST record when nobody drains,
+ * because a diagnostic buffer that grows without a reader is a leak with a
+ * good excuse. Drops are counted and reported at the head of the next drain,
+ * so a gap in the log names itself instead of lying by omission.
+ *
+ * NEVER a guest value. An event carries counts, durations and names the HOST
+ * chose; a payload, a thunk's argument, a path a block asked for and the text
+ * of an exception belong to the block. This log ends up in a file people paste
+ * into bug reports.
+ * ------------------------------------------------------------------------ */
+
+#define VIS_PY_LOG_SLOTS 256
+#define VIS_PY_LOG_LINE 256
+
+#define VIS_PY_LOG_OFF 0
+#define VIS_PY_LOG_WARN 1
+#define VIS_PY_LOG_INFO 2
+#define VIS_PY_LOG_DEBUG 3
+
+static const char *const vis_py_log_levels[] = {"off", "warn", "info", "debug"};
+
+static struct {
+    pthread_mutex_t lock;
+    char slot[VIS_PY_LOG_SLOTS][VIS_PY_LOG_LINE];
+    int head;     /* the oldest record waiting */
+    int count;    /* records waiting to be drained */
+    int level;    /* the quietest level still recorded; OFF records nothing */
+    int mirror;   /* write each record to stderr as well */
+    long dropped; /* records overwritten since a drain last said so */
+} vis_py_log = {PTHREAD_MUTEX_INITIALIZER, {{0}}, 0, 0, VIS_PY_LOG_OFF, 0, 0};
+
+/* Milliseconds on a clock that only moves forward: for MEASURING, never for
+   stamping, because the wall clock may step under a long call. */
+static long long vis_py_now_ms(void)
+{
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* The name a session is recorded under. Host-chosen, never guest text. */
+static const char *vis_py_session_name(const char *module_name)
+{
+    return (module_name == NULL || module_name[0] == '\0') ? "__main__" : module_name;
+}
+
+/* Record one event as a JSON object; `fields` renders the pairs after the
+   event name and may be NULL. The level is read without the lock on purpose: a
+   racing policy change costs one record, and paying a mutex for every event
+   the level would discard is the wrong trade. */
+static void vis_py_record(int level, const char *event, const char *fields, ...)
+{
+    char body[VIS_PY_LOG_LINE];
+    struct timespec now;
+    va_list args;
+    int slot;
+
+    if (level > vis_py_log.level) {
+        return;
+    }
+    body[0] = '\0';
+    if (fields != NULL) {
+        va_start(args, fields);
+        vsnprintf(body, sizeof body, fields, args);
+        va_end(args);
+    }
+    clock_gettime(CLOCK_REALTIME, &now);
+    pthread_mutex_lock(&vis_py_log.lock);
+    slot = (vis_py_log.head + vis_py_log.count) % VIS_PY_LOG_SLOTS;
+    if (vis_py_log.count == VIS_PY_LOG_SLOTS) {
+        vis_py_log.head = (vis_py_log.head + 1) % VIS_PY_LOG_SLOTS;
+        vis_py_log.dropped++;
+    } else {
+        vis_py_log.count++;
+    }
+    snprintf(vis_py_log.slot[slot], VIS_PY_LOG_LINE,
+             "{\"ts\":%lld,\"level\":\"%s\",\"event\":\"%s\"%s%s}",
+             (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000, vis_py_log_levels[level],
+             event, body[0] == '\0' ? "" : ",", body);
+    if (vis_py_log.mirror) {
+        fprintf(stderr, "%s\n", vis_py_log.slot[slot]);
+    }
+    pthread_mutex_unlock(&vis_py_log.lock);
+}
 /* --------------------------------------------------------------------------
  * Guest threads.
  *
@@ -246,6 +350,7 @@ static int vis_py_thread_refused(void)
              "the sandbox may run %d threads at once and they are all taken",
              vis_py_thread_cap);
     PyErr_SetString(PyExc_RuntimeError, refusal);
+    vis_py_record(VIS_PY_LOG_WARN, "thread_refused", "\"cap\":%d", vis_py_thread_cap);
     return -1;
 }
 
@@ -329,6 +434,7 @@ static int vis_py_pool_start(void)
     vis_py_pool.running = made;
     vis_py_pool.started = made > 0;
     pthread_mutex_unlock(&vis_py_pool.lock);
+    vis_py_record(VIS_PY_LOG_INFO, "pool_start", "\"workers\":%d", made);
     if (made == 0) {
         PyErr_SetString(PyExc_RuntimeError, "no worker thread could be started");
         return -1;
@@ -582,6 +688,8 @@ static int vis_py_refuse(const char *event, const char *path, int writing)
     PyErr_Format(PyExc_PermissionError,
                  "vis sandbox: %s of %s is outside the %s roots",
                  event, path, writing ? "writable" : "readable");
+    vis_py_record(VIS_PY_LOG_WARN, "confine_refused", "\"op\":\"%s\",\"writing\":%d", event,
+                  writing);
     return -1;
 }
 
@@ -885,8 +993,11 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
     PyObject *error;
     struct timespec deadline;
     int submitted = 0;
+    int saturated = 0;
     int outstanding;
     int claimed;
+    int waited;
+    int queued;
     int quota;
 
     (void)self;
@@ -947,22 +1058,37 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
            slower than overlapping, which is the honest answer, and never a
            stall. */
         claimed = 0;
+        waited = 0;
         save = PyEval_SaveThread();
         pthread_mutex_lock(&vis_py_pool.lock);
-        while (!batch->task[i].finished) {
+        /* That floor is paid ONCE per gather, not once per thunk. A pool that
+           left the first task sitting and still has nobody idle will do the
+           same to the rest, so the caller takes them straight away; an idle
+           worker means the pool came back, and then the wait is worth it again
+           for the overlap. */
+        if (saturated && vis_py_pool.idle == 0 && vis_py_unqueue(&batch->task[i])) {
+            batch->outstanding--;
+            claimed = 1;
+        }
+        while (!claimed && !batch->task[i].finished) {
             vis_py_deadline(&deadline, VIS_PY_CALLER_RUNS_MS);
             if (pthread_cond_timedwait(&vis_py_pool.finished, &vis_py_pool.lock, &deadline) ==
                     ETIMEDOUT &&
                 vis_py_unqueue(&batch->task[i])) {
                 batch->outstanding--;
                 claimed = 1;
-                break;
+                saturated = 1;
+                waited = 1;
             }
         }
+        queued = vis_py_pool.queued;
         pthread_mutex_unlock(&vis_py_pool.lock);
         PyEval_RestoreThread(save);
 
         if (claimed) {
+            vis_py_record(VIS_PY_LOG_INFO, "caller_runs",
+                          "\"task\":%d,\"of\":%d,\"queued\":%d,\"waited_ms\":%d", (int)i,
+                          (int)count, queued, waited ? VIS_PY_CALLER_RUNS_MS : 0);
             value = PyObject_CallNoArgs(batch->task[i].thunk);
             error = (value == NULL) ? PyErr_GetRaisedException() : NULL;
             pthread_mutex_lock(&vis_py_pool.lock);
@@ -1113,6 +1239,71 @@ int vispython_threads(const char *policy, char *out, int cap)
              vis_py_par_quota);
     return vis_py_copy_out(summary, out, cap);
 }
+
+/* Set what is recorded: `policy` is a level name - off, warn, info, debug -
+   and optionally 1 to MIRROR every record to stderr as it happens. Mirroring
+   is for running this library with no host to drain it, which is how its own
+   suite and `pip` use it; a host that drains leaves it at 0 and keeps its
+   diagnostics in the one file it already has. The policy is total: a level
+   given without the flag turns mirroring off. Answers the policy in force. */
+int vispython_logging(const char *policy, char *out, int cap)
+{
+    char want[16];
+    char summary[32];
+    int mirror = 0;
+    int i;
+
+    want[0] = '\0';
+    if (policy != NULL && sscanf(policy, "%15s %d", want, &mirror) >= 1) {
+        for (i = 0; i <= VIS_PY_LOG_DEBUG; i++) {
+            if (strcmp(want, vis_py_log_levels[i]) == 0) {
+                vis_py_log.level = i;
+            }
+        }
+        vis_py_log.mirror = (mirror != 0);
+    }
+    snprintf(summary, sizeof summary, "%s %d", vis_py_log_levels[vis_py_log.level],
+             vis_py_log.mirror);
+    return vis_py_copy_out(summary, out, cap);
+}
+
+/* Take what has been recorded since the last call: NDJSON, one object per
+   line, oldest first. Answers what FITS the buffer and leaves the rest, so a
+   host drains in a loop until the answer is empty. Records lost to a full ring
+   are reported first, as an event of their own, because the gap matters more
+   than the lines around it. */
+int vispython_drain_log(char *out, int cap)
+{
+    const char *line;
+    int written = 0;
+    int n;
+
+    if (out == NULL || cap <= 0) {
+        return VIS_PY_ERR_BUFFER;
+    }
+    pthread_mutex_lock(&vis_py_log.lock);
+    if (vis_py_log.dropped > 0 && cap > VIS_PY_LOG_LINE) {
+        written = snprintf(out, (size_t)cap,
+                           "{\"level\":\"warn\",\"event\":\"log_dropped\",\"records\":%ld}\n",
+                           vis_py_log.dropped);
+        vis_py_log.dropped = 0;
+    }
+    while (vis_py_log.count > 0) {
+        line = vis_py_log.slot[vis_py_log.head];
+        n = (int)strlen(line);
+        if (written + n + 2 > cap) {
+            break;
+        }
+        memcpy(out + written, line, (size_t)n);
+        written += n;
+        out[written++] = '\n';
+        vis_py_log.head = (vis_py_log.head + 1) % VIS_PY_LOG_SLOTS;
+        vis_py_log.count--;
+    }
+    pthread_mutex_unlock(&vis_py_log.lock);
+    out[written] = '\0';
+    return written;
+}
 /* Start the interpreter, rooted at `home` when one is given.
 
    `home` is a VENDORED CPython tree — the directory holding `lib/python3.14/`.
@@ -1178,6 +1369,8 @@ int vispython_initialize(const char *home, const char *pycache_prefix, char *out
         return VIS_PY_ERR_INIT;
     }
     vis_py_started = 1;
+    vis_py_record(VIS_PY_LOG_INFO, "init", "\"cap\":%d,\"workers\":%d", vis_py_thread_cap,
+                  vis_py_worker_target());
     return 0;
 }
 
@@ -1275,11 +1468,13 @@ int vispython_run(const char *module_name, const char *code, char *out, int cap)
 {
     PyObject *globals, *runtime, *result, *text;
     const char *utf8;
+    long long began;
     int written;
 
     if (!vis_py_started) {
         return VIS_PY_ERR_INIT;
     }
+    began = vis_py_now_ms();
     globals = vis_py_namespace(module_name, out, cap);
     if (globals == NULL) {
         return VIS_PY_ERR_PYTHON;
@@ -1293,6 +1488,8 @@ int vispython_run(const char *module_name, const char *code, char *out, int cap)
     Py_DECREF(runtime);
     if (result == NULL) {
         vis_py_take_error(out, cap);
+        vis_py_record(VIS_PY_LOG_WARN, "run_failed", "\"session\":\"%s\",\"ms\":%lld",
+                      vis_py_session_name(module_name), vis_py_now_ms() - began);
         return VIS_PY_ERR_PYTHON;
     }
     text = PyObject_Str(result);
@@ -1300,6 +1497,8 @@ int vispython_run(const char *module_name, const char *code, char *out, int cap)
     written = vis_py_copy_out(utf8 == NULL ? "" : utf8, out, cap);
     Py_XDECREF(text);
     Py_DECREF(result);
+    vis_py_record(VIS_PY_LOG_DEBUG, "run", "\"session\":\"%s\",\"ms\":%lld",
+                  vis_py_session_name(module_name), vis_py_now_ms() - began);
     return written;
 }
 
@@ -1311,11 +1510,13 @@ int vispython_run_block(const char *module_name, const char *code, char *out, in
 {
     PyObject *globals, *runtime, *result, *text;
     const char *utf8;
+    long long began;
     int written;
 
     if (!vis_py_started) {
         return VIS_PY_ERR_INIT;
     }
+    began = vis_py_now_ms();
     globals = vis_py_namespace(module_name, out, cap);
     if (globals == NULL) {
         return VIS_PY_ERR_PYTHON;
@@ -1329,6 +1530,8 @@ int vispython_run_block(const char *module_name, const char *code, char *out, in
     Py_DECREF(runtime);
     if (result == NULL) {
         vis_py_take_error(out, cap);
+        vis_py_record(VIS_PY_LOG_WARN, "block_failed", "\"session\":\"%s\",\"ms\":%lld",
+                      vis_py_session_name(module_name), vis_py_now_ms() - began);
         return VIS_PY_ERR_PYTHON;
     }
     text = PyObject_Str(result);
@@ -1336,6 +1539,9 @@ int vispython_run_block(const char *module_name, const char *code, char *out, in
     written = vis_py_copy_out(utf8 == NULL ? "" : utf8, out, cap);
     Py_XDECREF(text);
     Py_DECREF(result);
+    vis_py_record(VIS_PY_LOG_INFO, "block", "\"session\":\"%s\",\"ms\":%lld,\"bytes\":%d",
+                  vis_py_session_name(module_name), vis_py_now_ms() - began,
+                  code == NULL ? 0 : (int)strlen(code));
     return written;
 }
 

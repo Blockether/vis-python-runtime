@@ -148,6 +148,28 @@
   (let [[c w q] (Interpreter/threads cap workers quota)]
     {:cap c :workers w :quota q}))
 
+(defn logging!
+  "Set what the runtime records, answering `{:level … :mirror? …}` in force.
+   Levels are `:off` — the default, because a library records nothing until its
+   host asks — `:warn`, `:info` and `:debug`. `mirror?` writes each record to
+   stderr as well, for running this library with nothing draining it."
+  ([level] (logging! level false))
+  ([level mirror?]
+   (let [[in-force flag] (Interpreter/logging (name level) (boolean mirror?))]
+     {:level (keyword in-force) :mirror? (= "1" flag)})))
+
+(defn drain-log!
+  "Take what the runtime has recorded since the last call: NDJSON text, one
+   event per line, oldest first.
+
+   The runtime records and never writes a log — the host it is linked into
+   already has the file and the format for these lines, and pushing them out of
+   a pool worker would call the host from under a lock. The answer is what fits
+   one buffer, so drain until it comes back blank; records lost to a full ring
+   arrive first as a `log_dropped` event."
+  []
+  (Interpreter/drainLog))
+
 (defn eval-str
   "Evaluate `code` as a Python EXPRESSION, answering `str(result)`."
   ([code] (eval-str default-session code))

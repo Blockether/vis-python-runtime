@@ -82,6 +82,17 @@ docstring or a test can state lives there, not here.
   sessions for no overlap at all. A `par` raises the first failure AT ONCE,
   while the siblings run on, because `gather` cancels children it has been told
   about. `threads_test.clj` is what proves all of it.
+- **Diagnostics are RECORDED here and PULLED by the host — never pushed, never a
+  guest value.** Events go into a bounded ring in C and the host takes them with
+  `vispython_drain_log` as NDJSON, because the host it is linked into already
+  owns a file, a rotation and a format for them, and because pushing would mean
+  calling out of a pool worker — through one pinned JVM thread, possibly under
+  the pool lock — which is the inversion the pool exists to avoid. A full ring
+  overwrites its oldest and reports the gap as `log_dropped`; recording is `:off`
+  until a host asks. An event carries counts, durations and names the HOST chose:
+  a payload, a thunk's argument, a path a block asked for and the text of an
+  exception are the block's, and this log ends up in files people paste into bug
+  reports. `log_test.clj` is what proves it.
 
 ## Verifying
 

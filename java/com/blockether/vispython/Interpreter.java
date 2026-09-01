@@ -72,17 +72,19 @@ public final class Interpreter {
    * native image needs every one of these downcalls declared, so the list stays
    * small and explicit.
    */
-  private static final Map<String, FunctionDescriptor> SIGNATURES = Map.of(
-      "vispython_initialize", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vispython_version", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vispython_eval", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vispython_exec", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vispython_run", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vispython_run_block", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vispython_confine", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vispython_host", descriptor(ValueLayout.ADDRESS),
-      "vispython_threads", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vispython_finalize", descriptor());
+  private static final Map<String, FunctionDescriptor> SIGNATURES = Map.ofEntries(
+      Map.entry("vispython_initialize", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_version", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_eval", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_exec", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_run", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_run_block", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_confine", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_host", descriptor(ValueLayout.ADDRESS)),
+      Map.entry("vispython_threads", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_logging", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_drain_log", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_finalize", descriptor()));
 
   private static final ExecutorService THREAD = Executors.newSingleThreadExecutor(runnable -> {
     Thread thread = new Thread(runnable, "vis-python-runtime");
@@ -297,6 +299,32 @@ public final class Interpreter {
     String[] numbers = answer.trim().split("\\s+");
     return new int[] {Integer.parseInt(numbers[0]), Integer.parseInt(numbers[1]),
         Integer.parseInt(numbers[2])};
+  }
+
+  /**
+   * Set what the runtime records, answering the policy in force as
+   * {@code {level, mirror}}. Levels are {@code off} (the default: a library
+   * records nothing until its host asks), {@code warn}, {@code info} and
+   * {@code debug}. {@code mirror} writes each record to stderr as well, which
+   * is for running this library with nothing draining it.
+   */
+  public static String[] logging(String level, boolean mirror) {
+    return call("vispython_logging", level + " " + (mirror ? 1 : 0)).trim().split("\\s+");
+  }
+
+  /**
+   * Take what has been recorded since the last call: NDJSON, one object per
+   * line, oldest first.
+   *
+   * <p>The runtime RECORDS events and never writes a log, because the host it is
+   * linked into already has a file, a rotation and a format for lines like
+   * these. Draining is a PULL for the same reason the pool never calls out from
+   * under its own lock. The answer is what fits one buffer and the rest waits,
+   * so a host drains in a loop until the answer is empty; records lost to a
+   * full ring arrive first, as a {@code log_dropped} event of their own.
+   */
+  public static String drainLog() {
+    return call("vispython_drain_log");
   }
 
   /** Evaluate {@code code} as an expression, answering {@code str(result)}. */
