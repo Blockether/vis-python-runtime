@@ -63,7 +63,9 @@ process surface). Each one moves the day its op exists here.
 The first one is in, and it is the one the project exists for: the handle
 registry reclaims on CPython exactly as it was written to on GraalPy.
 
-- [ ] `env_python_fd_test.clj` — 512 lines — descriptor discipline for the sandbox `open`
+- [x] `env_python_fd_test.clj` — 512 lines — descriptor discipline for the sandbox `open`
+      (the sqlite3 case moves with its shim, the socket cases with the shims that
+      open connections)
 - [x] `env_python_handles_test.clj` — 180 lines — the `__vis_own__` registry — the reason for the whole project
 - [ ] `env_python_grep_paging_test.clj` — 118 lines — a capped search pages itself
 - [x] `network_guard_test.clj` — 144 lines — `network_guard.py` (policy only; the
@@ -153,3 +155,28 @@ not the interpreter.
    test namespaces are deleted from Vis and `sandbox-parity-test` goes with them.
 3. Nothing is deleted from Vis before the pin exists. A half-moved test is a
    test nobody runs.
+
+What the descriptor tests demanded, all of it the same lesson as the guard:
+
+- `__vis_pyify__` rebuilt anything that was not a primitive, because off GraalPy
+  it had no `polyglot` module to ask. Settle wraps the value of every top-level
+  assignment, so `h = open(p, "rb")` came back as a LIST OF THE FILE'S LINES.
+  Without polyglot there are no proxies at all — a tool result arrives decoded —
+  so `__vis_is_foreign__` is now False there, and GraalPy is untouched.
+- the descriptor ceiling was a per-namespace number, and one interpreter has one
+  set of doors: `__vis_fd_limits__` is [ceiling, sweep-at] in a survivor, and
+  Vis' own test sets it the same way.
+- a session had to become CLOSEABLE (`vis_runtime.close_session`,
+  `ffi/close-session!`). A session is a module in `sys.modules`; the last
+  reference to whatever a block left open is its globals, so a host that never
+  drops a finished session holds every descriptor it ever leaked. Clearing is
+  not enough — a namespace is a reference cycle through every function defined
+  in it, so the collector has to run.
+- `run_block` REINSTALLS the runtime into a session that lost it, which is what
+  Vis' `ensure-async-runtime!` did: `globals().clear()` is legal Python and a
+  block is allowed to run it.
+
+One case changed shape on purpose: Vis proved the registry tracks the raw layer
+by reading through `raw` AFTER dropping the wrapper. CPython closes the whole
+stack when the wrapper dies, so the port asserts the identity — which is the
+contract — and reads while the stack is alive.

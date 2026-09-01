@@ -16,6 +16,27 @@
   (try (boolean (runtime/resolve-library))
        (catch clojure.lang.ExceptionInfo _ false)))
 
+(def ^:private opened
+  "Every session this harness has handed out and not yet closed."
+  (atom []))
+
+(defn- track!
+  "Remember `session` so `close-sessions!` can drop it."
+  [session]
+  (swap! opened conj session)
+  session)
+
+(defn close-sessions!
+  "Close every session the harness opened.
+
+   A session is a module the interpreter keeps until it is dropped, and the last
+   reference to whatever a block left behind is usually its globals — so a suite
+   that never closes one measures descriptor discipline against a process still
+   holding everything it ever opened."
+  []
+  (doseq [s @opened] (ffi/close-session! s))
+  (reset! opened []))
+
 (defn session
   "A session of its own with the sandbox runtime and `shim` installed.
 
@@ -29,17 +50,24 @@
     (ffi/exec! s "import vis_runtime")
     (ffi/eval-str s "vis_runtime.forget_shims()")
     (ffi/install-shim! s shim)
-    s))
+    (track! s)))
 
-(defmacro defshim-test
-  "A ported shim test: binds `session` to a session with `shim` installed, or
-   prints a skip when the cdylib is missing. Keeps the moved bodies unchanged."
-  [test-name shim & body]
+(defmacro defbuilt-test
+  "A test that needs the interpreter: skips LOUDLY, naming the command that
+   fixes it, in a checkout where no cdylib has been built."
+  [test-name & body]
   `(clojure.test/deftest ~test-name
      (if-not built?
        (println "SKIP" ~(str test-name) "- no cdylib, run native/vis-python/build.sh")
-       (let [~'session (session ~shim)]
-         ~@body))))
+       (do ~@body))))
+
+(defmacro defshim-test
+  "A ported shim test: binds `session` to a session with `shim` installed.
+   Keeps the moved bodies unchanged."
+  [test-name shim & body]
+  `(defbuilt-test ~test-name
+     (let [~'session (session ~shim)]
+       ~@body)))
 
 (defn ev
   "Run `code` in `session` and answer its value as Clojure data — the moved
@@ -62,7 +90,7 @@
     (ffi/install-runtime! s)
     (ffi/exec! s "import vis_runtime")
     (ffi/eval-str s "vis_runtime.reset_handles()")
-    s))
+    (track! s)))
 
 (defn block
   "Run `code` as a sandbox block in `session`: `{:stdout … :error …}`."
@@ -97,7 +125,7 @@
     (ffi/install-runtime! s)
     (ffi/exec! s "import vis_runtime")
     (ffi/eval-str s "vis_runtime.forget_shims()")
-    s))
+    (track! s)))
 
 (defn guarded-session
   "A session confined to `allowed`/`denied` the way the engine confines one: the
@@ -115,4 +143,4 @@
                (str "__vis_allowed_domains__ = " (json/write-str allowed) "\n"
                     "__vis_denied_domains__ = " (json/write-str denied)))
     (ffi/install-module! s "network_guard")
-    s))
+    (track! s)))

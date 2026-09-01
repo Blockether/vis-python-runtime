@@ -217,6 +217,17 @@
    (exec! session "import vis_runtime")
    (eval-str session (str "vis_runtime.install_module(globals(), " (pr-str name) ")"))))
 
+(defn close-session!
+  "Drop `session`'s namespace, answering whether there was one.
+
+   A session is a module the interpreter keeps until it is dropped, and the last
+   reference to a file, a socket or a host handle a block left behind is usually
+   that namespace: a host that never closes a finished session holds everything
+   every block ever leaked, for the life of the process."
+  [session]
+  (exec! default-session "import vis_runtime")
+  (= "True" (eval-str default-session (str "vis_runtime.close_session(" (pr-str session) ")"))))
+
 (defn finalize!
   "Stop the interpreter. Idempotent."
   []

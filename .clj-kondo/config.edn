@@ -1,4 +1,5 @@
-{:lint-as {com.blockether.vis-python-runtime.harness/defshim-test clojure.test/deftest
+{:lint-as {com.blockether.vis-python-runtime.harness/defbuilt-test clojure.test/deftest
+            com.blockether.vis-python-runtime.harness/defshim-test clojure.test/deftest
             com.blockether.vis-python-runtime.network-guard-test/defguard-test clojure.test/deftest}
  :linters
  {:unresolved-symbol

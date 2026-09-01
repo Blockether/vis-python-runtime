@@ -10,7 +10,7 @@
    Ported from Vis, minus the two cases that were never about this file: the
    capability itself (`network OFF` means no sockets at all) and the proxy/CA
    environment are the host's, and stay in Vis."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [is testing]]
             [com.blockether.vis-python-runtime.harness :as harness]))
 
 (def ^:private metadata-hosts
@@ -56,14 +56,11 @@
                             "_p()"))))
 
 (defmacro ^:private defguard-test
-  "A policy test: binds `session` to a session confined to `allowed`/`denied`, or
-   prints a skip when the cdylib is missing."
+  "A policy test: binds `session` to a session confined to `allowed`/`denied`."
   [test-name allowed denied & body]
-  `(deftest ~test-name
-     (if-not harness/built?
-       (println "SKIP" ~(str test-name) "- no cdylib, run native/vis-python/build.sh")
-       (let [~'session (harness/guarded-session ~allowed ~denied)]
-         ~@body))))
+  `(harness/defbuilt-test ~test-name
+     (let [~'session (harness/guarded-session ~allowed ~denied)]
+       ~@body)))
 
 (defguard-test star-allowlist-test
   ["*"] metadata-hosts
@@ -105,17 +102,15 @@
     (is (= :blocked (raw-connect session "127.0.0.1")))
     (is (= :blocked (raw-connect session "169.254.169.254")))))
 
-(deftest policy-is-replaced-not-stacked-test
+(harness/defbuilt-test policy-is-replaced-not-stacked-test
   ;; One interpreter, one `socket`: the guard used to wrap it again per install,
   ;; so a session's policy was every earlier session's policy AND its own, and a
   ;; host the current session allows stayed blocked forever. The wrapping happens
   ;; once now and the policy is a holder the check reads.
-  (if-not harness/built?
-    (println "SKIP policy-is-replaced-not-stacked-test - no cdylib")
-    (let [strict (harness/guarded-session ["example.com"] [])]
-      (is (= :blocked (resolution strict "evil.test")))
-      (let [open (harness/guarded-session ["*"] [])]
-        (is (= :permitted (resolution open "evil.test"))
-            "the later session's policy replaced the earlier one")
-        (is (= :permitted (resolution strict "evil.test"))
-            "and it replaced it for every session, because there is one socket")))))
+  (let [strict (harness/guarded-session ["example.com"] [])]
+    (is (= :blocked (resolution strict "evil.test")))
+    (let [open (harness/guarded-session ["*"] [])]
+      (is (= :permitted (resolution open "evil.test"))
+          "the later session's policy replaced the earlier one")
+      (is (= :permitted (resolution strict "evil.test"))
+          "and it replaced it for every session, because there is one socket"))))

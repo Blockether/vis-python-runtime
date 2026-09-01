@@ -16,7 +16,9 @@ and reaches the interpreter as a source root; Vis' copy is hashed against it
 """
 
 import ast
+import builtins
 import contextlib
+import gc
 import importlib
 import importlib.machinery
 import importlib.util
@@ -195,6 +197,14 @@ def run_block(source, namespace):
     """
     runner = namespace.get("__vis_run_async__")
     if runner is None:
+        # `globals().clear()` is legal Python and a block is allowed to run it,
+        # so a session can arrive here stripped of the runtime it was equipped
+        # with. Re-install rather than refuse: the state that matters — pending
+        # writes, the descriptor table, the handle registry — is adopted back
+        # off builtins, so the session keeps what it was still holding.
+        install(namespace)
+        runner = namespace.get("__vis_run_async__")
+    if runner is None:
         raise RuntimeError("session is not equipped: install(namespace) first")
     stream = io.StringIO()
     error = None
@@ -207,6 +217,34 @@ def run_block(source, namespace):
     if reapers is not None:
         reapers()
     return {"stdout": stream.getvalue(), "error": error}
+
+
+def close_session(name):
+    """Drop the session `name`, freeing what only it still held.
+
+    A session is a module in `sys.modules` — that is where it has to be while
+    the host is using it, and where it must NOT stay afterwards. CPython frees a
+    file, a socket or a host handle when the last reference to it dies, and the
+    last reference is usually the session's own globals: a process that never
+    drops a finished session holds every descriptor every block ever leaked.
+
+    The collection is not optional. Every function a block defined holds the
+    namespace as its `__globals__`, so a cleared session is a reference CYCLE
+    and nothing in it is freed until the collector runs. Answers whether there
+    was such a session.
+    """
+    module = sys.modules.pop(name, None)
+    if module is None:
+        return False
+    namespace = getattr(module, "__dict__", None)
+    if namespace is not None:
+        namespace.clear()
+    del module
+    gc.collect()
+    reclaim = getattr(builtins, "__vis_reclaim_fds__", None)
+    if reclaim is not None:
+        reclaim(True)
+    return True
 
 
 def run_block_edn(source, namespace):
