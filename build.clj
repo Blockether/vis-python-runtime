@@ -44,7 +44,7 @@
    the main jar under the SAME names a checkout has them on the classpath, so
    `Sources` resolves one layout and never two — and `SOURCES` beside them names
    every file, because a jar can be walked and a native image cannot."
-  ["vispython" "vis-python" "vis-shims"])
+  ["vispython" "vis-python"])
 (def basis (delay (b/create-basis {:project "deps.edn"})))
 
 (defn clean [_] (b/delete {:path "target"}))

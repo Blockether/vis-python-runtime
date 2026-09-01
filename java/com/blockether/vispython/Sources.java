@@ -43,42 +43,18 @@ public final class Sources {
    * are what is probed for instead, all three from the ONE directory holding
    * the first.
    */
-  public static final List<String> ROOTS = List.of("vispython", "vis-python", "vis-shims");
+  public static final List<String> ROOTS = List.of("vispython", "vis-python");
 
   private Sources() {}
-
-  /** The name of the shipped directory holding shim sources, not an import root. */
-  public static final String SHIMS = "vis-shims";
 
   /** Every directory this artifact provides, empty when it ships none. */
   public static List<String> roots() {
     return roots(Sources.class.getClassLoader(), cache());
   }
 
-  /**
-   * The directories that go on {@code sys.path}. The shims are NOT among them:
-   * a shim is reached through the runtime's own finder, and a shim directory on
-   * {@code sys.path} would make `import <name>` an ordinary file import - the
-   * stdlib would stop winning and a failure would stop being blamed by name.
-   */
+  /** The directories that go on {@code sys.path}. */
   public static List<String> importRoots() {
-    List<String> roots = new ArrayList<>();
-    for (String root : roots()) {
-      if (!root.endsWith(SHIMS)) {
-        roots.add(root);
-      }
-    }
-    return List.copyOf(roots);
-  }
-
-  /** Where the shim sources are, or null when this artifact ships none. */
-  public static String shims() {
-    for (String root : roots()) {
-      if (root.endsWith(SHIMS)) {
-        return root;
-      }
-    }
-    return null;
+    return roots();
   }
 
   /** Where extraction lands: {@code ~/.vis/python/sources/<version>}. */

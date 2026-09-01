@@ -48,24 +48,25 @@ docstring or a test can state lives there, not here.
   and idempotent; a session is a module namespace created on demand, so sessions
   keep separate globals while sharing imported modules — the second session's
   runtime install costs nothing. Sub-interpreters are not the mechanism.
-- **The sandbox Python lives here now** — `resources/vis-python/` and
-  `resources/vis-shims/`, at the very resource paths Vis already reads, so the
-  pin is the only change Vis makes. Until that pin exists Vis still carries its
-  own copy and `sandbox-parity-test` compares every file byte for byte; edit a
-  file on one side only and the suite fails. Delete that test with the last copy.
-- **`resources/vis-python/` is a MIRROR; this repository's own guest Python is
-  `resources/vispython/vis_runtime.py`.** Put a file of ours in the mirror and
-  `sandbox-parity-test` fails, correctly. `native/vispython/` is build input a
-  compiler reads, never a shipped source root, so guest Python never lives there.
+- **The sandbox Python lives here now** — `resources/vis-python/`, at the very
+  resource paths Vis already reads, so the pin is the only change Vis makes.
+  Shims do NOT: the sandbox runs a real CPython with pip, so `numpy` is numpy
+  and the only Python Vis still ships is its own host-call doors, which call
+  Vis' tools and could not live anywhere else.
+- **`resources/vis-python/` is the sandbox's ambient runtime; this repository's
+  own guest Python is `resources/vispython/vis_runtime.py`.** The two are
+  separate roots with separate jobs. `native/vispython/` is build input a
+  compiler reads, never a shipped source root, so guest Python never lives
+  there.
 - **ONE wire dialect: JSON, in both directions.** `host_call` carries a JSON
   envelope in, `vis_runtime.to_json` renders the value out, and `run` /
   `run-block` answer JSON TEXT the caller reads with the reader it already has.
   The bridge reads none of it; never reintroduce a second encoding.
 - **The consumer contract is the existing sandbox, unchanged.** Success is Vis'
-  ~1.5 MB of shims in `resources/vis-shims/`, `resources/vis-python/async_runtime.py`
-  and `packages/vis-agent/src/vis/__init__.py` running with no edit beyond the
-  12 GraalPy-specific call sites already identified. If a shim has to change,
-  the design is wrong — fix the bridge.
+  `resources/vis-python/async_runtime.py`, its host-call doors and
+  `packages/vis-agent/src/vis/__init__.py` running with no edit beyond the
+  GraalPy-specific call sites. If a door has to change, the design is wrong —
+  fix the bridge.
 - **The filesystem boundary is C, never Python.** Confinement is an audit hook
   (PEP 578) installed before `Py_InitializeEx` over a policy the host sets
   through `vispython_confine`; guest code cannot see it, remove it or reach
@@ -130,7 +131,7 @@ carries, and `Sources` resolves each one RELATIVE to that resource's URL. A
 lookup by name (`getResource("vis-python/async_runtime.py")`) answers whichever
 classpath entry comes first, and the host embedding this library carries a
 directory of the same name — measured: from a Vis checkout the runtime imported
-VIS' copies and its own `vis-shims` never won. The same rule is why an artifact
+VIS' copies and its own never won. The same rule is why an artifact
 with no manifest takes all three roots from the one directory holding
 `vispython/`, and why `target/classes` (which `:deps/prep-lib` owns) carries no
 Python: the jar is assembled in `target/jar-classes`.

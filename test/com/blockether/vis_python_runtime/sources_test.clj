@@ -15,7 +15,7 @@
            [java.util.jar JarEntry JarOutputStream]))
 
 (def ^:private listed
-  ["vispython/vis_runtime.py" "vis-python/auto_imports.py" "vis-shims/yaml.py"])
+  ["vispython/vis_runtime.py" "vis-python/auto_imports.py"])
 
 (defn- temp-dir [prefix]
   (.toAbsolutePath (Files/createTempDirectory prefix (make-array FileAttribute 0))))
@@ -60,8 +60,8 @@
     (let [root  (exploded)
           cache (temp-dir "vis-sources-cache")
           roots (Sources/roots (loader (str root "/")) cache)]
-      (is (= 3 (count roots)))
-      (is (= [(str root "/vispython") (str root "/vis-python") (str root "/vis-shims")] roots))
+      (is (= 2 (count roots)))
+      (is (= [(str root "/vispython") (str root "/vis-python")] roots))
       (is (empty? (seq (.listFiles (io/file (str cache)))))
           "nothing is copied when the files are already files"))))
 
@@ -70,12 +70,12 @@
     (let [jar   (jarred)
           cache (temp-dir "vis-sources-cache")
           roots (Sources/roots (loader jar) cache)]
-      (is (= [(str cache "/vispython") (str cache "/vis-python") (str cache "/vis-shims")] roots))
-      (is (= "# vis-shims/yaml.py" (slurp (io/file (str cache) "vis-shims/yaml.py"))))
+      (is (= [(str cache "/vispython") (str cache "/vis-python")] roots))
+      (is (= "# vis-python/auto_imports.py" (slurp (io/file (str cache) "vis-python/auto_imports.py"))))
       (testing "the marker, not a re-read, is what makes the second call free"
-        (spit (io/file (str cache) "vis-shims/yaml.py") "# edited")
+        (spit (io/file (str cache) "vis-python/auto_imports.py") "# edited")
         (is (= roots (Sources/roots (loader jar) cache)))
-        (is (= "# edited" (slurp (io/file (str cache) "vis-shims/yaml.py"))))))))
+        (is (= "# edited" (slurp (io/file (str cache) "vis-python/auto_imports.py"))))))))
 
 (deftest no-manifest-answers-nothing-test
   (testing "an artifact that ships no Python contributes no import directory"
@@ -85,24 +85,22 @@
   (testing "a git or :local/root dependency has no jar and so no manifest"
     (let [root (temp-dir "vis-sources-nomanifest")]
       (doseq [entry listed] (write! root entry (str "# " entry)))
-      (is (= [(str root "/vispython") (str root "/vis-python") (str root "/vis-shims")]
+      (is (= [(str root "/vispython") (str root "/vis-python")]
              (Sources/roots (loader (str root "/")) (temp-dir "vis-cache")))))))
 
-;; The host embedding this library carries a mirror of `vis-python/` and
-;; `vis-shims/` until the pin deletes it, and its own resources come FIRST on
-;; the classpath.
+;; The host embedding this library carries a directory of the same name, and
+;; its own resources come FIRST on the classpath.
 (deftest a-hosts-own-directories-are-not-mistaken-for-ours-test
   (testing "the roots are taken from the one directory that holds `vispython/`"
     (let [host (temp-dir "vis-sources-host")
           ours (temp-dir "vis-sources-ours")]
       (write! host "vis-python/auto_imports.py" "# the host's own copy")
-      (write! host "vis-shims/yaml.py" "# the host's own copy")
       (doseq [entry listed] (write! ours entry (str "# " entry)))
       (let [urls  (into-array URL (map #(.toURL (.toURI (io/file (str % "/"))))
                                        [host ours]))
             found (Sources/roots (URLClassLoader. urls (ClassLoader/getPlatformClassLoader))
                                  (temp-dir "vis-cache"))]
-        (is (= [(str ours "/vispython") (str ours "/vis-python") (str ours "/vis-shims")] found))))))
+        (is (= [(str ours "/vispython") (str ours "/vis-python")] found))))))
 
 ;; The same shadowing hazard as above, but for a PACKAGED artifact: the entries
 ;; are addressed from the manifest, so a host directory earlier on the classpath
@@ -112,8 +110,7 @@
     (let [host  (temp-dir "vis-sources-host-jar")
           jar   (jarred)
           cache (temp-dir "vis-cache")]
-      (write! host "vis-shims/yaml.py" "# the host's own copy")
       (let [urls (into-array URL [(.toURL (.toURI (io/file (str host "/"))))
                                   (.toURL (.toURI (io/file (str jar))))])]
         (Sources/roots (URLClassLoader. urls (ClassLoader/getPlatformClassLoader)) cache))
-      (is (= "# vis-shims/yaml.py" (slurp (io/file (str cache) "vis-shims/yaml.py")))))))
+      (is (= "# vis-python/auto_imports.py" (slurp (io/file (str cache) "vis-python/auto_imports.py")))))))
