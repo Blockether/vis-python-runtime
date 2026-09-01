@@ -17,7 +17,9 @@
 
    Nothing is loaded until the first call: `resolve-library` decides where the
    cdylib is, and a checkout with no build simply throws from there."
-  (:require [com.blockether.vis-python-runtime :as runtime])
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [com.blockether.vis-python-runtime :as runtime])
   (:import [java.lang.foreign Arena FunctionDescriptor Linker Linker$Option MemoryLayout MemorySegment SymbolLookup ValueLayout]
            [java.lang.invoke MethodHandle]
            [java.util.concurrent Callable ExecutionException Executors ExecutorService ThreadFactory]))
@@ -36,8 +38,8 @@
    small and explicit."
   {"vis_python_initialize" (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_version"    (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/JAVA_INT)
-   "vis_python_eval"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
-   "vis_python_exec"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
+   "vis_python_eval"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
+   "vis_python_exec"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_finalize"   (descriptor ValueLayout/JAVA_INT)})
 
 (defn- link-handles
@@ -100,11 +102,40 @@
                            {:symbol symbol-name :status status :message text})))
          text)))))
 
+(def default-session
+  "The namespace a call runs in when the caller names none."
+  "__main__")
+
+(defn- source-roots
+  "Directories CPython may import from, in order: what the caller passed, then
+   `VIS_PYTHON_SOURCE_PATH`, then this repository's own `python/` in a dev
+   checkout. A packaged build extracts its sources and passes them explicitly,
+   the same way the cdylib is resolved."
+  [extra]
+  (let [env  (some-> (System/getenv "VIS_PYTHON_SOURCE_PATH")
+                     (str/split (re-pattern (java.util.regex.Pattern/quote java.io.File/pathSeparator))))
+        repo (io/file (System/getProperty "user.dir") "python")]
+    (->> (concat extra env (when (.isDirectory repo) [(.getAbsolutePath repo)]))
+         (remove str/blank?)
+         (distinct)
+         (vec))))
+
 (defn initialize!
-  "Start the embedded interpreter, once. Returns the library it bound."
-  []
-  (call "vis_python_initialize")
-  (:library @bridge))
+  "Start the embedded interpreter, once per process, and put `:source-paths`
+   (plus the defaults) on `sys.path`. Returns `{:library … :source-paths …}`.
+
+   Starting is process-wide; a SESSION is not. Sessions are namespaces created
+   on demand by `exec!`/`eval-str`, so many of them share one interpreter and
+   one set of imported modules."
+  ([] (initialize! {}))
+  ([{:keys [source-paths]}]
+   (call "vis_python_initialize")
+   (let [roots (source-roots source-paths)]
+     (when (seq roots)
+       (call "vis_python_exec" default-session
+             (str "import sys\n"
+                  (str/join "\n" (map #(str "sys.path.insert(0, " (pr-str %) ")") roots)))))
+     {:library (:library @bridge) :source-paths roots})))
 
 (defn version
   "The running interpreter's version string. Requires `initialize!`."
@@ -112,16 +143,28 @@
   (call "vis_python_version"))
 
 (defn eval-str
-  "Evaluate `code` as a Python EXPRESSION in `__main__`, answering `str(result)`.
-   A Python exception arrives as `ex-info` holding its text."
-  [^String code]
-  (call "vis_python_eval" code))
+  "Evaluate `code` as a Python EXPRESSION, answering `str(result)`. Runs in
+   `session` when given, otherwise in `__main__`. A Python exception arrives as
+   `ex-info` holding its text."
+  ([code] (eval-str default-session code))
+  ([session code] (call "vis_python_eval" session code)))
 
 (defn exec!
-  "Run `code` as a Python module body in `__main__`, for its side effects."
-  [^String code]
-  (call "vis_python_exec" code)
-  nil)
+  "Run `code` as a Python module body for its side effects, in `session` when
+   given, otherwise in `__main__`."
+  ([code] (exec! default-session code))
+  ([session code] (call "vis_python_exec" session code) nil))
+
+(defn install-runtime!
+  "Equip `session` with the sandbox runtime and answer how many names it got.
+
+   The runtime is IMPORTED, never interpolated into a string: `vis_runtime`
+   lives on `sys.path` and CPython's own import machinery compiles and caches
+   it, so a traceback points at a file and the second session pays nothing."
+  ([] (install-runtime! default-session))
+  ([session]
+   (exec! session "import vis_runtime")
+   (Long/parseLong (eval-str session "vis_runtime.install(globals())"))))
 
 (defn finalize!
   "Stop the interpreter. Idempotent."

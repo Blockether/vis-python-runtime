@@ -88,24 +88,48 @@ int vis_python_version(char *out, int cap)
     return vis_py_copy_out(Py_GetVersion(), out, cap);
 }
 
-/* Evaluate `code` as an EXPRESSION in __main__ and write str(result).
+/* Resolve the module a call runs in. An empty or NULL name means `__main__`;
+   any other name is created on first use, which is how the host gets one
+   isolated namespace per sandbox SESSION out of a single interpreter. Sessions
+   are module namespaces, not sub-interpreters: they share imported modules (so
+   the second session pays nothing to import json) while keeping their own
+   globals. Returns a borrowed dict, or NULL with the error taken. */
+static PyObject *vis_py_namespace(const char *module_name, char *out, int cap)
+{
+    PyObject *module, *globals;
+    const char *name = (module_name == NULL || module_name[0] == '\0') ? "__main__" : module_name;
+
+    module = PyImport_AddModule(name);
+    if (module == NULL) {
+        vis_py_take_error(out, cap);
+        return NULL;
+    }
+    globals = PyModule_GetDict(module);
+    if (PyDict_GetItemString(globals, "__builtins__") == NULL) {
+        if (PyDict_SetItemString(globals, "__builtins__", PyEval_GetBuiltins()) != 0) {
+            vis_py_take_error(out, cap);
+            return NULL;
+        }
+    }
+    return globals;
+}
+
+/* Evaluate `code` as an EXPRESSION in `module_name` and write str(result).
    Statements belong in vis_python_exec; keeping the two apart is what lets the
    JVM side stay free of Py_eval_input / Py_file_input constants. */
-int vis_python_eval(const char *code, char *out, int cap)
+int vis_python_eval(const char *module_name, const char *code, char *out, int cap)
 {
-    PyObject *main_module, *globals, *result, *text;
+    PyObject *globals, *result, *text;
     const char *utf8;
     int written;
 
     if (!vis_py_started) {
         return VIS_PY_ERR_INIT;
     }
-    main_module = PyImport_AddModule("__main__");
-    if (main_module == NULL) {
-        vis_py_take_error(out, cap);
+    globals = vis_py_namespace(module_name, out, cap);
+    if (globals == NULL) {
         return VIS_PY_ERR_PYTHON;
     }
-    globals = PyModule_GetDict(main_module);
     result = PyRun_String(code, Py_eval_input, globals, globals);
     if (result == NULL) {
         vis_py_take_error(out, cap);
@@ -119,20 +143,18 @@ int vis_python_eval(const char *code, char *out, int cap)
     return written;
 }
 
-/* Run `code` as a module body in __main__, for its side effects. Returns 0. */
-int vis_python_exec(const char *code, char *out, int cap)
+/* Run `code` as a module body in `module_name`, for its side effects. */
+int vis_python_exec(const char *module_name, const char *code, char *out, int cap)
 {
-    PyObject *main_module, *globals, *result;
+    PyObject *globals, *result;
 
     if (!vis_py_started) {
         return VIS_PY_ERR_INIT;
     }
-    main_module = PyImport_AddModule("__main__");
-    if (main_module == NULL) {
-        vis_py_take_error(out, cap);
+    globals = vis_py_namespace(module_name, out, cap);
+    if (globals == NULL) {
         return VIS_PY_ERR_PYTHON;
     }
-    globals = PyModule_GetDict(main_module);
     result = PyRun_String(code, Py_file_input, globals, globals);
     if (result == NULL) {
         vis_py_take_error(out, cap);

@@ -6,3 +6,5 @@ resources/prebuilds/
 native/vis-python/build/
 native/vis-python/cpython/
 .DS_Store
+__pycache__/
+*.pyc

@@ -18,7 +18,7 @@
     (println "SKIP embedded-interpreter-test: no cdylib, run native/vis-python/build.sh")
     (do
       (testing "the interpreter starts and reports itself"
-        (is (= :env (:source (ffi/initialize!)))
+        (is (= :env (:source (:library (ffi/initialize!))))
             "the test binds the library the build just produced")
         (is (str/starts-with? (ffi/version) "3.")
             "an embedded CPython 3.x is running inside this JVM"))
@@ -36,4 +36,15 @@
           (is (str/includes? (.getMessage ^Exception thrown) "division by zero"))))
 
       (testing "a later call still works, so the error left nothing pending"
-        (is (= "ok" (ffi/eval-str "'ok'")))))))
+        (is (= "ok" (ffi/eval-str "'ok'"))))
+
+      (testing "sessions are separate namespaces over one interpreter"
+        (ffi/exec! "session-a" "secret = 'a'")
+        (ffi/exec! "session-b" "secret = 'b'")
+        (is (= "a" (ffi/eval-str "session-a" "secret")))
+        (is (= "b" (ffi/eval-str "session-b" "secret")))
+        (is (= "False" (ffi/eval-str "'secret' in globals()"))
+            "__main__ never saw either session's state")
+        (ffi/exec! "session-a" "import json")
+        (is (= "True" (ffi/eval-str "session-b" "'json' in __import__('sys').modules"))
+            "imported modules ARE shared: a session is a namespace, not an interpreter")))))

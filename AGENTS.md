@@ -27,6 +27,14 @@ docstring or a test can state lives there, not here.
   suffix. The build writes it into the jar as the NAMESPACED resource
   `vis-python-runtime/VERSION`, because a bare `VERSION` resource collides with
   other libraries on a shared classpath.
+- **Python is IMPORTED, never interpolated into a string.** The host puts source
+  roots on `sys.path` and imports `vis_runtime`; CPython owns compilation,
+  `__pycache__` and tracebacks that name a file and a line. A multi-thousand-line
+  runtime handed to `exec` as one string throws all three away.
+- **One interpreter per process, many SESSIONS.** `initialize!` is process-wide
+  and idempotent; a session is a module namespace created on demand, so sessions
+  keep separate globals while sharing imported modules — the second session's
+  runtime install costs nothing. Sub-interpreters are not the mechanism.
 - **The consumer contract is the existing sandbox, unchanged.** Success is Vis'
   ~1.5 MB of shims in `resources/vis-shims/`, `resources/vis-python/async_runtime.py`
   and `packages/vis-agent/src/vis/__init__.py` running with no edit beyond the
