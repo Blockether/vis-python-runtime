@@ -19,7 +19,6 @@
             [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
             [com.blockether.vis-python-runtime :as runtime]
-            [com.blockether.vis-python-runtime.ffi :as ffi]
             [com.blockether.vis-python-runtime.harness :as harness
              :refer [block confined-session temp-dir]]))
 
@@ -28,7 +27,7 @@
     (try (run)
          (finally
            ;; A confined interpreter would refuse the next namespace's imports.
-           (when harness/built? (ffi/confine! [] []))
+           (when harness/built? (runtime/confine! [] []))
            (harness/close-sessions!)))))
 
 (harness/defbuilt-test shipped-tree-carries-no-bytecode-test
@@ -43,16 +42,16 @@
             (str "the artifact carries bytecode it should compile on the host instead: " cached))))))
 
 (harness/defbuilt-test prefix-is-in-force-test
-  (let [{:keys [pycache-prefix]} (ffi/initialize!)
+  (let [{:keys [pycache-prefix]} (runtime/initialize!)
         session (harness/block-session)]
     (testing "the running interpreter caches where the host said, not beside the source"
-      (is (= pycache-prefix (ffi/eval-str session "__import__('sys').pycache_prefix"))))
+      (is (= pycache-prefix (runtime/eval-str session "__import__('sys').pycache_prefix"))))
     (testing "and the default is the user's own directory"
       (when-not (System/getenv runtime/pycache-prefix-env)
         (is (str/ends-with? (str pycache-prefix) "/.vis/python/pycache"))))))
 
 (harness/defbuilt-test cached-bytecode-lands-in-the-prefix-test
-  (let [{:keys [pycache-prefix]} (ffi/initialize!)
+  (let [{:keys [pycache-prefix]} (runtime/initialize!)
         source-dir (temp-dir "vis-bytecode")
         module     (str "vis_bytecode_probe_" (System/nanoTime))
         session    (confined-session [source-dir] [])]
@@ -68,4 +67,4 @@
       (is (some #(str/includes? (str %) module)
                 (file-seq (io/file pycache-prefix (subs source-dir 1))))))
     (testing "the cache is part of the policy in force, so the answer counts it"
-      (is (= 1 (:write (ffi/confine! [source-dir] [])))))))
+      (is (= 1 (:write (runtime/confine! [source-dir] [])))))))

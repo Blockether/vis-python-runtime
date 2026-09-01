@@ -38,6 +38,23 @@
 
 (defn clean [_] (b/delete {:path "target"}))
 
+(defn javac
+  "Compile the Java bridge into `target/classes`.
+
+   The bridge is JAVA, and the reason is the native image: every downcall is an
+   `invokeExact` against a signature the compiler knows, and the host upcall's
+   target is a static method found by name — neither is a reflective call the
+   image would have to be told about. `:deps/prep-lib` in `deps.edn` names this
+   function, so a consumer taking this library as a git dependency runs it with
+   `clojure -X:deps prep` and never sees a source tree it cannot use."
+  [_]
+  (b/javac {:src-dirs ["java"]
+            :class-dir class-dir
+            :basis @basis
+            ;; The FFM calls are restricted by design and the runtime opts in
+            ;; with `--enable-native-access`, so that warning is noise here.
+            :javac-opts ["--release" "22" "-Xlint:all,-restricted"]}))
+
 (defn- pom-data [description]
   [[:description description]
    [:url "https://github.com/Blockether/vis-python-runtime"]
@@ -48,6 +65,7 @@
 
 (defn jar [_]
   (clean nil)
+  (javac nil)
   (b/write-pom {:class-dir class-dir
                 :lib lib
                 :version version

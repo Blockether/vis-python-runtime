@@ -238,7 +238,7 @@ the measured GraalPy baseline in `bench/pre-cpython.md` and the harness that
 produced it.
 
 Phase 1 done on the JVM side. `native/vis-python/vispython.c` exports
-initialize / version / eval / exec / finalize, `com.blockether.vis-python-runtime.ffi`
+initialize / version / eval / exec / finalize, `com.blockether.vispython.Interpreter`
 binds all five through FFM on one pinned thread, and the loading model is
 settled: source roots on `sys.path`, `import vis_runtime`, `install` per
 session. Sessions are module namespaces over one interpreter.
@@ -354,3 +354,22 @@ later run to load. It is the same directory CPython would write itself, and a
 block already runs arbitrary Python in the session that writes it, but the
 persistence ACROSS sessions is new and wants either a host-owned warm-up pass or
 `check_hash` invalidation before this ships.
+
+The bridge is Java now, and the Clojure is an API. `java/com/blockether/vispython/`
+holds five classes — `Interpreter` (the FFM downcalls, the pinned thread, the host
+upcall, the session helpers), `Native` (platform tags and cdylib resolution),
+`Locations` (every directory this runtime decides), `Pip`, `HostFunction` — and
+`src/com/blockether/vis_python_runtime.clj` is one namespace of one- to
+three-line functions over them: argument shapes, keyword maps, EDN. The reason is
+Phase 5's verdict, not taste. In Clojure every downcall was
+`MethodHandle.invokeWithArguments` — a reflective, boxing invocation — and the
+host upcall's target was a `clojure.lang.IFn` bound and `asType`-adapted into
+native shape; both are exactly what a GraalVM native image drops unless somebody
+registers them, and a green JVM suite never notices. In Java the downcalls are
+`invokeExact` against signatures the compiler knows and the upcall target is a
+static method found by name. `com.blockether.vis-python-runtime.ffi` and
+`…​.pip` are gone; `ffi_test.clj` is `bridge_test.clj`; a failure now arrives as
+`VisPythonException` whose `.data` names the symbol, status, platform or path.
+`clojure -T:build javac` compiles into `target/classes`, which is on `:paths`,
+and `:deps/prep-lib` runs the same task for a consumer taking this as a git
+dependency. Suite: 116 tests / 584 assertions.

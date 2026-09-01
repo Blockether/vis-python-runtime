@@ -11,9 +11,9 @@
    the policy set last — so every case here lifts it again."
   (:require [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
-            [com.blockether.vis-python-runtime.ffi :as ffi]
             [com.blockether.vis-python-runtime.harness :as harness
-             :refer [block confined-session temp-dir]])
+             :refer [block confined-session temp-dir]]
+            [com.blockether.vis-python-runtime :as runtime])
   (:import [java.nio.file Files Path]
            [java.nio.file.attribute FileAttribute]))
 
@@ -22,7 +22,7 @@
     (try (run)
          (finally
            ;; A confined interpreter would refuse the next namespace's imports.
-           (when harness/built? (ffi/confine! [] []))
+           (when harness/built? (runtime/confine! [] []))
            (harness/close-sessions!)))))
 
 (defn- refused?
@@ -84,7 +84,7 @@
           session (confined-session [(temp-dir "vis-only")] [])]
       (spit (str outside "/out.txt") "OUTSIDE")
       (is (refused? (block session (str "print(open('" outside "/out.txt').read())"))))
-      (is (= {:read 0 :write 0} (ffi/confine! [] [])))
+      (is (= {:read 0 :write 0} (runtime/confine! [] [])))
       (is (= "OUTSIDE" (str/trim (str (:stdout (block session
                                                       (str "print(open('" outside "/out.txt').read())"))))))))))
 
@@ -125,7 +125,7 @@
 (harness/defbuilt-test unconfined-process-test
   (testing "the refusal is the POLICY, not a ban compiled into the library"
     (let [session (harness/block-session)]
-      (ffi/confine! [] [] "")
+      (runtime/confine! [] [] "")
       (is (= "hi"
              (str/trim (str (:stdout (block session
                                             (str "import subprocess\n"

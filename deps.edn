@@ -10,7 +10,16 @@
 ;; else's binary. The cdylib is resolved at RUNTIME from VIS_PYTHON_NATIVE_PATH
 ;; or from the bundled classpath resource published per platform as
 ;; com.blockether/vis-python-runtime-native-<platform>.
-{:paths ["src" "resources"]
+{:paths ["src" "resources" "target/classes"]
+
+ ;; The bridge is Java, compiled into `target/classes`: FFM downcalls that are
+ ;; `invokeExact` against a known signature, and a host upcall whose target is a
+ ;; static method — the two shapes a GraalVM native image can keep. Clojure
+ ;; keeps only the API. A consumer taking this as a git dependency runs
+ ;; `clojure -X:deps prep`; in this checkout, `clojure -T:build javac`.
+ :deps/prep-lib {:ensure "target/classes"
+                 :alias  :build
+                 :fn     javac}
 
  :deps {}
 

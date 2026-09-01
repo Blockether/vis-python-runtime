@@ -16,8 +16,8 @@
    never a second RUN of the tool, and UTF-8 surviving both crossings."
   (:require [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
-            [com.blockether.vis-python-runtime.ffi :as ffi]
-            [com.blockether.vis-python-runtime.harness :as harness :refer [block]]))
+            [com.blockether.vis-python-runtime.harness :as harness :refer [block]]
+            [com.blockether.vis-python-runtime :as runtime]))
 
 (use-fixtures :each
   (fn [run]
@@ -99,9 +99,9 @@
   (let [session (harness/tool-session {"echo" echo})]
     (testing "the raw door carries text and answers text"
       (is (= "{\"value\":\"<x>\"}"
-             (ffi/run session "import vis_runtime\nvis_runtime.host_call('echo', '{\"args\": [\"x\"], \"kwargs\": {}}')"))))
+             (runtime/run session "import vis_runtime\nvis_runtime.host_call('echo', '{\"args\": [\"x\"], \"kwargs\": {}}')"))))
     (testing "a name the host does not know is the host's answer, not a crash"
-      (is (str/includes? (ffi/run session "import vis_runtime\nvis_runtime.host_call('nope', '{}')")
+      (is (str/includes? (runtime/run session "import vis_runtime\nvis_runtime.host_call('nope', '{}')")
                          "no tool named nope")))))
 
 (harness/defbuilt-test host-tool-is-protected-test
@@ -114,7 +114,7 @@
   ;; call into a pointer nobody owns any more.
   (let [session (harness/tool-session {"echo" echo})]
     (try
-      (ffi/bind-host! nil)
+      (runtime/bind-host! nil)
       (is (str/includes? (str (:error (block session "print(await echo('x'))")))
                          "no host is bound"))
       (finally

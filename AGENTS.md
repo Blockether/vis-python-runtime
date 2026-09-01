@@ -13,6 +13,17 @@ docstring or a test can state lives there, not here.
   the JVM downcalls must be registered for `native-image`, so a bridge that
   reaches CPython's several-thousand-symbol API directly is unshippable.
   Same reason `clj-imaging` speaks to Rust through one flat C surface.
+- **The bridge is JAVA (`java/com/blockether/vispython/`); Clojure is the API and
+  nothing else.** Every downcall is an `invokeExact` against a signature the
+  compiler knows, and the host upcall's target is a STATIC method found by name —
+  the two shapes a GraalVM native image keeps. The same code as interop is a
+  reflective invocation the image only keeps if somebody registered it, which a
+  green JVM suite never catches: it fails in a user's terminal. So new bridge
+  work, process pinning, the trust export and pip go in Java, and
+  `src/com/blockether/vis_python_runtime.clj` stays a skin: argument shapes,
+  keyword maps, EDN. A Clojure function there that is longer than three lines is
+  a sign the logic belongs on the other side. Java is compiled by
+  `clojure -T:build javac` into `target/classes`, which is on `:paths`.
 - **No runtime dependencies in `deps.edn`.** This library is linked into someone
   else's GraalVM native image; every dependency declared here becomes reachable
   code in their binary. Keep `:deps {}`.
@@ -54,9 +65,13 @@ docstring or a test can state lives there, not here.
 
 ## Verifying
 
-`clojure -M:test` (cognitect test-runner, `clojure.test`) is the whole suite.
-FFM downcalls are a restricted operation: the `:test` alias already passes
-`--enable-native-access=ALL-UNNAMED`, so keep new aliases consistent.
+`clojure -T:build javac && clojure -M:test` is the whole suite (cognitect
+test-runner, `clojure.test`). The javac is not optional: `target/classes` is on
+`:paths`, so a stale or missing build is a `ClassNotFoundException`, and a
+consumer taking this as a git dependency gets the same compile from
+`:deps/prep-lib`. FFM downcalls are a restricted operation: the `:test` alias
+already passes `--enable-native-access=ALL-UNNAMED`, so keep new aliases
+consistent.
 
 A green JVM suite is not a green native image. Once downcalls exist, their
 registrations live in `resources/META-INF/native-image/com.blockether/vis-python-runtime/`

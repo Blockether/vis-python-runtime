@@ -9,11 +9,10 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.blockether.vis-python-runtime :as runtime]
-            [com.blockether.vis-python-runtime.ffi :as ffi]
-            [com.blockether.vis-python-runtime.harness :as harness :refer [block temp-dir]]
-            [com.blockether.vis-python-runtime.pip :as pip])
+            [com.blockether.vis-python-runtime.harness :as harness :refer [block temp-dir]])
   (:import [java.net InetSocketAddress Socket]
-           [java.security.cert CertificateFactory]))
+           [java.security.cert CertificateFactory]
+           [com.blockether.vispython Pip]))
 
 (use-fixtures :each
   (fn [run]
@@ -51,20 +50,20 @@
             (str "the artifact bundles packages it should install with pip: " names))))))
 
 (harness/defbuilt-test packages-directory-is-importable-test
-  (let [{:keys [packages]} (ffi/initialize!)
+  (let [{:keys [packages]} (runtime/initialize!)
         session (harness/block-session)]
     (testing "what pip installs is on sys.path, so a real distribution shadows the shim of that name"
       (is (some? packages))
-      (is (= "True" (ffi/eval-str session (str (pr-str packages) " in __import__('sys').path"))))
+      (is (= "True" (runtime/eval-str session (str (pr-str packages) " in __import__('sys').path"))))
       (testing "and wiring it is idempotent: a second start does not duplicate a path entry"
-        (ffi/initialize!)
-        (is (= "1" (ffi/eval-str session
-                                 (str "str(__import__('sys').path.count(" (pr-str packages) "))"))))))))
+        (runtime/initialize!)
+        (is (= "1" (runtime/eval-str session
+                                     (str "str(__import__('sys').path.count(" (pr-str packages) "))"))))))))
 
 (deftest trust-comes-from-the-jvm-test
-  (let [anchors (pip/trust-anchors)
+  (let [anchors (Pip/trustAnchors)
         path    (str (io/file (temp-dir "vis-cert") "cacert.pem"))
-        written (pip/certificates-pem! path)]
+        written (runtime/certificates-pem! path)]
     (testing "the JVM's trust store is what pip will verify against"
       (is (seq anchors))
       (is (= path written))
@@ -75,11 +74,11 @@
     (testing "an unchanged trust store is not rewritten under a running subprocess"
       (let [stamp (.lastModified (io/file written))]
         (Thread/sleep 10)
-        (pip/certificates-pem! path)
+        (runtime/certificates-pem! path)
         (is (= stamp (.lastModified (io/file written))))))))
 
 (deftest install-command-test
-  (let [command (pip/install-command {:python "/p/bin/python3" :target "/t" :cert "/c/cacert.pem"}
+  (let [command (runtime/pip-command {:python "/p/bin/python3" :target "/t" :cert "/c/cacert.pem"}
                                      ["six==1.17.0"])]
     (testing "an sdist is refused: it would run its own setup.py on the host, outside every boundary"
       (is (some #{"--only-binary=:all:"} command)))
@@ -94,7 +93,7 @@
     (println "SKIPPED installs-a-real-distribution-test: pypi.org is not reachable")
     (let [target  (temp-dir "vis-packages")
           pycache (temp-dir "vis-packages-cache")
-          answer  (pip/install! {:target target :pycache-prefix pycache} ["six==1.17.0"])
+          answer  (runtime/pip-install! {:target target :pycache-prefix pycache} ["six==1.17.0"])
           session (harness/block-session)]
       (testing "pip installs over TLS the JVM's own certificates verified"
         (is (= 0 (:exit answer)) (:out answer)))

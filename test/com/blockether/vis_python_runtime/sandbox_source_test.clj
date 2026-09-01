@@ -11,26 +11,26 @@
    Skips, loudly, when no cdylib has been built."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [com.blockether.vis-python-runtime :as runtime]
-            [com.blockether.vis-python-runtime.ffi :as ffi]))
+            [com.blockether.vis-python-runtime :as runtime])
+  (:import [com.blockether.vispython VisPythonException]))
 
 (def ^:private built?
   (try (boolean (runtime/resolve-library))
-       (catch clojure.lang.ExceptionInfo _ false)))
+       (catch VisPythonException _ false)))
 
 (deftest sandbox-runtime-imports-test
   (if-not built?
     (println "SKIP sandbox-runtime-imports-test: no cdylib, run native/vis-python/build.sh")
     (testing "the sandbox runtime installs into a session unmodified"
-      (ffi/initialize!)
+      (runtime/initialize!)
       (let [session "vis-sandbox"
-            installed (ffi/install-runtime! session)]
+            installed (runtime/install-runtime! session)]
         (is (< 150 installed)
             "the whole public surface of the runtime landed in the session")
-        (is (str/includes? (ffi/eval-str session "__vis_run_async__.__code__.co_filename")
+        (is (str/includes? (runtime/eval-str session "__vis_run_async__.__code__.co_filename")
                            "vis-python-runtime")
             "the code executed into the session came from THIS repository's resources")
-        (is (= "True" (ffi/eval-str session "'__VisShell__' in globals()"))
+        (is (= "True" (runtime/eval-str session "'__VisShell__' in globals()"))
             "the shell handle type the host drives is defined")
-        (is (= "True" (ffi/eval-str session "callable(__vis_own__)"))
+        (is (= "True" (runtime/eval-str session "callable(__vis_own__)"))
             "the handle-ownership registry is present, the one GraalPy needed a workaround for")))))

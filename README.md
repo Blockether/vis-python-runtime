@@ -18,10 +18,11 @@ CPython's own speed.
 
 ## Shape
 
-    src/                    the JVM half: resolution, the FFM bridge
+    java/                   the bridge: FFM downcalls, the host upcall, pip
+    src/                    the Clojure API over it, and nothing else
     native/vis-python/      the C shim + the vendoring build
     resources/prebuilds/    build output per platform (git-ignored)
-    test/                   clojure -M:test
+    test/                   clojure -T:build javac && clojure -M:test
 
 The jar carries no library. It resolves one at runtime from
 `VIS_PYTHON_NATIVE_PATH`, else from the classpath resource

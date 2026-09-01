@@ -8,15 +8,15 @@
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.test]
-            [com.blockether.vis-python-runtime :as runtime]
-            [com.blockether.vis-python-runtime.ffi :as ffi])
+            [com.blockether.vis-python-runtime :as runtime])
   (:import [java.nio.file Files LinkOption]
-           [java.nio.file.attribute FileAttribute]))
+           [java.nio.file.attribute FileAttribute]
+           [com.blockether.vispython VisPythonException]))
 
 (def built?
   "False in a checkout where `native/vis-python/build.sh` has not run."
   (try (boolean (runtime/resolve-library))
-       (catch clojure.lang.ExceptionInfo _ false)))
+       (catch VisPythonException _ false)))
 
 (def ^:private opened
   "Every session this harness has handed out and not yet closed."
@@ -36,7 +36,7 @@
    that never closes one measures descriptor discipline against a process still
    holding everything it ever opened."
   []
-  (doseq [s @opened] (ffi/close-session! s))
+  (doseq [s @opened] (runtime/close-session! s))
   (reset! opened []))
 
 (defn session
@@ -46,12 +46,12 @@
    AND a fresh module table: every shim loaded so far is dropped first, and a
    test that monkeypatches one hands nothing to the next test."
   [shim]
-  (ffi/initialize!)
+  (runtime/initialize!)
   (let [s (str "shim-" shim "-" (System/nanoTime))]
-    (ffi/install-runtime! s)
-    (ffi/exec! s "import vis_runtime")
-    (ffi/eval-str s "vis_runtime.forget_shims()")
-    (ffi/install-shim! s shim)
+    (runtime/install-runtime! s)
+    (runtime/exec! s "import vis_runtime")
+    (runtime/eval-str s "vis_runtime.forget_shims()")
+    (runtime/install-shim! s shim)
     (track! s)))
 
 (defmacro defbuilt-test
@@ -75,7 +75,7 @@
   "Run `code` in `session` and answer its value as Clojure data — the moved
    tests' `ev`, which read a sandbox result as data and compare against it."
   [session code]
-  (ffi/run session code))
+  (runtime/run session code))
 
 (defn truthy
   "Whether `code` answered Python `True`."
@@ -87,17 +87,17 @@
    handle registry, which is process-wide and would otherwise carry whatever an
    earlier block pinned."
   []
-  (ffi/initialize!)
+  (runtime/initialize!)
   (let [s (str "block-" (System/nanoTime))]
-    (ffi/install-runtime! s)
-    (ffi/exec! s "import vis_runtime")
-    (ffi/eval-str s "vis_runtime.reset_handles()")
+    (runtime/install-runtime! s)
+    (runtime/exec! s "import vis_runtime")
+    (runtime/eval-str s "vis_runtime.reset_handles()")
     (track! s)))
 
 (defn block
   "Run `code` as a sandbox block in `session`: `{:stdout … :error …}`."
   [session code]
-  (ffi/run-block session code))
+  (runtime/run-block session code))
 
 (defn printed
   "The JSON value a block PRINTED. A block has ONE success channel — what it
@@ -111,22 +111,22 @@
    module table, so a snippet that breaks an import on purpose — the way the
    moved load-independence tests do — must put the table back."
   [session code]
-  (ffi/run session "import sys\n_vis_saved_modules = dict(sys.modules)\nNone")
+  (runtime/run session "import sys\n_vis_saved_modules = dict(sys.modules)\nNone")
   (try (ev session code)
        (finally
-         (ffi/run session
-                  "import sys\nsys.modules.clear()\nsys.modules.update(_vis_saved_modules)\nNone"))))
+         (runtime/run session
+                      "import sys\nsys.modules.clear()\nsys.modules.update(_vis_saved_modules)\nNone"))))
 
 (defn fresh
   "A session with the runtime but NO shim installed: the moved tests that ran
    in a context of their own are the ones asserting on lazy import, so the
    shim must arrive through `import`, not before it."
   [shim]
-  (ffi/initialize!)
+  (runtime/initialize!)
   (let [s (str "fresh-" shim "-" (System/nanoTime))]
-    (ffi/install-runtime! s)
-    (ffi/exec! s "import vis_runtime")
-    (ffi/eval-str s "vis_runtime.forget_shims()")
+    (runtime/install-runtime! s)
+    (runtime/exec! s "import vis_runtime")
+    (runtime/eval-str s "vis_runtime.forget_shims()")
     (track! s)))
 
 (defn guarded-session
@@ -138,13 +138,13 @@
    session configured LAST — configuring a session here is ENTERING it, and that
    is why these tests run in sequence rather than side by side."
   [allowed denied]
-  (ffi/initialize!)
+  (runtime/initialize!)
   (let [s (str "guard-" (System/nanoTime))]
-    (ffi/install-runtime! s)
-    (ffi/exec! s
-               (str "__vis_allowed_domains__ = " (json/write-str allowed) "\n"
-                    "__vis_denied_domains__ = " (json/write-str denied)))
-    (ffi/install-module! s "network_guard")
+    (runtime/install-runtime! s)
+    (runtime/exec! s
+                   (str "__vis_allowed_domains__ = " (json/write-str allowed) "\n"
+                        "__vis_denied_domains__ = " (json/write-str denied)))
+    (runtime/install-module! s "network_guard")
     (track! s)))
 
 (defn tool!
@@ -160,11 +160,11 @@
    tool IS to the sandbox: a name a block may not shadow with an import or a
    top-level def."
   [session nm params body]
-  (ffi/exec! session
-             (str "def __vis_impl_" nm "__(" params "):\n" body "\n"
-                  nm " = __vis_deferred__(__vis_impl_" nm "__, " (pr-str nm) ")\n"
-                  "__vis_protected_names__ = sorted(set(__vis_protected_names__)"
-                  " | {" (pr-str nm) "})")))
+  (runtime/exec! session
+                 (str "def __vis_impl_" nm "__(" params "):\n" body "\n"
+                      nm " = __vis_deferred__(__vis_impl_" nm "__, " (pr-str nm) ")\n"
+                      "__vis_protected_names__ = sorted(set(__vis_protected_names__)"
+                      " | {" (pr-str nm) "})")))
 
 (defn bind-tools!
   "Bind `tools` — tool name to a function of its ARGUMENT VECTOR — as the host this
@@ -175,7 +175,7 @@
    that throws comes back as the failure envelope, which is how the guest gets a
    catchable exception rather than a dead block."
   [tools]
-  (ffi/bind-host!
+  (runtime/bind-host!
    (fn [nm payload]
      (let [args (get (json/read-str payload) "args")
            tool (get tools nm)]
@@ -193,7 +193,7 @@
   [tools]
   (bind-tools! tools)
   (let [s (block-session)]
-    (doseq [nm (keys tools)] (ffi/install-tool! s nm))
+    (doseq [nm (keys tools)] (runtime/install-tool! s nm))
     s))
 
 (defn temp-dir
@@ -209,8 +209,8 @@
    them refuses the next stdlib import, which is not a sandbox - it is a broken
    interpreter."
   []
-  (ffi/initialize!)
-  (->> (ffi/run "import sys\n[sys.prefix, sys.base_prefix, sys.exec_prefix] + list(sys.path)")
+  (runtime/initialize!)
+  (->> (runtime/run "import sys\n[sys.prefix, sys.base_prefix, sys.exec_prefix] + list(sys.path)")
        (map str)
        (remove str/blank?)
        (distinct)
@@ -222,5 +222,5 @@
   ([read-roots write-roots] (confined-session read-roots write-roots ""))
   ([read-roots write-roots refusal]
    (let [session (block-session)]
-     (ffi/confine! (into (interpreter-roots) read-roots) write-roots refusal)
+     (runtime/confine! (into (interpreter-roots) read-roots) write-roots refusal)
      session)))
