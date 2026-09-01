@@ -68,6 +68,16 @@ if [ ! -d "$home" ]; then
 fi
 
 minor="${CPYTHON_VERSION%.*}"
+
+# The shipped packages. `packages/base.txt` pins transitive dependencies too, so
+# what the artifact contains does not depend on the day it was built, and
+# `--only-binary` keeps a build from compiling a wheel it should have downloaded.
+# `tests/` inside a redistributed package is dead weight the sandbox never runs
+# (measured on darwin-arm64: 21 MB of site-packages with them, 15 MB without).
+"$home/bin/python3" -m pip install \
+  --no-cache-dir --only-binary=:all: --disable-pip-version-check --quiet \
+  -r "$repo/packages/base.txt"
+find "$home/lib/python$minor/site-packages" -type d -name tests -prune -exec rm -rf {} +
 cc -O2 -fPIC -shared -Wall -Wextra \
    -I"$home/include/python$minor" \
    -o "$out/$lib" \

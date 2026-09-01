@@ -1,0 +1,29 @@
+# The packages the artifact SHIPS, installed into the vendored interpreter by
+# native/vis-python/build.sh.
+#
+# Two rules decide what is here.
+#
+# 1. MEASURED cost (darwin-arm64, installed size on disk, test suites stripped).
+#    Everything here is a few MB; numpy, pandas, matplotlib, pillow, fontTools,
+#    python-pptx and pytest are 161 MB together - more than twice the 68 MB
+#    interpreter they would ride on, and back at the ~300 MB GraalPy cost this
+#    project exists to remove. Those are in on-demand.txt.
+#
+# 2. The shim it replaces has to be a REIMPLEMENTATION. `requests`, `urllib3`
+#    and `httpx` are not: their shims are host BRIDGES that carry a call to the
+#    JVM's HTTP client, so swapping them moves network policy from the host onto
+#    `network_guard.py`. That is a deliberate wave of its own, not a line in a
+#    requirements file, and until it happens shipping the real ones would only
+#    shadow a bridge that is still in force.
+#
+# Transitive dependencies are pinned here too: an artifact whose contents depend
+# on the day it was built is not a redistributable artifact.
+beautifulsoup4==4.15.0
+python-dateutil==2.9.0.post0
+PyYAML==6.0.3
+pytz==2026.3.post1
+six==1.17.0
+soupsieve==2.9.2
+typing_extensions==4.16.0
+tzdata==2026.3
+xlsxwriter==3.2.9

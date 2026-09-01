@@ -142,31 +142,48 @@ a subset that resembles one. This is also what answers the bytes question the
 host door raised: nothing has to marshal a raster or a frame across the boundary
 once the library that owns it lives inside the interpreter.
 
-Data: two tiers, and one rule deciding which. A package that has a shim today is
-already a PROMISE — `doc("numpy")` answers for it — so it is built into the
-platform artifact; everything else is a dependency an extension declares and the
-HOST installs with pip into that extension's environment. A block installs
-nothing: a sandbox that can reach an index is a sandbox that can write its own
-next payload, which is the same reason `ctypes` is shut in Phase 4. Measured
-cp314 wheel sizes (darwin-arm64 / linux-x64 / win-x64): numpy 11.9 / 15.6 /
-12.8 MB, pandas ~10, pillow 4.8 / 6.3 / 7.2, matplotlib ~9-11; the pure-Python
-wheels are platform-independent and nearly free (bs4 0.1, requests 0.1,
-python-pptx 0.5, openpyxl 0.3). The base tier lands around 65-80 MB per platform
-against the ~300 MB GraalPy costs. The shim finder is APPENDED to
-`sys.meta_path`, so `PathFinder` already wins: a package present on `sys.path`
-shadows its shim with no code change, which is what makes the cutover
-incremental instead of a flag day.
+Data: two tiers, and the line between them is MEASURED. The first estimate here
+was wrong and is kept as the reason the rule changed: "everything that has a shim
+is a promise, so it ships" was projected at 65-80 MB per platform from wheel
+sizes, and the actual install is 315 MB on darwin-arm64 — the whole GraalPy cost
+back again, because a wheel on disk is not its download (pandas 72 MB, numpy 35,
+matplotlib 33, lxml 20, fontTools 20, PIL 15, and 59 MB of vendored test suites
+and 85 MB of `__pycache__` on top).
+
+So the split is by cost, with one exception by KIND. `packages/base.txt` ships:
+bs4 + soupsieve, PyYAML, python-dateutil, pytz, tzdata, XlsxWriter — a few MB
+together, and the artifact measures 90 MB against the ~300 MB a GraalPy context
+costs. `packages/on-demand.txt` is what the host installs on first import:
+numpy, pandas, matplotlib, pillow, fontTools, python-pptx, pytest, 161 MB with
+their test suites stripped, and `tabulate`, which is there only because the
+pandas SHIM renders through it. The exception by kind is `requests`, `urllib3`
+and `httpx`: their shims are host BRIDGES to the JVM HTTP client, not
+reimplementations, so shipping the real ones moves network policy onto
+`network_guard.py` — a wave of its own, not a line in a requirements file. A
+block installs nothing either way: a sandbox that can reach an index is a sandbox
+that can write its own next payload, which is the same reason `ctypes` reaches no
+symbol in Phase 4.
+
+The mechanism needs no code. The shim finder is APPENDED to `sys.meta_path`, so
+`PathFinder` already wins and a package present on `sys.path` shadows its shim —
+the cutover is incremental, and a shim dies when its package arrives rather than
+on a flag day.
 
 Acceptance criteria: the base tier is installed at build time into
-`resources/prebuilds/<platform>/python/lib/python3.14/site-packages` from pinned,
-hash-checked requirements; every shim test in this repository passes against the
-REAL package, which is the evidence that the shim may go; an extension declares a
-dependency and imports it; a block that tries to install one is refused; and
-every redistributed license is recorded the way `audit/README.md` records ours.
+`resources/prebuilds/<platform>/python/lib/python3.14/site-packages` from pinned
+requirements, transitive dependencies included; a block gets the REAL
+distribution at its real file for every name the artifact ships
+(`packages_test.clj`); the whole suite still passes, which is what proves a
+shipped package did not shadow a shim something else still needs; an extension
+declares a dependency and imports it; a block that tries to install one is
+refused; and every redistributed license is recorded the way `audit/README.md`
+records ours.
 
-Unknowns: whether the package tier ships as a second artifact, so an installation
-that wants none of it pays nothing; glibc versus musl for the linux wheels; and
-the licence-record generator, which today only knows in-house coordinates.
+Unknowns: hashes — the pins are exact but not `--require-hashes`, which needs a
+per-platform lock generated on each build machine. Whether the on-demand tier
+installs into the vendored tree or a per-installation site directory. glibc
+versus musl for the linux wheels. And the licence-record generator, which today
+only knows in-house coordinates.
 
 ## Phase 7 — Delete the shims
 
@@ -177,13 +194,17 @@ being true here, and 1.54 MB of `resources/vis-shims/` plus roughly 5000 lines o
 host halves stop existing.
 
 Data: `resources/vis-shims/` is 23 files; the host halves are Vis'
-`src/com/blockether/vis/internal/foundation/shim_*.clj`. Three waves, in this
-order because each is strictly easier than the next: stdlib (`sqlite3`, `tzdata`
--> `zoneinfo`, `toml` -> `tomllib`), pure-Python wheels (bs4, requests, urllib3,
-httpx, pptx, tabulate, pytest, yaml, fonttools, xlsxwriter), then the binary ones
-(numpy, pandas, pillow, matplotlib). `posix.py` goes with them, its work already
-done in C. Nothing shared can be deleted until Vis pins this library, because
-`sandbox-parity-test` hashes both copies.
+`src/com/blockether/vis/internal/foundation/shim_*.clj`. The waves, in the order
+their evidence arrives: the stdlib ones first (`sqlite3`, `tzdata` -> `zoneinfo`,
+`toml` -> `tomllib`), then the pure-Python packages already shipping in
+`packages/base.txt` (bs4, yaml, dateutil, pytz, xlsxwriter), then the binary ones
+with the tier that carries them (numpy, pandas + tabulate, pillow, matplotlib,
+fontTools, pptx, pytest). `requests`, `urllib3` and `httpx` are last and are the
+only wave that is not a deletion: their shims are bridges, so the wave replaces a
+host bridge with a real client under `network_guard.py` and has to argue that on
+its own evidence. `posix.py` goes with them, its work already done in C. Nothing
+shared can be deleted until Vis pins this library, because `sandbox-parity-test`
+hashes both copies.
 
 Acceptance criteria: each wave deletes the shim, its host half and its bridge in
 one commit; the shim's own tests keep passing against the real package; the
@@ -271,3 +292,19 @@ interpreter imports raises none of those events, which is exactly what lets Phas
 6 ship real wheels. The host supplies the sentence a guest reads, so Vis keeps
 wording this once. `posix.py` itself stays until Vis pins this library, because
 the parity test hashes both copies.
+
+Phase 6 has its first tier. `packages/base.txt` and `packages/on-demand.txt` are
+the two lists, `native/vis-python/build.sh` installs the first into the vendored
+tree and strips the test suites vendored inside those packages, and
+`packages_test.clj` pins the thing that matters: a block gets the REAL
+distribution, at its real file under `site-packages`, with nothing changed to
+make it so. Measured on darwin-arm64 the whole artifact is 90 MB, against the
+~300 MB a GraalPy context costs.
+
+Two decisions came out of the measurement rather than out of taste, and both are
+recorded because the estimate that preceded them was wrong. Bundling everything a
+shim promises is 315 MB installed, not the 65-80 MB projected from wheel sizes.
+And a shipped package can shadow a shim that ANOTHER shim still needs: the real
+`tabulate` broke the pandas shim, which renders through it, so tabulate now
+travels with pandas in the on-demand list. The suite is the detector for that
+class of breakage and it is green at 111 tests / 595 assertions.
