@@ -5,7 +5,7 @@
    `resources/vis-shims/` — inside GraalPy today, which costs roughly 300 MB in
    the native image. This library replaces that engine with a VENDORED CPython
    reached through the JDK Foreign Function & Memory API over a first-party C
-   ABI (`native/vis-python`), so the image carries a cdylib and an interpreter
+   ABI (`native/vispython`), so the image carries a cdylib and an interpreter
    tree beside it instead of a Truffle language inside it.
 
    The bridge itself is JAVA — `java/com/blockether/vispython/` — and this

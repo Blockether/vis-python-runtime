@@ -97,7 +97,7 @@
       (b/delete {:path native-class-dir})
       (b/delete {:path jar*})
       (when-not (.exists (io/file src))
-        (throw (ex-info (str "runtime cdylib not found (build native/vis-python first): " src)
+        (throw (ex-info (str "runtime cdylib not found (build native/vispython first): " src)
                         {:platform platform :path src})))
       (b/write-pom {:class-dir native-class-dir
                     :lib lib*

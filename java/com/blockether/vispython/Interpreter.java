@@ -20,7 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * The JVM half of the boundary: FFM downcalls into {@code native/vis-python}.
+ * The JVM half of the boundary: FFM downcalls into {@code native/vispython}.
  *
  * <p>A handful of entry points, mirroring the C source one to one, all of them
  * integers-and-bytes. A negative return from C is a failure whose reason CPython
@@ -67,15 +67,15 @@ public final class Interpreter {
    * small and explicit.
    */
   private static final Map<String, FunctionDescriptor> SIGNATURES = Map.of(
-      "vis_python_initialize", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vis_python_version", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vis_python_eval", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vis_python_exec", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vis_python_run", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vis_python_run_block", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vis_python_confine", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
-      "vis_python_host", descriptor(ValueLayout.ADDRESS),
-      "vis_python_finalize", descriptor());
+      "vispython_initialize", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
+      "vispython_version", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
+      "vispython_eval", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
+      "vispython_exec", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
+      "vispython_run", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
+      "vispython_run_block", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
+      "vispython_confine", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
+      "vispython_host", descriptor(ValueLayout.ADDRESS),
+      "vispython_finalize", descriptor());
 
   private static final ExecutorService THREAD = Executors.newSingleThreadExecutor(runnable -> {
     Thread thread = new Thread(runnable, "vis-python-runtime");
@@ -209,7 +209,7 @@ public final class Interpreter {
    */
   public static Startup initialize(List<String> sourcePaths, String pythonHome,
       String pycachePrefix, String packages) {
-    call("vis_python_initialize", pythonHome == null ? "" : pythonHome,
+    call("vispython_initialize", pythonHome == null ? "" : pythonHome,
         pycachePrefix == null ? "" : pycachePrefix);
     List<String> roots = Locations.sourceRoots(sourcePaths);
     if (!roots.isEmpty() || packages != null) {
@@ -229,14 +229,14 @@ public final class Interpreter {
         wiring.append("if ").append(literal(packages)).append(" not in sys.path:\n");
         wiring.append("    sys.path.append(").append(literal(packages)).append(")\n");
       }
-      call("vis_python_exec", DEFAULT_SESSION, wiring.toString());
+      call("vispython_exec", DEFAULT_SESSION, wiring.toString());
     }
     return new Startup(library().path(), roots, pythonHome, pycachePrefix, packages);
   }
 
   /** The running interpreter's version string. Requires a start. */
   public static String version() {
-    return call("vis_python_version");
+    return call("vispython_version");
   }
 
   /**
@@ -252,7 +252,7 @@ public final class Interpreter {
    * lists lift it.
    */
   public static int[] confine(List<String> readRoots, List<String> writeRoots, String refusal) {
-    String answer = call("vis_python_confine", String.join("\n", readRoots),
+    String answer = call("vispython_confine", String.join("\n", readRoots),
         String.join("\n", writeRoots), refusal == null ? "" : refusal);
     String[] counts = answer.trim().split("\\s+");
     return new int[] {Integer.parseInt(counts[0]), Integer.parseInt(counts[1])};
@@ -260,12 +260,12 @@ public final class Interpreter {
 
   /** Evaluate {@code code} as an expression, answering {@code str(result)}. */
   public static String eval(String session, String code) {
-    return call("vis_python_eval", session, code);
+    return call("vispython_eval", session, code);
   }
 
   /** Run {@code code} as a module body, for its side effects. */
   public static void exec(String session, String code) {
-    call("vis_python_exec", session, code);
+    call("vispython_exec", session, code);
   }
 
   /**
@@ -274,7 +274,7 @@ public final class Interpreter {
    * because a dict is a map and a list a vector to the caller that parses it.
    */
   public static String run(String session, String code) {
-    return call("vis_python_run", session, code);
+    return call("vispython_run", session, code);
   }
 
   /**
@@ -284,7 +284,7 @@ public final class Interpreter {
    * this returns.
    */
   public static String runBlock(String session, String code) {
-    return call("vis_python_run_block", session, code);
+    return call("vispython_run_block", session, code);
   }
 
   /**
@@ -416,7 +416,7 @@ public final class Interpreter {
    */
   public static void bindHost(HostFunction function) {
     host = function;
-    MethodHandle handle = handles().get("vis_python_host");
+    MethodHandle handle = handles().get("vispython_host");
     MemorySegment stub = hostStub();
     onRuntimeThread(() -> {
       try {
@@ -430,7 +430,7 @@ public final class Interpreter {
 
   /** Stop the interpreter. Idempotent. */
   public static void shutdown() {
-    MethodHandle handle = handles().get("vis_python_finalize");
+    MethodHandle handle = handles().get("vispython_finalize");
     onRuntimeThread(() -> {
       int status;
       try {
@@ -440,7 +440,7 @@ public final class Interpreter {
       }
       if (status < 0) {
         throw new VisPythonException("vis-python: interpreter did not finalize cleanly",
-            Map.of("symbol", "vis_python_finalize", "status", status));
+            Map.of("symbol", "vispython_finalize", "status", status));
       }
       return status;
     });

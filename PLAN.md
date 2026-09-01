@@ -102,7 +102,7 @@ shrink the binary — it would delete the sandbox.
 
 Data: PEP 578 audit hooks. `PySys_AddAuditHook` runs before the interpreter
 starts, cannot be removed, and is invisible to Python; the policy is C state the
-host sets over the ABI (`vis_python_confine`), so a block that rebinds `open`,
+host sets over the ABI (`vispython_confine`), so a block that rebinds `open`,
 reaches through `os` or imports its way to a descriptor still arrives at it.
 
 Acceptance criteria: a block reads inside a root and is refused outside it, a
@@ -128,7 +128,7 @@ jar holds neither symlinks nor permission bits — so the tree ships as an archi
 resource extracted once, the way the cdylib is extracted today. It carries no
 bytecode: `__pycache__` is per-machine cache worth 11.8 MB against 18.4 MB of
 stdlib source, invalid the moment the tree moves, and a jar that shipped it
-would still be writing into a read-only installation. `vis_python_initialize`
+would still be writing into a read-only installation. `vispython_initialize`
 takes a `pycache_prefix` instead (`~/.vis/python/pycache` by default,
 `VIS_PYTHON_PYCACHE_PREFIX` to move it), so the host compiles once on first run
 and the shipped tree is never written to.
@@ -237,7 +237,7 @@ Phase 0 done: repository, resolution, version, build and test scaffolding, plus
 the measured GraalPy baseline in `bench/pre-cpython.md` and the harness that
 produced it.
 
-Phase 1 done on the JVM side. `native/vis-python/vispython.c` exports
+Phase 1 done on the JVM side. `native/vispython/vispython.c` exports
 initialize / version / eval / exec / finalize, `com.blockether.vispython.Interpreter`
 binds all five through FFM on one pinned thread, and the loading model is
 settled: source roots on `sys.path`, `import vis_runtime`, `install` per
@@ -252,7 +252,7 @@ The interpreter is now VENDORED, which closes the half of Phase 1 that was about
 where CPython comes from. `.cpython-version` pins astral-sh/python-build-standalone
 (3.14.7, release 20260825); `build.sh` unpacks that tree into the platform's
 prebuild directory and links the shim against it with an `@loader_path`/`$ORIGIN`
-rpath; `vis_python_initialize` takes a `home` and starts the interpreter through
+rpath; `vispython_initialize` takes a `home` and starts the interpreter through
 `Py_InitializeFromConfig`, so `sys.prefix` is inside the vendored tree and no
 system Python is consulted. Measured on darwin-arm64: 26 MB downloaded, 68 MB on
 disk (18.8 MB `libpython3.14.dylib`, 22 MB standard library), our own cdylib
@@ -278,13 +278,13 @@ repository. Vis keeps its copy until it can pin this library, which needs a
 remote; `sandbox-parity-test` hashes both sides so the two cannot drift while
 the copies coexist.
 
-Phase 4 landed the boundary: `vis_python_confine` over an audit hook installed
+Phase 4 landed the boundary: `vispython_confine` over an audit hook installed
 before `Py_InitializeEx`, two lists of canonical roots in C, and the guest with
 no way to see or change them. Reads, writes, `..`, symlinks out of a root and
 `os` mutations are covered by `confinement_test.clj`; what stays in Vis is the
 JVM-side `sandbox-fs.clj`, which is Truffle's seam and dies with GraalPy.
 
-Phase 2 closed with the door back OUT: `vis_python_host` registers one function
+Phase 2 closed with the door back OUT: `vispython_host` registers one function
 pointer, `_vis_host.call(name, payload)` is the guest's only way through it, and
 `vis_runtime.install_tool` binds a name the sandbox defers exactly like any
 other tool. Only text crosses — the JSON envelope is the runtime's, the C
@@ -295,7 +295,7 @@ boundary reads none of it — the GIL is released for the call's duration so gue
 threads keep running, and an oversized reply costs a retry rather than a second
 RUN of the tool. That unblocks Wave 3, whose shims are host-bridged.
 
-The process surface moved into the boundary. `vis_python_confine` now shuts it
+The process surface moved into the boundary. `vispython_confine` now shuts it
 too: `os.system`, `os.exec`, `os.fork`, `os.posix_spawn`, `subprocess.Popen` and
 `pty.spawn` are events CPython raises itself, so the refusal no longer needs
 `resources/vis-shims/posix.py` to put a module of fakes in
@@ -332,8 +332,8 @@ a real package can shadow a shim that ANOTHER shim still needs (the real
 `tabulate` broke the pandas shim, which renders through it), so the full suite is
 the detector for that class of breakage, whoever runs the install.
 
-The artifact ships no bytecode. `native/vis-python/build.sh` strips every
-`__pycache__` after vendoring, and `vis_python_initialize` takes a
+The artifact ships no bytecode. `native/vispython/build.sh` strips every
+`__pycache__` after vendoring, and `vispython_initialize` takes a
 `pycache_prefix` that `runtime/resolve-pycache-prefix` puts under the user's own
 directory — so what is shipped is source, what is per-machine is cache, and the
 tree stays exactly as it was hashed. Measured on darwin-arm64: 90 MB to 77 MB

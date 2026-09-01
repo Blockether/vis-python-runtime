@@ -1,7 +1,7 @@
 (ns com.blockether.vis-python-runtime.bridge-test
   "Proves the whole boundary end to end: a real CPython started inside this JVM
    through FFM, evaluating real Python, and reporting a real Python exception as
-   data. Requires `native/vis-python/build.sh` to have run — `resources/prebuilds/`
+   data. Requires `native/vispython/build.sh` to have run — `resources/prebuilds/`
    is build output, so a checkout without it has no library to bind and the
    suite says so instead of pretending to pass."
   (:require [clojure.string :as str]
@@ -15,7 +15,7 @@
 
 (deftest embedded-interpreter-test
   (if-not built?
-    (println "SKIP embedded-interpreter-test: no cdylib, run native/vis-python/build.sh")
+    (println "SKIP embedded-interpreter-test: no cdylib, run native/vispython/build.sh")
     (do
       (testing "the interpreter starts and reports itself"
         (is (= (:path (runtime/resolve-library)) (:library (runtime/initialize!)))
@@ -45,7 +45,7 @@
       (testing "a Python exception crosses as data, not as a crash"
         (let [thrown (try (runtime/eval-str "1 / 0") (catch VisPythonException e e))]
           (is (instance? VisPythonException thrown))
-          (is (= "vis_python_eval" (.get thrown "symbol")))
+          (is (= "vispython_eval" (.get thrown "symbol")))
           (is (str/includes? (.getMessage ^Exception thrown) "division by zero"))))
 
       (testing "a later call still works, so the error left nothing pending"

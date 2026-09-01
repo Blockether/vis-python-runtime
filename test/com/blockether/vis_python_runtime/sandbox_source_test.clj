@@ -20,7 +20,7 @@
 
 (deftest sandbox-runtime-imports-test
   (if-not built?
-    (println "SKIP sandbox-runtime-imports-test: no cdylib, run native/vis-python/build.sh")
+    (println "SKIP sandbox-runtime-imports-test: no cdylib, run native/vispython/build.sh")
     (testing "the sandbox runtime installs into a session unmodified"
       (runtime/initialize!)
       (let [session "vis-sandbox"

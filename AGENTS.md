@@ -7,7 +7,7 @@ docstring or a test can state lives there, not here.
 
 ## Hard rules
 
-- **The boundary is our own C ABI, never the raw CPython C-API.** `native/vis-python`
+- **The boundary is our own C ABI, never the raw CPython C-API.** `native/vispython`
   exposes a small, stable, `extern "C"` surface (initialize, eval, call, handle
   release, error out-params) and the JVM side binds exactly that. Every function
   the JVM downcalls must be registered for `native-image`, so a bridge that
@@ -58,7 +58,7 @@ docstring or a test can state lives there, not here.
   the design is wrong — fix the bridge.
 - **The filesystem boundary is C, never Python.** Confinement is an audit hook
   (PEP 578) installed before `Py_InitializeEx` over a policy the host sets
-  through `vis_python_confine`; guest code cannot see it, remove it or reach
+  through `vispython_confine`; guest code cannot see it, remove it or reach
   around it. A Python-side guard — a rebound `open`, a wrapper in a shim — is
   advice, not a boundary, and never becomes one. `confinement_test.clj` is what
   proves the difference.

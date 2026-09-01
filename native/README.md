@@ -1,8 +1,8 @@
 # native/
 
 `vis-python/vispython.c` is the whole native boundary: one flat `extern "C"`
-surface (`vis_python_initialize`, `vis_python_version`, `vis_python_eval`,
-`vis_python_exec`, `vis_python_finalize`) over an embedded CPython. Integers and
+surface (`vispython_initialize`, `vispython_version`, `vispython_eval`,
+`vispython_exec`, `vispython_finalize`) over an embedded CPython. Integers and
 NUL-terminated UTF-8 cross it; no PyObject ever does, so reference counting
 stays where CPython already does it.
 

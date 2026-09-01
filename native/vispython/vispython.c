@@ -108,7 +108,7 @@ static int vis_py_confined = 0;
 static char vis_py_pycache_prefix[PATH_MAX];
 
 /* The sentence a confined guest reads when it reaches for a process. A host
-   that already words this its own way sets it over `vis_python_confine` and so
+   that already words this its own way sets it over `vispython_confine` and so
    keeps wording it once; the library answers with its own when none is given. */
 static char vis_py_process_refusal[512];
 
@@ -539,7 +539,7 @@ static PyObject *vis_py_host_init(void)
 /* Bind the callable every `_vis_host.call` reaches; NULL unbinds, after which a
    guest calling a tool is told there is no host rather than crashing. The host
    may rebind at will: the pointer is read per call. Returns 0. */
-int vis_python_host(void *fn)
+int vispython_host(void *fn)
 {
     vis_py_host_fn host;
 
@@ -559,7 +559,7 @@ int vis_python_host(void *fn)
    were dropped. The bytecode cache prefix given at startup is added to the
    writable roots for as long as a policy is in force: it is the interpreter's
    own cache, not guest data, and it is counted in the answer. */
-int vis_python_confine(const char *read_roots, const char *write_roots, const char *refusal,
+int vispython_confine(const char *read_roots, const char *write_roots, const char *refusal,
                        char *out, int cap)
 {
     char summary[64];
@@ -592,7 +592,7 @@ int vis_python_confine(const char *read_roots, const char *write_roots, const ch
    Idempotent, so a caller that cannot cheaply know whether a sibling already
    started it does not have to. Returns 0, or VIS_PY_ERR_INIT with the reason in
    `out`. */
-int vis_python_initialize(const char *home, const char *pycache_prefix, char *out, int cap)
+int vispython_initialize(const char *home, const char *pycache_prefix, char *out, int cap)
 {
     PyConfig config;
     PyStatus status;
@@ -645,7 +645,7 @@ int vis_python_initialize(const char *home, const char *pycache_prefix, char *ou
 }
 
 /* The running interpreter's version string, e.g. "3.14.6 (main, ...)". */
-int vis_python_version(char *out, int cap)
+int vispython_version(char *out, int cap)
 {
     if (!vis_py_started) {
         return VIS_PY_ERR_INIT;
@@ -680,9 +680,9 @@ static PyObject *vis_py_namespace(const char *module_name, char *out, int cap)
 }
 
 /* Evaluate `code` as an EXPRESSION in `module_name` and write str(result).
-   Statements belong in vis_python_exec; keeping the two apart is what lets the
+   Statements belong in vispython_exec; keeping the two apart is what lets the
    JVM side stay free of Py_eval_input / Py_file_input constants. */
-int vis_python_eval(const char *module_name, const char *code, char *out, int cap)
+int vispython_eval(const char *module_name, const char *code, char *out, int cap)
 {
     PyObject *globals, *result, *text;
     const char *utf8;
@@ -709,7 +709,7 @@ int vis_python_eval(const char *module_name, const char *code, char *out, int ca
 }
 
 /* Run `code` as a module body in `module_name`, for its side effects. */
-int vis_python_exec(const char *module_name, const char *code, char *out, int cap)
+int vispython_exec(const char *module_name, const char *code, char *out, int cap)
 {
     PyObject *globals, *result;
 
@@ -734,7 +734,7 @@ int vis_python_exec(const char *module_name, const char *code, char *out, int ca
    so it lives in `vis_runtime.run`. The value comes back as EDN text, because
    the ABI carries strings and the host reads data, not a repr; this function
    only hands the source over as a Python string, never as interpolated text. */
-int vis_python_run(const char *module_name, const char *code, char *out, int cap)
+int vispython_run(const char *module_name, const char *code, char *out, int cap)
 {
     PyObject *globals, *runtime, *result, *text;
     const char *utf8;
@@ -770,7 +770,7 @@ int vis_python_run(const char *module_name, const char *code, char *out, int cap
    captured stdout, with the reapers at the boundary. Policy is Python's
    (`vis_runtime.run_block`); this only carries the source over and brings the
    EDN map — stdout and error — back. */
-int vis_python_run_block(const char *module_name, const char *code, char *out, int cap)
+int vispython_run_block(const char *module_name, const char *code, char *out, int cap)
 {
     PyObject *globals, *runtime, *result, *text;
     const char *utf8;
@@ -804,7 +804,7 @@ int vis_python_run_block(const char *module_name, const char *code, char *out, i
 
 /* Stop the interpreter. Idempotent. Returns 0, or VIS_PY_ERR_INIT if CPython
    reported a non-zero finalization status. */
-int vis_python_finalize(void)
+int vispython_finalize(void)
 {
     int status;
     if (!vis_py_started) {

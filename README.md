@@ -20,7 +20,7 @@ CPython's own speed.
 
     java/                   the bridge: FFM downcalls, the host upcall, pip
     src/                    the Clojure API over it, and nothing else
-    native/vis-python/      the C shim + the vendoring build
+    native/vispython/      the C shim + the vendoring build
     resources/prebuilds/    build output per platform (git-ignored)
     test/                   clojure -T:build javac && clojure -M:test
 

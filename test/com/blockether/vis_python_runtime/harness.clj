@@ -14,7 +14,7 @@
            [com.blockether.vispython VisPythonException]))
 
 (def built?
-  "False in a checkout where `native/vis-python/build.sh` has not run."
+  "False in a checkout where `native/vispython/build.sh` has not run."
   (try (boolean (runtime/resolve-library))
        (catch VisPythonException _ false)))
 
@@ -60,7 +60,7 @@
   [test-name & body]
   `(clojure.test/deftest ~test-name
      (if-not built?
-       (println "SKIP" ~(str test-name) "- no cdylib, run native/vis-python/build.sh")
+       (println "SKIP" ~(str test-name) "- no cdylib, run native/vispython/build.sh")
        (do ~@body))))
 
 (defmacro defshim-test

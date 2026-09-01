@@ -1,5 +1,5 @@
 (ns com.blockether.vis-python-runtime.confinement-test
-  "The sandbox boundary in C (`native/vis-python/vispython.c`).
+  "The sandbox boundary in C (`native/vispython/vispython.c`).
 
    GraalPy confined the guest with a Truffle `FileSystem` the guest could not
    reach; CPython opens files with the whole process's credentials, so the
