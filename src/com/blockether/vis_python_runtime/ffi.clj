@@ -43,6 +43,7 @@
    "vis_python_exec"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_run"        (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_run_block"  (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
+   "vis_python_confine"    (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_finalize"   (descriptor ValueLayout/JAVA_INT)})
 
 (defn- link-handles
@@ -147,6 +148,24 @@
   "The running interpreter's version string. Requires `initialize!`."
   []
   (call "vis_python_version"))
+
+(defn confine!
+  "Confine the interpreter to `read-roots` and `write-roots`, answering the
+   counts actually in force as `{:read n :write n}`.
+
+   This is the sandbox's filesystem boundary and it is NOT Python: the policy is
+   C state behind an audit hook installed before the interpreter started, so a
+   block cannot read it, rewrite it or reach around it — the way GraalPy's own
+   FileSystem could not be reached from the guest. A writable root is readable
+   too, a path that will not resolve is refused, and a root that will not
+   resolve is dropped, which is why the counts come back.
+
+   Confinement is the PROCESS's, like the interpreter: calling this REPLACES the
+   policy for every session. Two empty lists lift it."
+  [read-roots write-roots]
+  (let [answer (call "vis_python_confine" (str/join "\n" read-roots) (str/join "\n" write-roots))
+        [read-count write-count] (map parse-long (str/split (str/trim answer) #"\s+"))]
+    {:read read-count :write write-count}))
 
 (defn eval-str
   "Evaluate `code` as a Python EXPRESSION, answering `str(result)`. Runs in

@@ -45,6 +45,12 @@ docstring or a test can state lives there, not here.
   and `packages/vis-agent/src/vis/__init__.py` running with no edit beyond the
   12 GraalPy-specific call sites already identified. If a shim has to change,
   the design is wrong — fix the bridge.
+- **The filesystem boundary is C, never Python.** Confinement is an audit hook
+  (PEP 578) installed before `Py_InitializeEx` over a policy the host sets
+  through `vis_python_confine`; guest code cannot see it, remove it or reach
+  around it. A Python-side guard — a rebound `open`, a wrapper in a shim — is
+  advice, not a boundary, and never becomes one. `confinement_test.clj` is what
+  proves the difference.
 
 ## Verifying
 

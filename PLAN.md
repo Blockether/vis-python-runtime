@@ -90,7 +90,29 @@ Unknowns: how much of `async_runtime.py`'s ownership registry, the deterministic
 flush pass, `hard_link.py` and `process_redirect.py` can be deleted outright
 once refcounting and a real POSIX layer are underneath.
 
-## Phase 4 — Ship it
+## Phase 4 — Confinement without Truffle
+
+Rationale: GraalPy confined the guest by handing Truffle a `FileSystem` the
+guest could not reach (Vis' `sandbox-fs.clj`). CPython opens files with the
+process's own credentials, so removing GraalPy without a replacement would not
+shrink the binary — it would delete the sandbox.
+
+Data: PEP 578 audit hooks. `PySys_AddAuditHook` runs before the interpreter
+starts, cannot be removed, and is invisible to Python; the policy is C state the
+host sets over the ABI (`vis_python_confine`), so a block that rebinds `open`,
+reaches through `os` or imports its way to a descriptor still arrives at it.
+
+Acceptance criteria: a block reads inside a root and is refused outside it, a
+`..` escape and a symlink out of a root are refused, a write into a read-only
+root is refused, and the interpreter keeps importing its own stdlib while
+confined (`confinement_test.clj`).
+
+Unknowns: the process surface (`os.system`, `os.exec`, `subprocess`) is refused
+by the shims today and could be refused here instead; the network is still
+guarded in Python (`network_guard.py`) where `socket.connect` is an audit event.
+Windows names paths differently and the canonicalizer is POSIX.
+
+## Phase 5 — Ship it
 
 Rationale: per-platform prebuilds and one pin, exactly like `clj-imaging`.
 
@@ -132,3 +154,9 @@ paths Vis already reads, and the runtime imports `async_runtime` from this
 repository. Vis keeps its copy until it can pin this library, which needs a
 remote; `sandbox-parity-test` hashes both sides so the two cannot drift while
 the copies coexist.
+
+Phase 4 landed the boundary: `vis_python_confine` over an audit hook installed
+before `Py_InitializeEx`, two lists of canonical roots in C, and the guest with
+no way to see or change them. Reads, writes, `..`, symlinks out of a root and
+`os` mutations are covered by `confinement_test.clj`; what stays in Vis is the
+JVM-side `sandbox-fs.clj`, which is Truffle's seam and dies with GraalPy.

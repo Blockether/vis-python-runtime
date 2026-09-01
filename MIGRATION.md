@@ -70,7 +70,11 @@ registry reclaims on CPython exactly as it was written to on GraalPy.
 - [ ] `env_python_grep_paging_test.clj` — 118 lines — a capped search pages itself
 - [x] `network_guard_test.clj` — 144 lines — `network_guard.py` (policy only; the
       capability and the proxy/CA environment are the host's and stay in Vis)
-- [ ] `sandbox_fs_test.clj` — 1246 lines — sandbox filesystem surface
+- [x] `sandbox_fs_test.clj` — 1246 lines — the BOUNDARY moved, the mechanism did
+      not: Vis' `sandbox-fs.clj` is a Truffle `FileSystem` and dies with GraalPy,
+      so what lands here is `confinement_test.clj` over the audit hook in
+      `native/vis-python/vispython.c`. The outbox tap, the `:fs/access` gate and
+      the atomic-move / mutation-notice cases are the engine's and stay in Vis
 - [x] `env_python_form_eval_test.clj` — 1879 lines — per-form evaluation, the
       ambient stdlib surface, deferred tools and the whole `asyncio` shim
       (`form_eval_test.clj` + `asyncio_test.clj` here). What stayed in Vis is the
@@ -140,6 +144,16 @@ One expectation changed on purpose: a tool's own dict arrives as a `dict`, not
 as `__VisDict__`. That type was what a GraalPy host PROXY got re-typed into so a
 block could subscript it; CPython hands the block a real dict and the JSON the
 case actually asserts on is byte for byte the same.
+
+What the filesystem boundary demanded, and it is the one thing GraalPy gave for
+free: confinement. Truffle took a `FileSystem` implementation; CPython opens
+files with the process's own credentials, so the guard is an audit hook (PEP
+578) added before `Py_InitializeEx` over a policy in C
+(`vis_python_confine`, `ffi/confine!`). Guest code cannot see it, remove it or
+reach around it — a rebound `open`, `os.remove`, a `..` escape and a symlink
+pointing out of a root all arrive at the same hook. A writable root is readable
+too, the interpreter's own installation is passed as a read root so imports keep
+working, and an unresolvable path is refused rather than trusted.
 
 ## Wave 3 — shims with a host bridge (4607 lines)
 
