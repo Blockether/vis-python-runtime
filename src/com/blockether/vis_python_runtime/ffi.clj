@@ -48,7 +48,7 @@
    "vis_python_exec"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_run"        (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_run_block"  (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
-   "vis_python_confine"    (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
+   "vis_python_confine"    (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_host"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS)
    "vis_python_finalize"   (descriptor ValueLayout/JAVA_INT)})
 
@@ -177,12 +177,30 @@
    too, a path that will not resolve is refused, and a root that will not
    resolve is dropped, which is why the counts come back.
 
+   The SAME policy shuts the process surface and `ctypes`. A confined
+   interpreter spawns nothing: `subprocess`, `os.system`, `os.popen` and
+   `os.exec` are events CPython raises itself, so nothing has to replace a
+   module to refuse them and a block that imports its own way to one still
+   arrives here. It opens no native library by name either, because `ctypes` is
+   the one door from a block straight past this boundary into libc. An
+   extension module the interpreter imports from its own tree is untouched — a
+   real wheel is native code the host chose, and the import machinery raises
+   none of those events.
+
+   `refusal` is the sentence the guest reads when it reaches for a process, so a
+   host that already words this its own way keeps wording it once; omitted, the
+   library answers with its own.
+
    Confinement is the PROCESS's, like the interpreter: calling this REPLACES the
    policy for every session. Two empty lists lift it."
-  [read-roots write-roots]
-  (let [answer (call "vis_python_confine" (str/join "\n" read-roots) (str/join "\n" write-roots))
-        [read-count write-count] (map parse-long (str/split (str/trim answer) #"\s+"))]
-    {:read read-count :write write-count}))
+  ([read-roots write-roots] (confine! read-roots write-roots ""))
+  ([read-roots write-roots refusal]
+   (let [answer (call "vis_python_confine"
+                      (str/join "\n" read-roots)
+                      (str/join "\n" write-roots)
+                      (str refusal))
+         [read-count write-count] (map parse-long (str/split (str/trim answer) #"\s+"))]
+     {:read read-count :write write-count})))
 
 (defn eval-str
   "Evaluate `code` as a Python EXPRESSION, answering `str(result)`. Runs in

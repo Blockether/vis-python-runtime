@@ -1,5 +1,5 @@
 (ns com.blockether.vis-python-runtime.confinement-test
-  "The sandbox filesystem boundary (`native/vis-python/vispython.c`).
+  "The sandbox boundary in C (`native/vis-python/vispython.c`).
 
    GraalPy confined the guest with a Truffle `FileSystem` the guest could not
    reach; CPython opens files with the whole process's credentials, so the
@@ -45,11 +45,13 @@
        (vec)))
 
 (defn- confined-session
-  "A block session running under `read-roots` / `write-roots`."
-  [read-roots write-roots]
-  (let [session (harness/block-session)]
-    (ffi/confine! (into (interpreter-roots) read-roots) write-roots)
-    session))
+  "A block session running under `read-roots` / `write-roots`, answering a reach
+   for a process with `refusal` when the caller supplies one."
+  ([read-roots write-roots] (confined-session read-roots write-roots ""))
+  ([read-roots write-roots refusal]
+   (let [session (harness/block-session)]
+     (ffi/confine! (into (interpreter-roots) read-roots) write-roots refusal)
+     session)))
 
 (defn- refused?
   "Whether the block was refused BY THE BOUNDARY, and not by something else."
@@ -113,3 +115,47 @@
       (is (= {:read 0 :write 0} (ffi/confine! [] [])))
       (is (= "OUTSIDE" (str/trim (str (:stdout (block session
                                                       (str "print(open('" outside "/out.txt').read())"))))))))))
+
+;; The process surface used to be refused by `resources/vis-shims/posix.py`,
+;; which put a module of fakes in `sys.modules["subprocess"]`: a guard written in
+;; the language it guards, covering only the doors it knew to name. It lives in
+;; the audit hook now, where a block cannot reach it.
+(harness/defbuilt-test process-surface-test
+  (let [session (confined-session [] [])]
+    (testing "subprocess never spawns"
+      (is (refused? (block session "import subprocess\nsubprocess.run(['/bin/echo', 'hi'])"))))
+    (testing "os.system never spawns"
+      (is (refused? (block session "import os\nos.system('/bin/echo hi')"))))
+    (testing "os.popen never spawns"
+      (is (refused? (block session "import os\nos.popen('/bin/echo hi').read()"))))
+    (testing "the real module is left in place, so an `except` line still resolves"
+      (is (= "True"
+             (str/trim (str (:stdout (block session
+                                            (str "import subprocess\n"
+                                                 "print(issubclass(subprocess.CalledProcessError,"
+                                                 " subprocess.SubprocessError))"))))))))))
+
+(harness/defbuilt-test process-refusal-wording-test
+  (testing "a host that words the refusal its own way is what the guest reads"
+    (let [session (confined-session [] [] "use shell(...) instead")]
+      (is (str/includes? (str (:error (block session "import os\nos.system('/bin/echo hi')")))
+                         "use shell(...) instead")))))
+
+(harness/defbuilt-test native-symbol-test
+  (let [session (confined-session [] [])]
+    (testing "ctypes still IMPORTS, because a package that merely imports it must run"
+      (is (= "ok" (str/trim (str (:stdout (block session "import ctypes\nprint('ok')")))))))
+    (testing "reaching a symbol out of a loaded library is refused"
+      (is (refused? (block session "import ctypes\nctypes.CDLL(None).system"))))
+    (testing "an extension module the interpreter ships still imports"
+      (is (= "ok" (str/trim (str (:stdout (block session "import _dbm\nprint('ok')")))))))))
+
+(harness/defbuilt-test unconfined-process-test
+  (testing "the refusal is the POLICY, not a ban compiled into the library"
+    (let [session (harness/block-session)]
+      (ffi/confine! [] [] "")
+      (is (= "hi"
+             (str/trim (str (:stdout (block session
+                                            (str "import subprocess\n"
+                                                 "print(subprocess.run(['/bin/echo', 'hi'],"
+                                                 " capture_output=True).stdout.decode().strip())"))))))))))

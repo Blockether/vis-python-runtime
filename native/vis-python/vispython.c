@@ -100,6 +100,20 @@ static vis_py_roots vis_py_read_roots;
 static vis_py_roots vis_py_write_roots;
 static int vis_py_confined = 0;
 
+/* The sentence a confined guest reads when it reaches for a process. A host
+   that already words this its own way sets it over `vis_python_confine` and so
+   keeps wording it once; the library answers with its own when none is given. */
+static char vis_py_process_refusal[512];
+
+#define VIS_PY_PROCESS_REFUSAL \
+    "vis sandbox: starting a process is refused here - every process this " \
+    "product runs is started by the host"
+
+#define VIS_PY_NATIVE_REFUSAL \
+    "vis sandbox: reaching a native symbol through ctypes is refused here - an " \
+    "extension module the interpreter imports is native code the host chose, " \
+    "and this is not"
+
 static void vis_py_roots_clear(vis_py_roots *roots)
 {
     int i;
@@ -322,6 +336,23 @@ static const char *const vis_py_read_events[] = {
     "os.chdir", "os.getxattr", "os.listdir", "os.scandir",
     "glob.glob", "pathlib.Path.glob", NULL};
 
+/* The process surface. CPython raises these events itself, so refusing them
+   here needs no Python module replaced and survives a block that rebinds one:
+   `subprocess.run`, `subprocess.check_output` and `os.popen` all reach
+   `subprocess.Popen`, and `os.system` is its own event. */
+static const char *const vis_py_process_events[] = {
+    "os.system", "os.exec",     "os.fork",         "os.forkpty", "os.posix_spawn",
+    "os.spawn",  "os.startfile", "subprocess.Popen", "pty.spawn",  NULL};
+
+/* Native code the host did NOT choose. Opening a library is left alone,
+   because `import ctypes` opens one itself and a package that merely imports
+   ctypes has to keep working; what is refused is reaching a SYMBOL, which is
+   the step that turns a handle into a call into libc. An extension module the
+   interpreter imports from its own tree raises none of these, so a real wheel
+   is unaffected. */
+static const char *const vis_py_native_events[] = {
+    "ctypes.dlsym", "ctypes.dlsym/handle", "ctypes.call_function", NULL};
+
 static int vis_py_event_in(const char *event, const char *const *events)
 {
     int i;
@@ -344,6 +375,16 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
     (void)userdata;
     if (!vis_py_confined || event == NULL || args == NULL || !PyTuple_Check(args)) {
         return 0;
+    }
+    if (vis_py_event_in(event, vis_py_process_events)) {
+        PyErr_SetString(PyExc_RuntimeError, vis_py_process_refusal[0] != '\0'
+                                                ? vis_py_process_refusal
+                                                : VIS_PY_PROCESS_REFUSAL);
+        return -1;
+    }
+    if (vis_py_event_in(event, vis_py_native_events)) {
+        PyErr_SetString(PyExc_RuntimeError, VIS_PY_NATIVE_REFUSAL);
+        return -1;
     }
     count = PyTuple_GET_SIZE(args);
     if (count < 1) {
@@ -490,16 +531,22 @@ int vis_python_host(void *fn)
     return 0;
 }
 /* Confine the interpreter to `read_roots` and `write_roots`, each a
-   newline-separated list of paths. Replaces whatever was in force; two empty
-   lists LIFT the confinement, which only the host can ask for, because only the
-   host can call this. Answers the policy in force, so a caller can log what it
-   actually got after unresolvable roots were dropped. */
-int vis_python_confine(const char *read_roots, const char *write_roots, char *out, int cap)
+   newline-separated list of paths, and shut the process surface and `ctypes`
+   for as long as that policy is in force. Replaces whatever was in force; two
+   empty lists LIFT the confinement, which only the host can ask for, because
+   only the host can call this. `refusal` is the sentence the guest reads when
+   it reaches for a process; empty keeps the library's own. Answers the policy
+   in force, so a caller can log what it actually got after unresolvable roots
+   were dropped. */
+int vis_python_confine(const char *read_roots, const char *write_roots, const char *refusal,
+                       char *out, int cap)
 {
     char summary[64];
 
     vis_py_roots_set(&vis_py_read_roots, read_roots);
     vis_py_roots_set(&vis_py_write_roots, write_roots);
+    snprintf(vis_py_process_refusal, sizeof vis_py_process_refusal, "%s",
+             refusal != NULL ? refusal : "");
     vis_py_confined = (vis_py_read_roots.count + vis_py_write_roots.count) > 0;
     snprintf(summary, sizeof summary, "%d %d", vis_py_read_roots.count, vis_py_write_roots.count);
     return vis_py_copy_out(summary, out, cap);
