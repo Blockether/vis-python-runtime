@@ -1167,16 +1167,35 @@ __vis_paged_tools__ = frozenset(("grep", "find_files", "find"))
 
 
 def __vis_typed_result__(__vis_d__):
-    # Type ONE tool-result dict. `op` is stamped by the engine on results only, so
-    # a model-built dict can never impersonate one, and a shell answer additionally
-    # naming a live id is the HANDLE (see __VisShell__) that drives its process.
+    # Type ONE tool-result dict AND every map inside it. `op` is stamped by the
+    # engine on results only, so a model-built dict can never impersonate one, and
+    # a shell answer additionally naming a live id is the HANDLE (see __VisShell__)
+    # that drives its process.
+    #
+    # The walk is what makes a NESTED miss readable: the host hands back a plain
+    # decoded tree, so without it `r['nested']['b']` died with a bare KeyError and
+    # the model had to re-run the tool to learn the inner shape.
     if isinstance(__vis_d__, __VisDict__):
         return __vis_d__
-    if "op" in __vis_d__:
-        if __vis_d__.get("op") in __VisShell__.__vis_shell_ops__ and "id" in __vis_d__:
-            return __VisShell__(__vis_d__)
-        return __VisResult__(__vis_d__)
-    return __VisDict__(__vis_d__)
+    __vis_t__ = {__k__: __vis_typed_value__(__v__) for __k__, __v__ in __vis_d__.items()}
+    if "op" in __vis_t__:
+        if __vis_t__.get("op") in __VisShell__.__vis_shell_ops__ and "id" in __vis_t__:
+            return __VisShell__(__vis_t__)
+        return __VisResult__(__vis_t__)
+    return __VisDict__(__vis_t__)
+
+
+def __vis_typed_value__(__vis_v__):
+    # ONE value inside a result. Containers are rebuilt so the maps they carry
+    # describe themselves too; anything else is handed back untouched, because a
+    # result may carry values only the tool knows how to build.
+    if isinstance(__vis_v__, dict):
+        return __vis_typed_result__(__vis_v__)
+    if isinstance(__vis_v__, list):
+        return [__vis_typed_value__(__vis_e__) for __vis_e__ in __vis_v__]
+    if isinstance(__vis_v__, tuple):
+        return tuple(__vis_typed_value__(__vis_e__) for __vis_e__ in __vis_v__)
+    return __vis_v__
 
 
 def __vis_as_result__(__vis_v__, __vis_paging__=None):
