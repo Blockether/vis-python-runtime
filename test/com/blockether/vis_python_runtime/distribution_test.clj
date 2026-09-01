@@ -14,15 +14,6 @@
             [com.blockether.vis-python-runtime.harness :as harness :refer [block temp-dir]])
   (:import [java.net InetSocketAddress Socket]))
 
-(use-fixtures :each
-  (fn [run]
-    (try (run)
-         (finally
-           ;; Confinement is PROCESS state over one interpreter, so a case that
-           ;; sets it hands it to the next namespace unless it is put back.
-           (runtime/confine! [] [])
-           (harness/close-sessions!)))))
-
 (defn- index-reachable?
   "Whether PyPI answers, so a case that needs it can skip instead of failing for
    a reason that is not about this code."
@@ -49,6 +40,37 @@
    directory named afterwards would be unreadable."
   [session target]
   (runtime/exec! session (str "import sys\nsys.path.insert(0, " (pr-str target) ")")))
+
+(defn- forget-wheels!
+  "Take the wheel directory back off `sys.path` and drop every module that came
+   from it.
+
+   `sys.path` and `sys.modules` are the INTERPRETER's, not a session's, so a
+   real distribution left importable here is importable in every namespace that
+   runs afterwards — and the shim tests then measure the real package instead of
+   the shim (measured: `requests` installed here made every httpx case fail on
+   the real transport). The same reason the fixture puts confinement back."
+  []
+  (when (realized? wheels)
+    (runtime/exec!
+     runtime/default-session
+     (str "import sys\n"
+          "target = " (pr-str @wheels) "\n"
+          "sys.path[:] = [entry for entry in sys.path if entry != target]\n"
+          "for name, module in list(sys.modules.items()):\n"
+          "    origin = getattr(module, '__file__', None) or ''\n"
+          "    if origin.startswith(target):\n"
+          "        del sys.modules[name]\n"))))
+
+(use-fixtures :each
+  (fn [run]
+    (try (run)
+         (finally
+           ;; Confinement is PROCESS state over one interpreter, so a case that
+           ;; sets it hands it to the next namespace unless it is put back.
+           (runtime/confine! [] [])
+           (forget-wheels!)
+           (harness/close-sessions!)))))
 
 (harness/defbuilt-test a-wheel-is-confined-like-the-rest-test
   (if-not (index-reachable?)
