@@ -42,7 +42,7 @@
   "C symbol -> its FFM descriptor. This map IS the registration surface: a
    native image needs every one of these downcalls declared, so the list stays
    small and explicit."
-  {"vis_python_initialize" (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
+  {"vis_python_initialize" (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_version"    (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_eval"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
    "vis_python_exec"       (descriptor ValueLayout/JAVA_INT ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/ADDRESS ValueLayout/JAVA_INT)
@@ -136,7 +136,7 @@
 (defn initialize!
   "Start the embedded interpreter, once per process, and put `:source-paths`
    (plus the defaults) on `sys.path`. Returns
-   `{:library … :source-paths … :python-home …}`.
+   `{:library … :source-paths … :python-home … :pycache-prefix …}`.
 
    `:python-home` is the vendored CPython tree the interpreter is rooted at,
    defaulting to `runtime/resolve-python-home` and passing through to
@@ -144,22 +144,31 @@
    CPython's own standard-library search, which is what a checkout built
    against a system Python wants.
 
+   `:pycache-prefix` is where compiled bytecode lands, defaulting to
+   `runtime/resolve-pycache-prefix`. The artifact ships none, so the first run
+   pays the compile and writes it there; an explicit nil turns caching off and
+   pays that compile on every run.
+
    Starting is process-wide; a SESSION is not. Sessions are namespaces created
    on demand by `exec!`/`eval-str`, so many of them share one interpreter and
    one set of imported modules."
   ([] (initialize! {}))
-  ([{:keys [source-paths python-home]
-     :or   {python-home ::vendored}}]
-   (let [home (if (= ::vendored python-home)
-                (runtime/resolve-python-home (:library @bridge))
-                python-home)]
-     (call "vis_python_initialize" (or home ""))
+  ([{:keys [source-paths python-home pycache-prefix]
+     :or   {python-home ::vendored pycache-prefix ::default}}]
+   (let [home   (if (= ::vendored python-home)
+                  (runtime/resolve-python-home (:library @bridge))
+                  python-home)
+         pycache (if (= ::default pycache-prefix)
+                   (runtime/resolve-pycache-prefix)
+                   pycache-prefix)]
+     (call "vis_python_initialize" (or home "") (or pycache ""))
      (let [roots (source-roots source-paths)]
        (when (seq roots)
          (call "vis_python_exec" default-session
                (str "import sys\n"
                     (str/join "\n" (map #(str "sys.path.insert(0, " (pr-str %) ")") roots)))))
-       {:library (:library @bridge) :source-paths roots :python-home home}))))
+       {:library (:library @bridge) :source-paths roots :python-home home
+        :pycache-prefix pycache}))))
 
 (defn version
   "The running interpreter's version string. Requires `initialize!`."

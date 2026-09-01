@@ -100,6 +100,13 @@ static vis_py_roots vis_py_read_roots;
 static vis_py_roots vis_py_write_roots;
 static int vis_py_confined = 0;
 
+/* Where CPython writes the bytecode it compiles, set at startup and remembered
+   here so confinement can keep it writable. The artifact ships no `__pycache__`
+   - bytecode is per-machine cache, not artifact weight - so the interpreter
+   compiles what it imports and puts it under this prefix instead of next to a
+   source file it must not touch. */
+static char vis_py_pycache_prefix[PATH_MAX];
+
 /* The sentence a confined guest reads when it reaches for a process. A host
    that already words this its own way sets it over `vis_python_confine` and so
    keeps wording it once; the library answers with its own when none is given. */
@@ -214,9 +221,27 @@ static int vis_py_under(const char *path, const vis_py_roots *roots)
     return 0;
 }
 
-/* Replace `roots` with the newline-separated `spec`. A path that cannot be
-   canonicalized is DROPPED rather than trusted: a root nobody can resolve
-   would otherwise widen the policy by accident. */
+/* Add one root, canonicalized. A path that will not resolve is DROPPED rather
+   than trusted: a root nobody can resolve would otherwise widen the policy by
+   accident. */
+static void vis_py_roots_add(vis_py_roots *roots, const char *path)
+{
+    char canon[PATH_MAX];
+    char *kept;
+
+    if (path == NULL || path[0] == '\0' || roots->count >= VIS_PY_MAX_ROOTS) {
+        return;
+    }
+    if (!vis_py_canonical(path, canon, sizeof canon)) {
+        return;
+    }
+    kept = strdup(canon);
+    if (kept != NULL) {
+        roots->item[roots->count++] = kept;
+    }
+}
+
+/* Replace `roots` with the newline-separated `spec`. */
 static void vis_py_roots_set(vis_py_roots *roots, const char *spec)
 {
     vis_py_roots_clear(roots);
@@ -225,15 +250,9 @@ static void vis_py_roots_set(vis_py_roots *roots, const char *spec)
         size_t n = (end == NULL) ? strlen(spec) : (size_t)(end - spec);
         if (n > 0 && n < PATH_MAX) {
             char one[PATH_MAX];
-            char canon[PATH_MAX];
             memcpy(one, spec, n);
             one[n] = '\0';
-            if (vis_py_canonical(one, canon, sizeof canon)) {
-                char *kept = strdup(canon);
-                if (kept != NULL) {
-                    roots->item[roots->count++] = kept;
-                }
-            }
+            vis_py_roots_add(roots, one);
         }
         if (end == NULL) {
             break;
@@ -537,7 +556,9 @@ int vis_python_host(void *fn)
    only the host can call this. `refusal` is the sentence the guest reads when
    it reaches for a process; empty keeps the library's own. Answers the policy
    in force, so a caller can log what it actually got after unresolvable roots
-   were dropped. */
+   were dropped. The bytecode cache prefix given at startup is added to the
+   writable roots for as long as a policy is in force: it is the interpreter's
+   own cache, not guest data, and it is counted in the answer. */
 int vis_python_confine(const char *read_roots, const char *write_roots, const char *refusal,
                        char *out, int cap)
 {
@@ -548,6 +569,9 @@ int vis_python_confine(const char *read_roots, const char *write_roots, const ch
     snprintf(vis_py_process_refusal, sizeof vis_py_process_refusal, "%s",
              refusal != NULL ? refusal : "");
     vis_py_confined = (vis_py_read_roots.count + vis_py_write_roots.count) > 0;
+    if (vis_py_confined) {
+        vis_py_roots_add(&vis_py_write_roots, vis_py_pycache_prefix);
+    }
     snprintf(summary, sizeof summary, "%d %d", vis_py_read_roots.count, vis_py_write_roots.count);
     return vis_py_copy_out(summary, out, cap);
 }
@@ -560,11 +584,15 @@ int vis_python_confine(const char *read_roots, const char *write_roots, const ch
    to have, so a laptop with no Python, or with the wrong one, decides whether
    the sandbox runs at all. NULL or empty keeps CPython's own search, which is
    what a source checkout built against a system interpreter wants.
+   `pycache_prefix` is where compiled bytecode goes: NULL or empty leaves
+   CPython's default, which writes a `__pycache__` beside every source file it
+   imports - wrong for a shipped tree that is read-only and shared, and the
+   reason the artifact carries no bytecode at all.
 
    Idempotent, so a caller that cannot cheaply know whether a sibling already
    started it does not have to. Returns 0, or VIS_PY_ERR_INIT with the reason in
    `out`. */
-int vis_python_initialize(const char *home, char *out, int cap)
+int vis_python_initialize(const char *home, const char *pycache_prefix, char *out, int cap)
 {
     PyConfig config;
     PyStatus status;
@@ -581,14 +609,23 @@ int vis_python_initialize(const char *home, char *out, int cap)
         vis_py_copy_out("PySys_AddAuditHook was refused", out, cap);
         return VIS_PY_ERR_INIT;
     }
-    if (home == NULL || home[0] == '\0') {
+    snprintf(vis_py_pycache_prefix, sizeof vis_py_pycache_prefix, "%s",
+             pycache_prefix != NULL ? pycache_prefix : "");
+    if ((home == NULL || home[0] == '\0') && vis_py_pycache_prefix[0] == '\0') {
         Py_InitializeEx(0);
     } else {
         PyConfig_InitPythonConfig(&config);
         /* Match Py_InitializeEx(0): an embedded interpreter must not take the
            host process's signal handlers away from the JVM. */
         config.install_signal_handlers = 0;
-        status = PyConfig_SetBytesString(&config, &config.home, home);
+        status = PyStatus_Ok();
+        if (home != NULL && home[0] != '\0') {
+            status = PyConfig_SetBytesString(&config, &config.home, home);
+        }
+        if (!PyStatus_Exception(status) && vis_py_pycache_prefix[0] != '\0') {
+            status = PyConfig_SetBytesString(&config, &config.pycache_prefix,
+                                             vis_py_pycache_prefix);
+        }
         if (!PyStatus_Exception(status)) {
             status = Py_InitializeFromConfig(&config);
         }

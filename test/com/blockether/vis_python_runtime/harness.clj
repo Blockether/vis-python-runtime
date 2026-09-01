@@ -9,7 +9,9 @@
             [clojure.string :as str]
             [clojure.test]
             [com.blockether.vis-python-runtime :as runtime]
-            [com.blockether.vis-python-runtime.ffi :as ffi]))
+            [com.blockether.vis-python-runtime.ffi :as ffi])
+  (:import [java.nio.file Files LinkOption]
+           [java.nio.file.attribute FileAttribute]))
 
 (def built?
   "False in a checkout where `native/vis-python/build.sh` has not run."
@@ -193,3 +195,32 @@
   (let [s (block-session)]
     (doseq [nm (keys tools)] (ffi/install-tool! s nm))
     s))
+
+(defn temp-dir
+  "A real directory, resolved through every symlink, so an assertion compares
+   canonical paths with canonical paths (`/tmp` is a symlink on macOS)."
+  ^String [prefix]
+  (str (.toRealPath (Files/createTempDirectory prefix (make-array FileAttribute 0))
+                    (make-array LinkOption 0))))
+
+(defn interpreter-roots
+  "What the interpreter must keep READING to stay alive under confinement: its
+   own installation and the source roots it was started with. A policy without
+   them refuses the next stdlib import, which is not a sandbox - it is a broken
+   interpreter."
+  []
+  (ffi/initialize!)
+  (->> (ffi/run "import sys\n[sys.prefix, sys.base_prefix, sys.exec_prefix] + list(sys.path)")
+       (map str)
+       (remove str/blank?)
+       (distinct)
+       (vec)))
+
+(defn confined-session
+  "A block session running under `read-roots` / `write-roots`, answering a reach
+   for a process with `refusal` when the caller supplies one."
+  ([read-roots write-roots] (confined-session read-roots write-roots ""))
+  ([read-roots write-roots refusal]
+   (let [session (block-session)]
+     (ffi/confine! (into (interpreter-roots) read-roots) write-roots refusal)
+     session)))

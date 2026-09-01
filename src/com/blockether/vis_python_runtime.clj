@@ -124,3 +124,25 @@
        (let [vendored (io/file (.getParentFile (io/file ^String path)) "python")]
          (when (.isDirectory vendored)
            (.getAbsolutePath vendored))))))
+
+(def pycache-prefix-env
+  "Name of the environment variable that overrides the bytecode cache location."
+  "VIS_PYTHON_PYCACHE_PREFIX")
+
+(defn resolve-pycache-prefix
+  "Where the interpreter writes the bytecode it compiles, as an absolute path,
+   or nil to leave CPython's default alone.
+
+   A shipped artifact carries NO bytecode: `__pycache__` is per-machine cache
+   that nearly doubles a vendored tree on disk, and CPython's default writes it
+   BESIDE the source file - inside an installation that is read-only, shared
+   between projects, and hashed. So the cache goes under the user's own
+   directory instead: the first run compiles what it imports, every later run
+   imports at cached speed, and the tree stays exactly as it shipped.
+   `VIS_PYTHON_PYCACHE_PREFIX` wins, which is also how a host puts the cache
+   where it keeps its other state."
+  []
+  (or (some-> (System/getenv pycache-prefix-env) str/trim not-empty)
+      (some-> (System/getProperty "user.home")
+              (io/file ".vis" "python-cache")
+              (.getAbsolutePath))))
