@@ -20,20 +20,19 @@
            (when harness/built? (runtime/threads! 100 0 8))
            (harness/close-sessions!)))))
 
-(defn- expected-workers
-  "What the pool sizes itself at on this machine: blocking work, not cores."
-  []
-  (min 32 (+ (.availableProcessors (Runtime/getRuntime)) 4)))
+(def ^:private workers
+  "What the pool sizes itself at: blocking work, four wide gathers, not cores."
+  32)
 
 (harness/defbuilt-test thread-policy-test
   (testing "the defaults are the host's, not the machine's"
-    (is (= {:cap 100 :workers (expected-workers) :quota 8} (runtime/threads! 0 0 0))))
+    (is (= {:cap 100 :workers workers :quota 8} (runtime/threads! 0 0 0))))
   (testing "the guest reads the same policy the host set"
     (let [session (harness/block-session)
           seen    (ev session "import _vis_host\n_vis_host.threads()")]
       (is (= 100 (get seen "cap")))
       (is (= 8 (get seen "quota")))
-      (is (= (expected-workers) (get seen "workers")))
+      (is (= workers (get seen "workers")))
       (is (<= 1 (get seen "live"))))))
 
 (harness/defbuilt-test par-overlaps-test
@@ -116,3 +115,34 @@
         (is (str/includes? (str (:error answer)) "threads at once")))))
   (testing "the cap is not a filesystem policy: it holds unconfined"
     (is (= {:read 0 :write 0} (runtime/confine! [] [])))))
+
+;; The pool is bounded and shared, so "every worker is busy" is a state a session
+;; must survive without waiting on another session's work.
+(harness/defbuilt-test saturated-pool-test
+  (testing "a gather that finds the pool full runs its own thunks and finishes"
+    (let [session (harness/block-session)]
+      ;; A quota wide enough for one gather to hold every worker at once.
+      (runtime/threads! 0 0 40)
+      (let [answer (block session (str "import _vis_host, threading, time, vis_runtime\n"
+                                       "gate = threading.Event()\n"
+                                       "def hold():\n"
+                                       "    gate.wait(10)\n"
+                                       "def spare():\n"
+                                       "    return 'ran'\n"
+                                       "answer = {}\n"
+                                       "def other():\n"
+                                       "    answer['v'] = vis_runtime.par([spare, spare])\n"
+                                       "holder = threading.Thread(\n"
+                                       "    target=lambda: vis_runtime.par([hold] * 40), daemon=True)\n"
+                                       "holder.start()\n"
+                                       "time.sleep(0.5)\n"
+                                       "queued = _vis_host.threads()['queued']\n"
+                                       "caller = threading.Thread(target=other)\n"
+                                       "caller.start()\n"
+                                       "caller.join(3)\n"
+                                       "gate.set()\n"
+                                       "holder.join(5)\n"
+                                       "print(answer.get('v'), queued > 0)"))]
+        ;; Without caller-runs the second gather waits for a worker that only the
+        ;; first gather can free, and the join times out with nothing to show.
+        (is (= "['ran', 'ran'] True" (str/trim (str (:stdout answer)))))))))

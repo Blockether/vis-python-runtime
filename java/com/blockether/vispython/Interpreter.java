@@ -285,9 +285,11 @@ public final class Interpreter {
    * hook, so it counts a thread a block started for itself as well as the pool's
    * own, and every session shares it because every session shares the
    * interpreter. {@code workers} sizes the pool the runtime's {@code gather}
-   * dispatches on, once, when it first runs - the default is {@code min(32, cpus
-   * + 4)}, the size for BLOCKING work, since a worker waits on the host rather
-   * than competing for a core. {@code quota} is how many of those workers ONE
+   * dispatches on, once, when it first runs - the default is 32, the size for
+   * BLOCKING work, since a worker waits on the host rather than competing for a
+   * core. A gather that finds every worker busy runs its own thunks on the
+   * calling thread rather than waiting for one. {@code quota} is how many of
+   * those workers ONE
    * gather may hold, so a wide gather cannot take the pool from other sessions.
    */
   public static int[] threads(int cap, int workers, int quota) {
