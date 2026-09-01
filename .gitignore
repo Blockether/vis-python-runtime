@@ -1,0 +1,8 @@
+target/
+.cpcache/
+.clj-kondo/.cache/
+.lsp/
+resources/prebuilds/
+native/vis-python/build/
+native/vis-python/cpython/
+.DS_Store

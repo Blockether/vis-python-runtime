@@ -1,0 +1,30 @@
+;; vis-python-runtime — the Python runtime the Vis sandbox executes, without
+;; Truffle. GraalPy costs ~300 MB in the native image (python-language alone is
+;; 95 MB in ~/.m2, and SVM expands it); this library embeds a statically linked
+;; CPython behind a small first-party C ABI (native/vis-python) reached through
+;; the JDK Foreign Function & Memory API — the same shape clj-imaging uses for
+;; its Rust cdylib, and the reason there is no JNI and no subprocess here.
+;;
+;; No runtime dependencies on purpose: this library is loaded inside a GraalVM
+;; native image, so every dep it declares becomes reachable code in someone
+;; else's binary. The cdylib is resolved at RUNTIME from VIS_PYTHON_NATIVE_PATH
+;; or from the bundled classpath resource published per platform as
+;; com.blockether/vis-python-runtime-native-<platform>.
+{:paths ["src" "resources"]
+
+ :deps {}
+
+ :aliases
+ {:build
+  {:deps {io.github.clojure/tools.build {:mvn/version "0.10.9"}
+          slipset/deps-deploy           {:mvn/version "0.2.5"}}
+   :ns-default build}
+
+  :test
+  {:extra-paths ["test"]
+   :extra-deps  {io.github.cognitect-labs/test-runner
+                 {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+   :main-opts   ["-m" "cognitect.test-runner"]
+   :exec-fn     cognitect.test-runner.api/test
+   ;; FFM downcalls are a restricted operation; opt in so tests do not warn.
+   :jvm-opts    ["--enable-native-access=ALL-UNNAMED"]}}}
