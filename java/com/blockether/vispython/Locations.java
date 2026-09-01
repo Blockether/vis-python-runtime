@@ -3,7 +3,6 @@ package com.blockether.vispython;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -129,8 +128,9 @@ public final class Locations {
 
   /**
    * Directories CPython may import from, in order: what the caller passed, then
-   * {@code VIS_PYTHON_SOURCE_PATH}, then this repository's own {@code python/}
-   * and {@code resources/vis-python/} in a dev checkout. A packaged build
+   * {@code VIS_PYTHON_SOURCE_PATH}, then this repository's own
+   * {@code resources/vispython/} and {@code resources/vis-python/} in a dev
+   * checkout. A packaged build
    * extracts its sources and passes them explicitly, the same way the cdylib is
    * resolved.
    */
@@ -153,10 +153,8 @@ public final class Locations {
     }
     String here = System.getProperty("user.dir");
     if (here != null) {
-      List<Path> checkout = new ArrayList<>();
-      checkout.add(Path.of(here, "python"));
-      checkout.add(Path.of(here, "resources", "vis-python"));
-      for (Path candidate : checkout) {
+      for (Path candidate : List.of(Path.of(here, "resources", "vispython"),
+          Path.of(here, "resources", "vis-python"))) {
         if (Files.isDirectory(candidate)) {
           roots.add(candidate.toAbsolutePath().toString());
         }

@@ -10,7 +10,7 @@
    cannot carry that tree faithfully — it holds no symlinks and no permission
    bits — so the platform artifact needs an archive resource extracted once,
    the way the cdylib itself is extracted today. Until that lands, a published
-   native jar resolves no `python/` directory and the interpreter falls back
+   native jar resolves no vendored interpreter and the interpreter falls back
    to the machine's own standard library."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]

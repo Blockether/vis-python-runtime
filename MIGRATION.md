@@ -35,8 +35,8 @@ CPython.
 
 What the wave demanded of the runtime, each of it now pinned by `ffi_test`:
 
-- results cross as EDN (`vis_runtime/to_edn`, `ffi/run`), because the moved
-  assertions compare Clojure data, not a repr. GraalPy coerced an integral
+- results cross as JSON (`vis_runtime/to_json`, `ffi/run`), and the moved
+  assertions read that JSON as data. GraalPy coerced an integral
   float to an integer; the three numpy expectations that baked that in now
   carry the float CPython actually has.
 - `import <shim>` resolves lazily through `vis_runtime.ShimFinder`, appended to

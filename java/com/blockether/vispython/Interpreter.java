@@ -288,15 +288,15 @@ public final class Interpreter {
 
   /**
    * Run {@code code} the way the sandbox does - statements execute and a
-   * trailing expression's value comes back - answering that value as EDN text,
-   * because a dict is a map and a list a vector to the caller that parses it.
+   * trailing expression's value comes back - answering that value as JSON text,
+   * because the caller reads it with the JSON reader it already has.
    */
   public static String run(String session, String code) {
     return call("vispython_run", session, code);
   }
 
   /**
-   * Run {@code code} as a sandbox BLOCK, answering EDN text of what it printed
+   * Run {@code code} as a sandbox BLOCK, answering JSON text of what it printed
    * and what it raised. A block's ONE success channel is what it PRINTED. The
    * reapers run at the boundary, so a handle the block dropped is freed before
    * this returns.

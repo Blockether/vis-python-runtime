@@ -21,7 +21,7 @@ docstring or a test can state lives there, not here.
   green JVM suite never catches: it fails in a user's terminal. So new bridge
   work, process pinning, the trust export and pip go in Java, and
   `src/com/blockether/vis_python_runtime.clj` stays a skin: argument shapes,
-  keyword maps, EDN. A Clojure function there that is longer than three lines of
+  keyword maps. A Clojure function there that is longer than three lines of
   CODE is a sign the logic belongs on the other side, and
   `vis-python-runtime-test/skin-test` fails when the ratio slips or a body grows.
   Java is compiled by
@@ -53,6 +53,14 @@ docstring or a test can state lives there, not here.
   pin is the only change Vis makes. Until that pin exists Vis still carries its
   own copy and `sandbox-parity-test` compares every file byte for byte; edit a
   file on one side only and the suite fails. Delete that test with the last copy.
+- **`resources/vis-python/` is a MIRROR; this repository's own guest Python is
+  `resources/vispython/vis_runtime.py`.** Put a file of ours in the mirror and
+  `sandbox-parity-test` fails, correctly. `native/vispython/` is build input a
+  compiler reads, never a shipped source root, so guest Python never lives there.
+- **ONE wire dialect: JSON, in both directions.** `host_call` carries a JSON
+  envelope in, `vis_runtime.to_json` renders the value out, and `run` /
+  `run-block` answer JSON TEXT the caller reads with the reader it already has.
+  The bridge reads none of it; never reintroduce a second encoding.
 - **The consumer contract is the existing sandbox, unchanged.** Success is Vis'
   ~1.5 MB of shims in `resources/vis-shims/`, `resources/vis-python/async_runtime.py`
   and `packages/vis-agent/src/vis/__init__.py` running with no edit beyond the

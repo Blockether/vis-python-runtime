@@ -62,30 +62,33 @@
         (is (= "True" (runtime/eval-str "session-b" "'json' in __import__('sys').modules"))
             "imported modules ARE shared: a session is a namespace, not an interpreter")))))
 
-(deftest run-answers-edn-data-test
+(deftest run-answers-json-test
   (if-not built?
-    (println "SKIP run-answers-edn-data-test - no cdylib")
+    (println "SKIP run-answers-json-test - no cdylib")
     (do
       (runtime/initialize!)
-      (runtime/install-runtime! "edn-session")
+      (runtime/install-runtime! "json-session")
 
-      (testing "a trailing expression's value comes back as Clojure data"
-        (is (= 3 (runtime/run "edn-session" "a = 1\nb = 2\na + b")))
-        (is (= [1 2.5 "x" true nil] (runtime/run "edn-session" "[1, 2.5, 'x', True, None]")))
-        (is (= {"q" "1"} (runtime/run "edn-session" "{'q': '1'}")))
-        (is (= #{1 2} (runtime/run "edn-session" "{1, 2}")))
-        (is (= 0.0 (runtime/run "edn-session" "0.0"))
+      (testing "a trailing expression's value comes back as JSON text"
+        (is (= "3" (runtime/run "json-session" "a = 1\nb = 2\na + b")))
+        (is (= "[1, 2.5, \"x\", true, null]"
+               (runtime/run "json-session" "[1, 2.5, 'x', True, None]")))
+        (is (= "{\"q\": \"1\"}" (runtime/run "json-session" "{'q': '1'}")))
+        (is (= "[1, 2]" (runtime/run "json-session" "{1, 2}"))
+            "a set has no JSON shape of its own - it crosses as an array")
+        (is (= "0.0" (runtime/run "json-session" "0.0"))
             "an integral float stays a float - the value Python actually has"))
 
-      (testing "a program with no trailing expression answers nil"
-        (is (nil? (runtime/run "edn-session" "x = 41\nx += 1"))))
+      (testing "a program with no trailing expression answers null"
+        (is (= "null" (runtime/run "json-session" "x = 41\nx += 1"))))
 
-      (testing "a value with no EDN shape crosses as its str"
-        (is (str/starts-with? (runtime/run "edn-session" "object()") "<object object at")))
+      (testing "a value with no JSON shape crosses as its str"
+        (is (str/starts-with? (runtime/run "json-session" "object()")
+                              "\"<object object at")))
 
       (testing "a raise names the exception even when it carries no message"
         (is (= "AssertionError"
-               (try (runtime/run "edn-session" "assert False")
+               (try (runtime/run "json-session" "assert False")
                     (catch VisPythonException e (.get e "message")))))))))
 
 (deftest shims-import-lazily-test
@@ -98,16 +101,16 @@
       (runtime/eval-str "lazy-session" "vis_runtime.forget_shims()")
 
       (testing "a bare import of a shim name resolves to the shim source"
-        (is (false? (runtime/run "lazy-session" "'tabulate' in __import__('sys').modules")))
-        (is (true? (runtime/run "lazy-session" "import tabulate\n'abc' in tabulate.tabulate([['abc']])"))))
+        (is (= "false" (runtime/run "lazy-session" "'tabulate' in __import__('sys').modules")))
+        (is (= "true" (runtime/run "lazy-session" "import tabulate\n'abc' in tabulate.tabulate([['abc']])"))))
 
       (testing "the stdlib always wins over a shim of the same name"
-        (is (= "json" (runtime/run "lazy-session" "import json\njson.__name__"))))
+        (is (= "\"json\"" (runtime/run "lazy-session" "import json\njson.__name__"))))
 
       (testing "forgetting the shims hands the next import a pristine module"
         (runtime/run "lazy-session" "import tabulate\ntabulate.tabulate = 'patched'\nNone")
         (runtime/eval-str "lazy-session" "vis_runtime.forget_shims()")
-        (is (= false (runtime/run "lazy-session" "import tabulate\ntabulate.tabulate == 'patched'"))))
+        (is (= "false" (runtime/run "lazy-session" "import tabulate\ntabulate.tabulate == 'patched'"))))
 
       (testing "a shim that cannot load blames the shim AND the cause"
         (let [message (runtime/run "lazy-session"

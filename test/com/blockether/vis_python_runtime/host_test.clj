@@ -99,9 +99,9 @@
   (let [session (harness/tool-session {"echo" echo})]
     (testing "the raw door carries text and answers text"
       (is (= "{\"value\":\"<x>\"}"
-             (runtime/run session "import vis_runtime\nvis_runtime.host_call('echo', '{\"args\": [\"x\"], \"kwargs\": {}}')"))))
+             (harness/ev session "import vis_runtime\nvis_runtime.host_call('echo', '{\"args\": [\"x\"], \"kwargs\": {}}')"))))
     (testing "a name the host does not know is the host's answer, not a crash"
-      (is (str/includes? (runtime/run session "import vis_runtime\nvis_runtime.host_call('nope', '{}')")
+      (is (str/includes? (harness/ev session "import vis_runtime\nvis_runtime.host_call('nope', '{}')")
                          "no tool named nope")))))
 
 (harness/defbuilt-test host-tool-is-protected-test

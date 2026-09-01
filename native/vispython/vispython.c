@@ -731,7 +731,7 @@ int vispython_exec(const char *module_name, const char *code, char *out, int cap
 
 /* Run `code` the way the sandbox does: statements execute, and the value of a
    trailing EXPRESSION is what comes back. The split is Python's own `ast` work,
-   so it lives in `vis_runtime.run`. The value comes back as EDN text, because
+   so it lives in `vis_runtime.run`. The value comes back as JSON text, because
    the ABI carries strings and the host reads data, not a repr; this function
    only hands the source over as a Python string, never as interpolated text. */
 int vispython_run(const char *module_name, const char *code, char *out, int cap)
@@ -752,7 +752,7 @@ int vispython_run(const char *module_name, const char *code, char *out, int cap)
         vis_py_take_error(out, cap);
         return VIS_PY_ERR_PYTHON;
     }
-    result = PyObject_CallMethod(runtime, "run_edn", "sO", code, globals);
+    result = PyObject_CallMethod(runtime, "run_json", "sO", code, globals);
     Py_DECREF(runtime);
     if (result == NULL) {
         vis_py_take_error(out, cap);
@@ -769,7 +769,7 @@ int vispython_run(const char *module_name, const char *code, char *out, int cap)
 /* Run `code` as a sandbox BLOCK: the runtime's own `__vis_run_async__` under
    captured stdout, with the reapers at the boundary. Policy is Python's
    (`vis_runtime.run_block`); this only carries the source over and brings the
-   EDN map — stdout and error — back. */
+   JSON object — stdout and error — back. */
 int vispython_run_block(const char *module_name, const char *code, char *out, int cap)
 {
     PyObject *globals, *runtime, *result, *text;
@@ -788,7 +788,7 @@ int vispython_run_block(const char *module_name, const char *code, char *out, in
         vis_py_take_error(out, cap);
         return VIS_PY_ERR_PYTHON;
     }
-    result = PyObject_CallMethod(runtime, "run_block_edn", "sO", code, globals);
+    result = PyObject_CallMethod(runtime, "run_block_json", "sO", code, globals);
     Py_DECREF(runtime);
     if (result == NULL) {
         vis_py_take_error(out, cap);

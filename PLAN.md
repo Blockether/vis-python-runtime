@@ -360,7 +360,7 @@ holds five classes — `Interpreter` (the FFM downcalls, the pinned thread, the 
 upcall, the session helpers), `Native` (platform tags and cdylib resolution),
 `Locations` (every directory this runtime decides), `Pip`, `HostFunction` — and
 `src/com/blockether/vis_python_runtime.clj` is one namespace of one- to
-three-line functions over them: argument shapes, keyword maps, EDN. The reason is
+three-line functions over them: argument shapes, keyword maps. The reason is
 Phase 5's verdict, not taste. In Clojure every downcall was
 `MethodHandle.invokeWithArguments` — a reflective, boxing invocation — and the
 host upcall's target was a `clojure.lang.IFn` bound and `asType`-adapted into

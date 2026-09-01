@@ -1,4 +1,4 @@
-"""The sandbox runtime, as a package CPython IMPORTS.
+"""The sandbox runtime, the module CPython IMPORTS.
 
 The host does not interpolate the runtime into a string and execute it. It puts
 this directory on ``sys.path`` and imports, which is what an interpreter with a
@@ -228,44 +228,29 @@ def run(source, namespace):
     return None
 
 
-def to_edn(value):
-    """Render a Python value as EDN — the one data wire back to the host.
-
-    The C ABI carries strings, so a result crosses as EDN text and the host
-    reads it with `clojure.edn`: `nil`/booleans/numbers/strings, vectors for
-    sequences, maps for dicts, sets for sets. Anything without an EDN shape
-    (an object, a function, a raster handle) crosses as its `str`, because a
-    test asserting on one asserts on what a human would see.
-    """
-    if value is None:
-        return "nil"
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    if isinstance(value, int):
-        return repr(value)
-    if isinstance(value, float):
-        if value != value:
-            return "##NaN"
-        if value == float("inf"):
-            return "##Inf"
-        if value == float("-inf"):
-            return "##-Inf"
-        return repr(value)
-    if isinstance(value, str):
-        return json.dumps(value)
+def _json_default(value):
+    """What JSON has no shape for: a sequence is an array, everything else text."""
+    if isinstance(value, (set, frozenset, tuple)):
+        return list(value)
     if isinstance(value, bytes):
-        return json.dumps(value.decode("utf-8", "replace"))
-    if isinstance(value, (list, tuple)):
-        return "[" + " ".join(to_edn(item) for item in value) + "]"
-    if isinstance(value, (set, frozenset)):
-        return "#{" + " ".join(to_edn(item) for item in value) + "}"
-    if isinstance(value, dict):
-        return (
-            "{" + " ".join(to_edn(k) + " " + to_edn(v) for k, v in value.items()) + "}"
-        )
-    return json.dumps(str(value))
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
+def to_json(value):
+    """Render a Python value as JSON — the one data wire back to the host.
+
+    The C ABI carries strings and the boundary already speaks JSON the other
+    way (`host_call`), so ONE dialect crosses in both directions and the host
+    reads it with the JSON reader it already has. `None`/booleans/numbers/
+    strings, arrays for sequences and sets, objects for dicts. Anything JSON
+    cannot carry — an object, a function, a raster handle, a NaN — crosses as
+    its `str`, because a test asserting on one asserts on what a human sees.
+    """
+    try:
+        return json.dumps(value, default=_json_default, allow_nan=False)
+    except (TypeError, ValueError):
+        return json.dumps(str(value))
 
 
 def reset_handles():
@@ -377,14 +362,14 @@ def close_session(name):
     return True
 
 
-def run_block_edn(source, namespace):
-    """`run_block` rendered as EDN. What the C ABI calls."""
-    return to_edn(run_block(source, namespace))
+def run_block_json(source, namespace):
+    """`run_block` rendered as JSON. What the C ABI calls."""
+    return to_json(run_block(source, namespace))
 
 
-def run_edn(source, namespace):
-    """`run` the source and render the value as EDN. What the C ABI calls."""
-    return to_edn(run(source, namespace))
+def run_json(source, namespace):
+    """`run` the source and render the value as JSON. What the C ABI calls."""
+    return to_json(run(source, namespace))
 
 
 def shim_root():

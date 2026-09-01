@@ -73,9 +73,10 @@
 
 (defn ev
   "Run `code` in `session` and answer its value as Clojure data — the moved
-   tests' `ev`, which read a sandbox result as data and compare against it."
+   tests' `ev`, which read a sandbox result as data and compare against it.
+   The value crosses as JSON, so the reading happens here."
   [session code]
-  (runtime/run session code))
+  (json/read-str (runtime/run session code)))
 
 (defn truthy
   "Whether `code` answered Python `True`."
@@ -95,9 +96,11 @@
     (track! s)))
 
 (defn block
-  "Run `code` as a sandbox block in `session`: `{:stdout … :error …}`."
+  "Run `code` as a sandbox block in `session`: `{:stdout … :error …}`, read
+   from the JSON the boundary answers."
   [session code]
-  (runtime/run-block session code))
+  (let [answer (json/read-str (runtime/run-block session code))]
+    {:stdout (get answer "stdout") :error (get answer "error")}))
 
 (defn printed
   "The JSON value a block PRINTED. A block has ONE success channel — what it
@@ -210,7 +213,7 @@
    interpreter."
   []
   (runtime/initialize!)
-  (->> (runtime/run "import sys\n[sys.prefix, sys.base_prefix, sys.exec_prefix] + list(sys.path)")
+  (->> (json/read-str (runtime/run "import sys\n[sys.prefix, sys.base_prefix, sys.exec_prefix] + list(sys.path)"))
        (map str)
        (remove str/blank?)
        (distinct)

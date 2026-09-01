@@ -9,8 +9,8 @@
    tree beside it instead of a Truffle language inside it.
 
    The bridge itself is JAVA — `java/com/blockether/vispython/` — and this
-   namespace is a thin skin over it: Clojure argument shapes, keyword maps and
-   EDN, and nothing else. The reason is the native image the result is linked
+   namespace is a thin skin over it: Clojure argument shapes and keyword maps,
+   and nothing else. The reason is the native image the result is linked
    into. Every downcall there is an `invokeExact` against a signature the
    compiler knows and the host upcall's target is a static method found by name,
    while the same code as interop is a reflective invocation an image only keeps
@@ -24,7 +24,6 @@
    `prebuilds/<platform>/<file>` that `com.blockether/vis-python-runtime-native-<platform>`
    carries. A failure anywhere below is a `VisPythonException` whose `.data`
    names the symbol, status, platform or path it is about."
-  (:require [clojure.edn :as edn])
   (:import [com.blockether.vispython HostFunction Interpreter Locations Native Pip]))
 
 (def native-path-env
@@ -148,18 +147,16 @@
 
 (defn run
   "Run `code` the way the sandbox does — statements execute and a trailing
-   expression's value comes back — answering that value as Clojure data. The
-   value crosses the ABI as EDN, so a dict is a map and a list a vector."
+   expression's value comes back — answering that value as JSON text: one
+   dialect crosses this boundary in both directions."
   ([code] (run default-session code))
-  ([session code] (edn/read-string (Interpreter/run session code))))
+  ([session code] (Interpreter/run session code)))
 
 (defn run-block
-  "Run `code` as a sandbox BLOCK and answer `{:stdout … :error …}`. A block's
-   ONE success channel is what it PRINTED."
+  "Run `code` as a sandbox BLOCK, answering JSON text of what it printed and
+   what it raised. A block's ONE success channel is what it PRINTED."
   ([code] (run-block default-session code))
-  ([session code]
-   (let [answer (edn/read-string (Interpreter/runBlock session code))]
-     {:stdout (get answer "stdout") :error (get answer "error")})))
+  ([session code] (Interpreter/runBlock session code)))
 
 (defn install-runtime!
   "Equip `session` with the sandbox runtime, answering how many names it got."
