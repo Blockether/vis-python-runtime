@@ -98,3 +98,21 @@
     (ffi/exec! s "import vis_runtime")
     (ffi/eval-str s "vis_runtime.forget_shims()")
     s))
+
+(defn guarded-session
+  "A session confined to `allowed`/`denied` the way the engine confines one: the
+   two policy names in the session's globals, then `network_guard` executed into
+   it.
+
+   One interpreter has ONE `socket`, so the policy in force is the one of the
+   session configured LAST — configuring a session here is ENTERING it, and that
+   is why these tests run in sequence rather than side by side."
+  [allowed denied]
+  (ffi/initialize!)
+  (let [s (str "guard-" (System/nanoTime))]
+    (ffi/install-runtime! s)
+    (ffi/exec! s
+               (str "__vis_allowed_domains__ = " (json/write-str allowed) "\n"
+                    "__vis_denied_domains__ = " (json/write-str denied)))
+    (ffi/install-module! s "network_guard")
+    s))

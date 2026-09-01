@@ -204,6 +204,19 @@
    (exec! session "import vis_runtime")
    (eval-str session (str "vis_runtime.install_shim(" (pr-str name) ")"))))
 
+(defn install-module!
+  "Execute the sandbox module `name` INTO `session`'s own globals, answering the
+   source file that ran.
+
+   This is how a CONFIGURED part of the sandbox arrives: `network_guard` reads
+   the policy the session was handed (`__vis_allowed_domains__`,
+   `__vis_denied_domains__`) as it executes, so it is executed into the
+   namespace holding them rather than imported."
+  ([name] (install-module! default-session name))
+  ([session name]
+   (exec! session "import vis_runtime")
+   (eval-str session (str "vis_runtime.install_module(globals(), " (pr-str name) ")"))))
+
 (defn finalize!
   "Stop the interpreter. Idempotent."
   []

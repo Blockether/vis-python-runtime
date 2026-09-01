@@ -10,10 +10,9 @@ needs part of the runtime pays for that part.
 process; a session is a namespace, and every session calls ``install`` on its
 own globals to receive the runtime's public names.
 
-The runtime body itself still lives in Vis (``resources/vis-python/async_runtime.py``)
-and reaches this interpreter as a source root, so there is no second copy to
-drift. When it moves into this package the only thing that changes is the name
-below.
+The runtime body is ``resources/vis-python/async_runtime.py`` in this package
+and reaches the interpreter as a source root; Vis' copy is hashed against it
+(``sandbox-parity-test``) until Vis pins this library and deletes its own.
 """
 
 import ast
@@ -35,29 +34,48 @@ SANDBOX_MODULE = os.environ.get("VIS_PYTHON_SANDBOX_MODULE", "async_runtime")
 #: executed, so importing it once per PROCESS equips every session.
 AUTO_IMPORTS_MODULE = "auto_imports"
 
-#: The compiled runtime, kept once per process — see `sandbox_code`.
-_SANDBOX_CODE = None
+#: Compiled sandbox sources, kept once per process — see `module_code`.
+_MODULE_CODE = {}
 
 
-def sandbox_code():
-    """The compiled sandbox runtime, located through the import system.
+def module_code(module):
+    """The compiled source of one sandbox module, located through the import system.
 
     The host never carries this source as a string: the import machinery finds
     the file on the source roots, and the compiled result is kept because every
-    session pays for it.
+    session pays for it. The module is NOT imported — a sandbox module is meant
+    to be executed INTO a session's globals, not to become a module of its own.
     """
-    global _SANDBOX_CODE
-    if _SANDBOX_CODE is None:
-        spec = importlib.util.find_spec(SANDBOX_MODULE)
+    code = _MODULE_CODE.get(module)
+    if code is None:
+        spec = importlib.util.find_spec(module)
         origin = None if spec is None else spec.origin
         if not origin or not os.path.isfile(origin):
             raise ImportError(
-                "sandbox runtime module %r not on %r"
-                % (SANDBOX_MODULE, sys_path_snapshot())
+                f"sandbox module {module!r} not on {sys_path_snapshot()!r}"
             )
-        with open(origin, "r", encoding="utf-8") as handle:
-            _SANDBOX_CODE = compile(handle.read(), origin, "exec")
-    return _SANDBOX_CODE
+        with open(origin, encoding="utf-8") as handle:
+            code = compile(handle.read(), origin, "exec")
+        _MODULE_CODE[module] = code
+    return code
+
+
+def sandbox_code():
+    """The compiled sandbox runtime — `module_code` for the runtime module."""
+    return module_code(SANDBOX_MODULE)
+
+
+def install_module(namespace, module):
+    """Execute one further sandbox module INTO an already equipped session.
+
+    This is how the host adds a part of the sandbox that is CONFIGURED by the
+    session: `network_guard` reads `__vis_allowed_domains__` and
+    `__vis_denied_domains__` out of the namespace as it runs. Answers the file
+    the code came from, so a caller can prove WHICH source ran.
+    """
+    code = module_code(module)
+    exec(code, namespace)
+    return code.co_filename
 
 
 def install(namespace):
@@ -136,7 +154,9 @@ def to_edn(value):
     if isinstance(value, (set, frozenset)):
         return "#{" + " ".join(to_edn(item) for item in value) + "}"
     if isinstance(value, dict):
-        return "{" + " ".join(to_edn(k) + " " + to_edn(v) for k, v in value.items()) + "}"
+        return (
+            "{" + " ".join(to_edn(k) + " " + to_edn(v) for k, v in value.items()) + "}"
+        )
     return json.dumps(str(value))
 
 
@@ -182,7 +202,7 @@ def run_block(source, namespace):
         try:
             runner(source)
         except BaseException as exc:
-            error = "%s: %s" % (type(exc).__name__, exc) if str(exc) else type(exc).__name__
+            error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
     reapers = namespace.get("__vis_run_reapers__")
     if reapers is not None:
         reapers()
@@ -205,7 +225,9 @@ def shim_root():
     if override:
         return override
     here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(os.path.dirname(os.path.dirname(here)), "resources", "vis-shims")
+    return os.path.join(
+        os.path.dirname(os.path.dirname(here)), "resources", "vis-shims"
+    )
 
 
 _installed_shims = set()
@@ -225,7 +247,7 @@ class ShimLoader(importlib.machinery.SourceFileLoader):
             super().exec_module(module)
         except Exception as exc:
             raise ImportError(
-                "vis shim %r failed to load: %s" % (module.__name__, exc)
+                f"vis shim {module.__name__!r} failed to load: {exc}"
             ) from exc
 
 
@@ -292,7 +314,7 @@ def install_shim(name):
     _installed_shims.add(name)
     path = os.path.join(shim_root(), name + ".py")
     if not os.path.isfile(path):
-        raise ImportError("no shim source at %r" % (path,))
+        raise ImportError(f"no shim source at {path!r}")
     spec = importlib.util.spec_from_file_location("vis_shim_" + name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -66,7 +66,8 @@ registry reclaims on CPython exactly as it was written to on GraalPy.
 - [ ] `env_python_fd_test.clj` — 512 lines — descriptor discipline for the sandbox `open`
 - [x] `env_python_handles_test.clj` — 180 lines — the `__vis_own__` registry — the reason for the whole project
 - [ ] `env_python_grep_paging_test.clj` — 118 lines — a capped search pages itself
-- [ ] `network_guard_test.clj` — 144 lines — `network_guard.py`
+- [x] `network_guard_test.clj` — 144 lines — `network_guard.py` (policy only; the
+      capability and the proxy/CA environment are the host's and stay in Vis)
 - [ ] `sandbox_fs_test.clj` — 1246 lines — sandbox filesystem surface
 - [ ] `env_python_form_eval_test.clj` — 1879 lines — expression/statement evaluation, printing, tracebacks
 - [ ] `env_python_test.clj` — 1711 lines — context construction end to end
@@ -88,6 +89,25 @@ What the handles test demanded of the runtime:
 One case did NOT move: `sandbox-handle-registry-is-shared-test` proves PIL and
 sqlite3 share the registry, and PIL is host-bridged — it belongs to Wave 3 and
 stays in Vis until the JVM side of that bridge exists here.
+
+What the network guard demanded, and it is the sharpest difference the move has
+produced so far: GraalPy gave every session its own interpreter, CPython gives
+them ONE, and two places quietly relied on the isolation.
+
+- `network_guard.py` wrapped `socket` on every install, so a second session ran
+  under its own policy AND every earlier one — a host it allowed stayed blocked.
+  It wraps once now and reads the policy from a holder, so an install REPLACES
+  the policy. One interpreter therefore enforces ONE policy at a time: entering
+  a session is installing its policy.
+- `async_runtime.py` re-assigned the socket doors on every install, which put
+  the pristine `connect` back UNDER the guard and disabled it silently. The
+  doors go on once (`__vis_socket_doors_on__`); every table they touch was
+  already a survivor.
+
+Both changes are in Vis' copies too, and Vis' `network-guard-test`,
+`env-python-fd-test` and `env-python-handles-test` stay green on GraalPy (37
+tests), because per-context state makes the once-per-interpreter guards no-ops
+there.
 
 ## Wave 3 — shims with a host bridge (4607 lines)
 
