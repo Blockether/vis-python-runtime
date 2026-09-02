@@ -4,7 +4,6 @@ vis-python/extension_bootstrap.py
 vis-python/module_runner.py
 vis-python/network_guard.py
 vis-python/network_probe.py
-vis-python/process_redirect.py
 vis-python/project_config.py
 vis-python/proxy_env.py
 vis-python/vis_runtime.py

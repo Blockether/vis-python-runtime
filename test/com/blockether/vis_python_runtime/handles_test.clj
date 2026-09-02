@@ -106,3 +106,30 @@
           (is (nil? (:error answer)))
           (is (= "True" (str/trim (str (:stdout answer)))))))
       (finally (block session restore)))))
+
+(harness/defbuilt-test subprocess-redirects-need-no-repair-test
+  ;; `process_redirect.py` used to rewrite every file redirect into a pipe plus a
+  ;; daemon copier, and to swap `Popen.pid` for the host's real one, because
+  ;; GraalPy handed the host a bare INHERIT for a file redirect and answered
+  ;; `.pid` with a recycled child-slot index. Both are gone: the vendored CPython
+  ;; does its own redirects and reports its own pids. This is what says so - if it
+  ;; ever fails, the repair has to come back, and nothing else would notice.
+  (let [session (block-session)
+        into-file (temp-file "")
+        from-file (temp-file "hello-stdin\n")
+        answer (block session
+                      (str "import os, subprocess\n"
+                           "subprocess.run(['/bin/echo', 'redirected'],"
+                           " stdout=open(" (pr-str into-file) ", 'w'))\n"
+                           "read = subprocess.run(['/bin/cat'],"
+                           " stdin=open(" (pr-str from-file) "), capture_output=True)\n"
+                           "child = subprocess.Popen(['/bin/sleep', '0'])\n"
+                           "pid = child.pid\n"
+                           "child.wait()\n"
+                           "print(read.stdout.decode().strip())\n"
+                           "print(pid > 0 and pid != os.getpid())"))]
+    (testing "a file redirect reaches the file, and is complete when the call returns"
+      (is (nil? (:error answer)))
+      (is (= "redirected\n" (slurp into-file))))
+    (testing "a stdin redirect reaches the child, and the pid is the OS's own"
+      (is (= ["hello-stdin" "True"] (str/split-lines (str/trim (str (:stdout answer)))))))))
