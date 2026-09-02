@@ -69,6 +69,21 @@ public final class Locations {
   }
 
   /**
+   * The private Linux process-jail enforcer beside the resolved cdylib.
+   *
+   * <p>Linux platform archives carry {@code bin/bwrap} at their root. Returning
+   * null for an incomplete archive is deliberate: a host must fail closed rather
+   * than resolve an unrelated executable from {@code PATH}.
+   */
+  public static String bubblewrap(String libraryPath) {
+    if (libraryPath == null) {
+      return null;
+    }
+    Path candidate = Path.of(libraryPath).toAbsolutePath().getParent().resolve("bin/bwrap");
+    return Files.isRegularFile(candidate) && Files.isExecutable(candidate) ? candidate.toString() : null;
+  }
+
+  /**
    * Where packages installed for the sandbox live.
    *
    * <p>The artifact BUNDLES NOTHING: it is an interpreter and its standard

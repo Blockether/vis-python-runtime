@@ -24,5 +24,12 @@ are built with LTO by a newer LLVM than Apple's linker reads), so a static
 `libpython3.14.a` does NOT link with the system toolchain. The vendored shared
 library is the supported path, and it is self-contained all the same.
 
-Consumers get the library as the per-platform artifacts
-`clojure -T:build native-jar :platform <tag>` publishes.
+Linux builds also run `bubblewrap/build.sh`. It pins bubblewrap and libcap,
+links both into one static musl executable, and puts it at `bin/bwrap` in the
+same platform tree. The artifact therefore borrows neither a system `bwrap`
+nor its libc. Building it requires `musl-tools`, Meson, Ninja, pkg-config and
+Linux UAPI headers; the script verifies both source hashes and executes a real
+namespace before accepting the binary.
+
+Consumers get the whole tree from the per-platform archive built with
+`clojure -T:build platform-archive :platform <tag>`.

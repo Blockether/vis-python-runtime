@@ -118,22 +118,29 @@
 
 (defn platform-archive
   "Write the release asset for one platform: everything under
-   `resources/prebuilds/<platform>/` — the cdylib and the vendored interpreter
-   tree beside it — as a gzipped tar, contents at the archive root so unpacking
-   into a directory yields exactly what `Locations/pythonHome` expects.
+   `resources/prebuilds/<platform>/` — the cdylib and vendored interpreter plus
+   the private `bin/bwrap` process enforcer on Linux — as a gzipped tar. Contents
+   sit at the archive root, so unpacking into a directory yields exactly the tree
+   `Locations/pythonHome` and `Locations/bubblewrap` expect.
 
-   `tar` rather than a jar or a zip: only tar preserves the symlinks and the
-   executable bits the interpreter tree depends on."
+   `tar` rather than a jar or zip preserves the interpreter's symlinks and
+   executable bits. Linux archives fail closed unless `bin/bwrap` exists and is
+   executable."
   [{:keys [platform]}]
   (let [platform (some-> platform name)]
     (when-not (native-platforms platform)
       (throw (ex-info (str "Unknown native platform: " platform) {:platform platform :known native-platforms})))
-    (let [dir (io/file "resources/prebuilds" platform)
-          src (io/file dir (native-libs platform))
-          out (io/file (format "target/%s-%s-%s.tar.gz" (name lib) platform version))]
+    (let [dir      (io/file "resources/prebuilds" platform)
+          src      (io/file dir (native-libs platform))
+          enforcer (io/file dir "bin" "bwrap")
+          out      (io/file (format "target/%s-%s-%s.tar.gz" (name lib) platform version))]
       (when-not (.exists src)
         (throw (ex-info (str "runtime cdylib not found (build native/vispython first): " src)
                         {:platform platform :path (str src)})))
+      (when (and (str/starts-with? platform "linux-")
+                 (not (and (.isFile enforcer) (.canExecute enforcer))))
+        (throw (ex-info (str "Linux runtime has no executable private bubblewrap: " enforcer)
+                        {:platform platform :path (str enforcer)})))
       (b/delete {:path (str out)})
       (io/make-parents out)
       ;; SOURCE only, as in the jar: `__pycache__` is bytecode compiled against
@@ -150,7 +157,6 @@
 (defn deploy [_]
   (jar nil)
   (dd/deploy {:installer :remote :artifact jar-file :pom-file (b/pom-path {:lib lib :class-dir jar-class-dir})}))
-
 
 (defn install [_]
   (jar nil)

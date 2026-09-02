@@ -88,6 +88,12 @@
   ([] (Interpreter/pythonHome))
   ([{:keys [path]}] (Locations/pythonHome path)))
 
+(defn resolve-bubblewrap
+  "The private static `bwrap` shipped beside a Linux runtime, or nil when this
+   platform artifact carries no Linux enforcer. Never searches `PATH`."
+  ([] (resolve-bubblewrap (resolve-library)))
+  ([{:keys [path]}] (Locations/bubblewrap path)))
+
 (defn resolve-packages-dir
   "Where pip installs for the sandbox, `~/.vis/python/packages` by default. The
    artifact bundles nothing, so this is where every real distribution comes
@@ -171,13 +177,13 @@
    process's own stdin, for the caller that owns it: the human at the CLI."
   [text]
   (Interpreter/exec
-    default-session
-    (if (nil? text)
-      "import vis_runtime\nvis_runtime.set_stdin(None)"
-      (str "import base64, vis_runtime\nvis_runtime.set_stdin(base64.b64decode('"
-           (.encodeToString (java.util.Base64/getEncoder)
-                            (.getBytes ^String text "UTF-8"))
-           "').decode('utf-8'))")))
+   default-session
+   (if (nil? text)
+     "import vis_runtime\nvis_runtime.set_stdin(None)"
+     (str "import base64, vis_runtime\nvis_runtime.set_stdin(base64.b64decode('"
+          (.encodeToString (java.util.Base64/getEncoder)
+                           (.getBytes ^String text "UTF-8"))
+          "').decode('utf-8'))")))
   true)
 
 (defn threads!

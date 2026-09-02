@@ -86,4 +86,8 @@ cc -O2 -fPIC -shared -pthread -Wall -Wextra \
    -L"$home/lib" -lpython"$minor" \
    -Wl,-rpath,"$rpath"
 
+if [ "$os" = linux ]; then
+  "$repo/native/bubblewrap/build.sh"
+fi
+
 echo "$out/$lib"

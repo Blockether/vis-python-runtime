@@ -20,17 +20,20 @@ CPython's own speed.
 
     java/                   the bridge: FFM downcalls, the host upcall, pip
     src/                    the Clojure API over it, and nothing else
-    native/vispython/       the C shim + the vendoring build
+    native/vispython/       the C shim + the CPython vendoring build
+    native/bubblewrap/      the static Linux process-enforcer build
     resources/vispython/    the guest half of the boundary (`vis_runtime.py`)
     resources/vis-python/   Vis' sandbox modules, mirrored byte for byte
     resources/prebuilds/    build output per platform (git-ignored)
     test/                   clojure -T:build javac && clojure -M:test
 
-The jar carries no library. It resolves one at runtime from a path the host
-names (`runtime/use-library!`), else `VIS_PYTHON_NATIVE_PATH`, else the
-classpath resource `prebuilds/<platform>/<file>` a built checkout has. The
+The jar carries no native payload. It resolves a runtime tree at runtime from a
+path the host names (`runtime/use-library!`), else `VIS_PYTHON_NATIVE_PATH`, else
+the classpath resource `prebuilds/<platform>/<file>` a built checkout has. The
 published platform artifact is the release asset
-`vis-python-runtime-<platform>-<version>.tar.gz`, unpacked by its consumer.
+`vis-python-runtime-<platform>-<version>.tar.gz`, unpacked by its consumer. Every
+Linux artifact includes its own static `bin/bwrap`; `resolve-bubblewrap` finds it
+beside the selected cdylib and never searches `PATH`.
 
 ```clojure
 (require '[com.blockether.vis-python-runtime :as runtime])
@@ -40,8 +43,10 @@ published platform artifact is the release asset
 
 ## Status
 
-Phase 0: repository shape, resolution and versioning. The FFM bridge and the
-native build are the next phases — see `PLAN.md`.
+The embedded bridge, vendored interpreter, confinement, host calls, pip-backed
+packages and per-platform packaging are implemented. Linux packaging also ships
+the process-level enforcer required to contain native extension modules. The Vis
+consumer migration and native-image verdict remain tracked in `PLAN.md`.
 
 ## License
 

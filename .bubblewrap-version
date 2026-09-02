@@ -1,0 +1,7 @@
+# Linux process enforcer shipped in every Linux platform archive.
+# Both source archives are verified before compilation; moving a pin means
+# rebuilding linux-x64 and linux-arm64 and rerunning the namespace self-test.
+BUBBLEWRAP_VERSION=0.12.0
+BUBBLEWRAP_SHA256=3f66d9e3f85396f6d7d7fbd2859f277e4fd3a9303341bfe2ff325251bda65fd4
+LIBCAP_VERSION=2.75
+LIBCAP_SHA256=de4e7e064c9ba451d5234dd46e897d7c71c96a9ebf9a0c445bc04f4742d83632

@@ -53,7 +53,7 @@
 
 (deftest ffm-registrations-cover-the-whole-boundary-test
   (testing "the metadata ships and parses"
-    (is (.isFile metadata-file))
+    (is (.isFile ^java.io.File metadata-file))
     (is (seq (declared "downcalls"))))
 
   (testing "every downcall shape in SIGNATURES is declared"
