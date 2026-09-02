@@ -960,15 +960,151 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
 
 #define VIS_PY_HOST_BUFFER 65536
 
-typedef int (*vis_py_host_fn)(const char *name, const char *payload, char *out, int cap);
+typedef int (*vis_py_host_fn)(const char *session, const char *name, const char *payload,
+                              char *out, int cap);
 
 static vis_py_host_fn vis_py_host = NULL;
+
+/* --------------------------------------------------------------------------
+ * WHO IS CALLING.
+ *
+ * The host binds a tool PER SESSION, so every upcall has to say whose it is -
+ * and the guest must not be the one saying it. `vis_runtime.host_call` is an
+ * ordinary module function and the session in its envelope is JSON the GUEST
+ * writes, so a block that names a neighbouring session reaches that session's
+ * tools. Measured, in three lines, from a block confined to a temp directory:
+ * it read a file the policy had refused it one statement earlier, through a
+ * tool bound in another namespace.
+ *
+ * The one thing a block cannot forge is the IDENTITY of a session's globals.
+ * It can copy any value out of another namespace, rebind its own `__name__`,
+ * even write `sys.modules` - but it cannot make its own globals BE another
+ * session's dict. So the namespaces this file created are remembered here, and
+ * the caller is the nearest frame whose globals is one of them.
+ *
+ * The table holds a WEAK reference to each session module, because the host
+ * drops a finished session by taking it out of `sys.modules` and a strong one
+ * here would keep every session that ever ran alive. A dead entry frees its own
+ * slot on the next walk. All of it runs under the GIL, like every other entry
+ * point in this file, so the table needs no lock of its own.
+ * ------------------------------------------------------------------------ */
+
+#define VIS_PY_SESSIONS_MAX 512
+#define VIS_PY_SESSION_NAME 128
+
+typedef struct {
+    PyObject *weak; /* weakref to the session MODULE, or NULL for a free slot */
+    char name[VIS_PY_SESSION_NAME];
+} vis_py_session;
+
+static vis_py_session vis_py_sessions[VIS_PY_SESSIONS_MAX];
+
+/* The module a slot still names, or NULL when the session is gone (and the slot
+   is freed on the way out, which is the only reaping this table needs). */
+static PyObject *vis_py_session_module(vis_py_session *slot)
+{
+    PyObject *module = NULL;
+
+    if (slot->weak == NULL) {
+        return NULL;
+    }
+    if (PyWeakref_GetRef(slot->weak, &module) < 0) {
+        PyErr_Clear();
+        module = NULL;
+    }
+    if (module == NULL) {
+        Py_CLEAR(slot->weak);
+        slot->name[0] = '\0';
+        return NULL;
+    }
+    Py_DECREF(module); /* borrowed from here on: the caller holds the GIL */
+    return module;
+}
+
+/* Remember `module` as the session called `name`. Idempotent, and silent when
+   the table is full: a host that ran out of slots loses the ABILITY TO NAME a
+   caller, which the call path answers as "unknown", never as somebody else. */
+static void vis_py_session_remember(const char *name, PyObject *module)
+{
+    int free_slot = -1;
+    int i;
+
+    if (name == NULL || name[0] == '\0' || strlen(name) >= VIS_PY_SESSION_NAME) {
+        return;
+    }
+    for (i = 0; i < VIS_PY_SESSIONS_MAX; i++) {
+        PyObject *live = vis_py_session_module(&vis_py_sessions[i]);
+        if (live == NULL) {
+            if (free_slot < 0) {
+                free_slot = i;
+            }
+            continue;
+        }
+        if (live == module) {
+            return; /* already known, under whatever name it was created with */
+        }
+    }
+    if (free_slot < 0) {
+        return;
+    }
+    vis_py_sessions[free_slot].weak = PyWeakref_NewRef(module, NULL);
+    if (vis_py_sessions[free_slot].weak == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    snprintf(vis_py_sessions[free_slot].name, VIS_PY_SESSION_NAME, "%s", name);
+}
+
+/* The session whose globals dict is `globals`, or NULL for a frame that belongs
+   to no session (`vis_runtime`'s own module, the standard library, an import). */
+static const char *vis_py_session_named(PyObject *globals)
+{
+    int i;
+
+    for (i = 0; i < VIS_PY_SESSIONS_MAX; i++) {
+        PyObject *module = vis_py_session_module(&vis_py_sessions[i]);
+        if (module != NULL && PyModule_GetDict(module) == globals) {
+            return vis_py_sessions[i].name;
+        }
+    }
+    return NULL;
+}
+
+/* The session the current call is being made FROM: the nearest frame whose
+   globals belongs to one. `host_call` itself is defined in `vis_runtime`, whose
+   frame belongs to no session, so the walk skips it and lands on the block. */
+static const char *vis_py_calling_session(void)
+{
+    PyFrameObject *frame = PyEval_GetFrame();
+    const char *found = NULL;
+    int depth;
+
+    Py_XINCREF(frame);
+    for (depth = 0; frame != NULL && depth < 256; depth++) {
+        PyObject *globals = PyFrame_GetGlobals(frame);
+        PyFrameObject *back;
+
+        if (globals != NULL) {
+            found = vis_py_session_named(globals);
+            Py_DECREF(globals);
+        }
+        if (found != NULL) {
+            break;
+        }
+        back = PyFrame_GetBack(frame);
+        Py_DECREF(frame);
+        frame = back;
+    }
+    Py_XDECREF(frame);
+    return found;
+}
 
 /* `_vis_host.call(name, payload)` -> the host's reply as `str`. */
 static PyObject *vis_py_host_call(PyObject *self, PyObject *args)
 {
     const char *name = NULL;
     const char *payload = NULL;
+    const char *session = NULL;
     vis_py_host_fn host = vis_py_host;
     PyThreadState *save;
     char *buffer;
@@ -989,8 +1125,13 @@ static PyObject *vis_py_host_call(PyObject *self, PyObject *args)
     if (buffer == NULL) {
         return PyErr_NoMemory();
     }
+    /* Read BEFORE the GIL is released: it walks Python frames. */
+    session = vis_py_calling_session();
+    if (session == NULL) {
+        session = "";
+    }
     save = PyEval_SaveThread();
-    needed = host(name, payload, buffer, cap);
+    needed = host(session, name, payload, buffer, cap);
     PyEval_RestoreThread(save);
     if (needed >= cap) {
         grown = (char *)realloc(buffer, (size_t)needed + 1);
@@ -1001,7 +1142,7 @@ static PyObject *vis_py_host_call(PyObject *self, PyObject *args)
         buffer = grown;
         cap = needed + 1;
         save = PyEval_SaveThread();
-        needed = host(name, payload, buffer, cap);
+        needed = host(session, name, payload, buffer, cap);
         PyEval_RestoreThread(save);
         if (needed >= cap) {
             free(buffer);
@@ -1695,6 +1836,7 @@ static PyObject *vis_py_namespace(const char *module_name, char *out, int cap)
         return NULL;
     }
     globals = PyModule_GetDict(module);
+    vis_py_session_remember(name, module);
     if (PyDict_GetItemString(globals, "__builtins__") == NULL) {
         if (PyDict_SetItemString(globals, "__builtins__", PyEval_GetBuiltins()) != 0) {
             vis_py_take_error(out, cap);

@@ -69,7 +69,7 @@ public final class Interpreter {
 
   private static final FunctionDescriptor HOST_DESCRIPTOR =
       FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-          ValueLayout.ADDRESS, ValueLayout.JAVA_INT);
+          ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT);
 
   /**
    * C symbol to its FFM descriptor. This map IS the registration surface: a
@@ -563,25 +563,27 @@ public final class Interpreter {
    * takes the process down, so a failure comes back as a negative status with
    * its reason in the buffer, exactly like a failure on the way in.
    */
-  private static int hostUpcall(MemorySegment name, MemorySegment payload, MemorySegment out,
-      int capacity) {
+  private static int hostUpcall(MemorySegment session, MemorySegment name, MemorySegment payload,
+      MemorySegment out, int capacity) {
     try {
+      String caller = cString(session);
       String tool = cString(name);
       String body = cString(payload);
       Object[] pending = PENDING.get();
       String text;
-      if (pending != null && pending[0].equals(tool) && pending[1].equals(body)) {
-        text = (String) pending[2];
+      if (pending != null && pending[0].equals(caller) && pending[1].equals(tool)
+          && pending[2].equals(body)) {
+        text = (String) pending[3];
       } else {
         HostFunction bound = host;
         if (bound == null) {
           throw new IllegalStateException("no host is bound to this interpreter");
         }
-        text = String.valueOf(bound.call(tool, body));
+        text = String.valueOf(bound.call(caller, tool, body));
       }
       int needed = writeReply(text, out, capacity);
       if (needed >= capacity) {
-        PENDING.set(new Object[] {tool, body, text});
+        PENDING.set(new Object[] {caller, tool, body, text});
       } else {
         PENDING.remove();
       }
@@ -600,7 +602,7 @@ public final class Interpreter {
       try {
         MethodHandle target = MethodHandles.lookup().findStatic(Interpreter.class, "hostUpcall",
             MethodType.methodType(int.class, MemorySegment.class, MemorySegment.class,
-                MemorySegment.class, int.class));
+                MemorySegment.class, MemorySegment.class, int.class));
         hostStub = Linker.nativeLinker().upcallStub(target, HOST_DESCRIPTOR, Arena.global());
       } catch (ReflectiveOperationException e) {
         throw new VisPythonException("could not build the host upcall stub", Map.of(), e);

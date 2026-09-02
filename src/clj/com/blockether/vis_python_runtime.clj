@@ -297,15 +297,22 @@
 (defn bind-host!
   "Bind `f` as THE host this interpreter calls back into; nil unbinds.
 
-   `f` takes a callable's name and a text payload and answers text. Everything
-   else about it is constrained by where it RUNS: inside the call the guest is
-   blocked on, so it must not re-enter this namespace, and on any thread,
-   because the GIL is released for its duration."
+   `f` takes the CALLING SESSION, a callable's name and a text payload, and
+   answers text. The session is the interpreter's answer, not the guest's: the
+   nearest calling frame whose globals is a namespace this library created. A
+   host that binds tools per session authorizes against THIS, never against a
+   session named in the payload — that field is written by the guest, and a
+   block that named a neighbour's session used to reach the neighbour's tools.
+   An empty string means the call came from no session at all.
+
+   Everything else about `f` is constrained by where it RUNS: inside the call
+   the guest is blocked on, so it must not re-enter this namespace, and on any
+   thread, because the GIL is released for its duration."
   [f]
   (Interpreter/bindHost
    (when f
      (reify HostFunction
-       (call [_ name payload] (str (f name payload))))))
+       (call [_ session name payload] (str (f session name payload))))))
   nil)
 (defn certificates-pem!
   "Export the JVM's trust anchors to a PEM file for pip and answer its path,

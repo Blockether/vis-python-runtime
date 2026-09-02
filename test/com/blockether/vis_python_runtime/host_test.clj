@@ -131,10 +131,9 @@
   (let [seen (atom [])]
     (try
       (runtime/bind-host!
-       (fn [nm payload]
-         (let [envelope (json/read-str payload)]
-           (swap! seen conj [nm (get envelope "session")])
-           (json/write-str {"value" (get envelope "session")}))))
+       (fn [session nm _payload]
+         (swap! seen conj [nm session])
+         (json/write-str {"value" session})))
       (let [one (harness/block-session)
             two (harness/block-session)]
         (runtime/install-tool! one "whose")
@@ -146,3 +145,38 @@
           (is (= [["whose" one] ["whose" two]] @seen))))
       (finally
         (harness/bind-tools! {"echo" echo})))))
+
+(harness/defbuilt-test the-caller-is-the-interpreters-answer-test
+  ;; The escalation this closes, measured before it was closed: `host_call` is an
+  ;; ordinary function of `vis_runtime` and the session in its envelope is JSON
+  ;; the GUEST writes, so a block that named a neighbour's session reached the
+  ;; neighbour's tools — a block confined to a temp directory read, through a
+  ;; tool bound in another namespace, a file the policy had refused it one
+  ;; statement earlier. The session now comes from the interpreter: the nearest
+  ;; calling frame whose globals is a namespace this library created.
+  (let [callers (atom [])]
+    (try
+      (runtime/bind-host!
+       (fn [session nm _payload]
+         (swap! callers conj [session nm])
+         (json/write-str {"value" (str "served " session)})))
+      (let [privileged (harness/block-session)
+            attacker (harness/block-session)]
+        (runtime/install-tool! privileged "secret")
+        (testing "the session that owns the tool reaches it"
+          (is (= (str "served " privileged)
+                 (str/trim (str (:stdout (block privileged "print(await secret())")))))))
+        (testing "a block naming ANOTHER session in the envelope is answered as itself"
+          ;; The forged envelope still crosses — the boundary carries text and reads
+          ;; none of it — but the host is told who really called, so the neighbour's
+          ;; name buys nothing.
+          (let [answer (harness/ev attacker
+                                   (str "import vis_runtime, json\n"
+                                        "vis_runtime.host_call('secret', json.dumps("
+                                        "{'session': " (pr-str privileged) ", 'args': []}))"))]
+            (is (str/includes? (str answer) attacker)
+                "the host was told the forged session, not the caller")
+            (is (not (str/includes? (str answer) privileged)))))
+        (testing "every call the host saw named the session that actually made it"
+          (is (= #{privileged attacker} (set (map first @callers))))))
+      (finally (runtime/bind-host! nil)))))

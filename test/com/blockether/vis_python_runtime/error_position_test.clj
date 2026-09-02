@@ -176,7 +176,7 @@
   ;; directly rather than through `harness/bind-tools!` because that helper
   ;; answers a bare `error` string and this contract is about `error_data`.
   (runtime/bind-host!
-   (fn [_name _payload]
+   (fn [_session _name _payload]
      (json/write-str {"error"      "tool refused: no such path"
                       "error_data" {"kind" "not-found" "path" "/nope"}})))
   (let [session (harness/block-session)]

@@ -140,7 +140,7 @@
    catchable exception rather than a dead block."
   [tools]
   (runtime/bind-host!
-   (fn [nm payload]
+   (fn [_session nm payload]
      (let [args (get (json/read-str payload) "args")
            tool (get tools nm)]
        (json/write-str
