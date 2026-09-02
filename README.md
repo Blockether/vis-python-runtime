@@ -18,8 +18,8 @@ CPython's own speed.
 
 ## Shape
 
-    java/                   FFM bridges: CPython, process jail, pip
-    src/                    the Clojure API over them, and nothing else
+    src/java/               FFM bridges: CPython, process jail, pip
+    src/clj/                the Clojure API over them, and nothing else
     native/vispython/       the C shim + the CPython vendoring build
     native/visjail/         the process ABI: bubblewrap / Seatbelt
     resources/vispython/    the guest half of the boundary (`vis_runtime.py`)

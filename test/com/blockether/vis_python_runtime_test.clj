@@ -49,9 +49,9 @@
 ;; The bridge is Java and this namespace is its skin: argument shapes, keyword
 ;; maps, EDN. Nothing else is a compiler error, so it is a test.
 (deftest skin-test
-  (let [java  (line-count "java" ".java")
-        clj   (line-count "src" ".clj")
-        forms (->> (str/split (slurp "src/com/blockether/vis_python_runtime.clj") #"\n(?=\()")
+  (let [java  (line-count "src/java" ".java")
+        clj   (line-count "src/clj" ".clj")
+        forms (->> (str/split (slurp "src/clj/com/blockether/vis_python_runtime.clj") #"\n(?=\()")
                    (filter #(str/starts-with? % "(defn"))
                    (map (juxt #(first (str/split-lines %))
                               #(count (remove str/blank? (str/split-lines %))))))]

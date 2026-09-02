@@ -348,7 +348,7 @@ Phase 6 bundles nothing. The tier that was here — `packages/base.txt` and
 `packages/on-demand.txt`, installed into the vendored tree at build time — is
 gone, and both files with it: 21 MB of somebody's decision baked into an artifact
 everybody downloads and nobody can correct without a release. What replaced it is
-`src/com/blockether/vis_python_runtime/pip.clj`: installs run in a process of
+`src/clj/com/blockether/vis_python_runtime/pip.clj`: installs run in a process of
 their own into `~/.vis/python/packages`, `initialize!` appends that directory to
 `sys.path`, and an installed distribution shadows the shim of its name with no
 code change. `--only-binary=:all:` refuses an sdist, which would run its own
@@ -390,11 +390,11 @@ block already runs arbitrary Python in the session that writes it, but the
 persistence ACROSS sessions is new and wants either a host-owned warm-up pass or
 `check_hash` invalidation before this ships.
 
-The bridge is Java now, and the Clojure is an API. `java/com/blockether/vispython/`
+The bridge is Java now, and the Clojure is an API. `src/java/com/blockether/vispython/`
 holds five classes — `Interpreter` (the FFM downcalls, the pinned thread, the host
 upcall, the session helpers), `Native` (platform tags and cdylib resolution),
 `Locations` (every directory this runtime decides), `Pip`, `HostFunction` — and
-`src/com/blockether/vis_python_runtime.clj` is one namespace of one- to
+`src/clj/com/blockether/vis_python_runtime.clj` is one namespace of one- to
 three-line functions over them: argument shapes, keyword maps. The reason is
 Phase 5's verdict, not taste. In Clojure every downcall was
 `MethodHandle.invokeWithArguments` — a reflective, boxing invocation — and the

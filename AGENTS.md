@@ -13,14 +13,14 @@ docstring or a test can state lives there, not here.
   the JVM downcalls must be registered for `native-image`, so a bridge that
   reaches CPython's several-thousand-symbol API directly is unshippable.
   Same reason `clj-imaging` speaks to Rust through one flat C surface.
-- **The bridge is JAVA (`java/com/blockether/vispython/`); Clojure is the API and
+- **The bridge is JAVA (`src/java/com/blockether/vispython/`); Clojure is the API and
   nothing else.** Every downcall is an `invokeExact` against a signature the
   compiler knows, and the host upcall's target is a STATIC method found by name —
   the two shapes a GraalVM native image keeps. The same code as interop is a
   reflective invocation the image only keeps if somebody registered it, which a
   green JVM suite never catches: it fails in a user's terminal. So new bridge
   work, process pinning, the trust export and pip go in Java, and
-  `src/com/blockether/vis_python_runtime.clj` stays a skin: argument shapes,
+  `src/clj/com/blockether/vis_python_runtime.clj` stays a skin: argument shapes,
   keyword maps. A Clojure function there that is longer than three lines of
   CODE is a sign the logic belongs on the other side, and
   `vis-python-runtime-test/skin-test` fails when the ratio slips or a body grows.

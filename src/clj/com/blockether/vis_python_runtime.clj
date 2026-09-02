@@ -8,7 +8,7 @@
    ABI (`native/vispython`), so the image carries a cdylib and an interpreter
    tree beside it instead of a Truffle language inside it.
 
-   The bridge itself is JAVA — `java/com/blockether/vispython/` — and this
+   The bridge itself is JAVA — `src/java/com/blockether/vispython/` — and this
    namespace is a thin skin over it: Clojure argument shapes and keyword maps,
    and nothing else. The reason is the native image the result is linked
    into. Every downcall there is an `invokeExact` against a signature the

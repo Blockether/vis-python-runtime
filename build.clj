@@ -51,7 +51,7 @@
    function, so a consumer taking this library as a git dependency runs it with
    `clojure -X:deps prep` and never sees a source tree it cannot use."
   [_]
-  (b/javac {:src-dirs ["java"]
+  (b/javac {:src-dirs ["src/java"]
             :class-dir class-dir
             :basis @basis
             ;; The FFM calls are restricted by design and the runtime opts in
@@ -76,14 +76,14 @@
                 :lib lib
                 :version version
                 :basis @basis
-                :src-dirs ["src"]
+                :src-dirs ["src/clj"]
                 :pom-data (pom-data "Embedded CPython for the Vis sandbox — vendored per platform, reached over FFM, without Truffle.")})
   ;; No prebuilds: the cdylib belongs to the per-platform native jars. The
   ;; Python DOES ship here — a consumer that took a jar has no `resources/`
   ;; directory to point `sys.path` at — and so does the namespaced VERSION,
   ;; because a bare `VERSION` resource would collide with another library's on a
   ;; shared classpath.
-  (b/copy-dir {:src-dirs ["src"] :target-dir jar-class-dir})
+  (b/copy-dir {:src-dirs ["src/clj"] :target-dir jar-class-dir})
   (doseq [root source-roots]
     ;; SOURCE only: `__pycache__` is per-machine bytecode compiled against one
     ;; interpreter and one absolute path, and a shipped copy of it is either

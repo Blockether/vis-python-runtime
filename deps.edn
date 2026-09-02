@@ -10,7 +10,7 @@
 ;; else's binary. The cdylib is resolved at RUNTIME from VIS_PYTHON_NATIVE_PATH
 ;; or from a path the host names after unpacking the platform release archive
 ;; vis-python-runtime-<platform>-<version>.tar.gz.
-{:paths ["src" "resources" "target/classes"]
+{:paths ["src/clj" "resources" "target/classes"]
 
  ;; The bridge is Java, compiled into `target/classes`: FFM downcalls that are
  ;; `invokeExact` against a known signature, and a host upcall whose target is a
