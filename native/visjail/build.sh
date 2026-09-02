@@ -75,7 +75,8 @@ bwrap="$work/bubblewrap-$BUBBLEWRAP_VERSION"
 # Bubblewrap is an executable upstream. Compile the same sources into this
 # library with its main renamed; visjail forks once, and only the child enters
 # that function, so every spawn begins with a pristine copy of its globals.
-python3 - "$bwrap/meson.build" "$here/visjail.c" "$here/visjail.h" <<'PY'
+python3 - "$bwrap/meson.build" "$here/visjail.c" "$here/visjail.h" \
+  "$here/network_bridge.c" <<'PY'
 from pathlib import Path
 import sys
 path = Path(sys.argv[1])
@@ -92,13 +93,14 @@ shared_library(
     'chroot_realpath.c',
     'safe_openat.c',
     %r,
+    %r,
   ],
   c_args : ['-Dmain=vis_bwrap_main', '-include', %r],
   dependencies : [selinux_dep, libcap_dep],
   install : false,
 )
 
-""" % (sys.argv[2], sys.argv[3])
+""" % (sys.argv[2], sys.argv[4], sys.argv[3])
 if needle not in text:
     raise SystemExit("bubblewrap meson layout changed")
 path.write_text(text.replace(needle, target + needle, 1))

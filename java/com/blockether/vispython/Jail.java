@@ -27,7 +27,8 @@ public final class Jail {
       "visjail_spawn", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT,
           ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS,
           ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
-          ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+          ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
+          ValueLayout.ADDRESS, ValueLayout.ADDRESS,
           ValueLayout.JAVA_INT),
       "visjail_read", descriptor(ValueLayout.JAVA_INT, ValueLayout.ADDRESS,
           ValueLayout.JAVA_INT),
@@ -95,7 +96,8 @@ public final class Jail {
    */
   public static JailedProcess spawn(List<String> command, Map<String, String> environment,
       String directory, String seatbeltProfile, List<String> linuxArguments,
-      boolean confined, boolean pty, boolean mergeError, int rows, int columns) {
+      int proxyPort, int inboundPort, boolean confined, boolean pty, boolean mergeError,
+      int rows, int columns) {
     if (command == null || command.isEmpty()) {
       throw new IllegalArgumentException("command must not be empty");
     }
@@ -122,7 +124,7 @@ public final class Jail {
       MemorySegment.copy(argvBytes, 0, argv, ValueLayout.JAVA_BYTE, 0, argvBytes.length);
       MemorySegment.copy(envBytes, 0, envp, ValueLayout.JAVA_BYTE, 0, envBytes.length);
       int status = (int) handle.invokeExact(argv, argvBytes.length, envp, envBytes.length,
-          cwd, profile, flags, rows, columns, result, error, ERROR_CAPACITY);
+          cwd, profile, flags, rows, columns, proxyPort, inboundPort, result, error, ERROR_CAPACITY);
       if (status != 0) {
         throw new VisPythonException("Could not spawn confined process: " + error.getString(0),
             Map.of("status", status, "command", command.get(0)));

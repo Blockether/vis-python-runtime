@@ -97,13 +97,17 @@
   "Spawn `command` as a detached process through `libvisjail`, returning a
    `java.lang.Process`. Confinement defaults on: macOS then requires
    `:seatbelt-profile`; Linux takes `:linux-arguments`, bubblewrap policy flags
-   ending in `--`. `:environment` is the COMPLETE child environment. Setting
-   `:confined? false` keeps process-group and stream handling but applies no jail."
+   ending in `--`. `:proxy-port` and `:inbound-port` give a confined Linux child
+   only those loopback crossings while libvisjail owns its private network namespace.
+   `:environment` is the COMPLETE child environment. Setting `:confined? false`
+   keeps process-group and stream handling but applies no jail."
   ([command] (spawn-process! command {}))
-  ([command {:keys [environment directory seatbelt-profile linux-arguments confined? pty? merge-stderr? rows columns]
+  ([command {:keys [environment directory seatbelt-profile linux-arguments proxy-port inbound-port
+                    confined? pty? merge-stderr? rows columns]
              :or {confined? true}}]
    (Jail/spawn (vec command) (or environment {}) directory seatbelt-profile
-               (vec linux-arguments) (boolean confined?) (boolean pty?) (boolean merge-stderr?)
+               (vec linux-arguments) (int (or proxy-port 0)) (int (or inbound-port 0))
+               (boolean confined?) (boolean pty?) (boolean merge-stderr?)
                (int (or rows 0)) (int (or columns 0)))))
 
 (defn resolve-packages-dir

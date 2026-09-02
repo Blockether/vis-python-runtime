@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #if defined(__linux__)
+#include "network_bridge.h"
 #include <sys/syscall.h>
 #endif
 #include <sys/types.h>
@@ -172,7 +173,8 @@ int
 visjail_spawn(const char *argv_blob, int argv_len,
               const char *env_blob, int env_len,
               const char *cwd, const char *profile,
-              int flags, int rows, int cols,
+               int flags, int rows, int cols,
+               int proxy_port, int inbound_port,
               int result[VISJAIL_RESULT_COUNT],
               char *error, int error_cap)
 {
@@ -207,6 +209,23 @@ visjail_spawn(const char *argv_blob, int argv_len,
       free_items(argv);
       return answer_error(error, error_cap, "environment blob is invalid");
     }
+  if (proxy_port < 0 || proxy_port > 65535 || inbound_port < 0 || inbound_port > 65535)
+    {
+      free_items(argv);
+      free_items(env);
+      return answer_error(error, error_cap, "network bridge ports must be between 0 and 65535");
+    }
+#if defined(__linux__)
+  if (confined && (proxy_port > 0 || inbound_port > 0))
+    for (int i = 0; i < argc; i++)
+      if (strcmp(argv[i], "--unshare-net") == 0)
+        {
+          free_items(argv);
+          free_items(env);
+          return answer_error(error, error_cap,
+                              "network bridge owns the namespace; remove --unshare-net");
+        }
+#endif
 
   if (use_pty)
     {
@@ -244,16 +263,17 @@ visjail_spawn(const char *argv_blob, int argv_len,
               dup2(merge_error ? output[1] : errors[1], STDERR_FILENO) < 0)
             child_fail("dup2 pipe");
         }
-      close_from_three();
       install_environment(env);
       if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0)
         child_fail("chdir");
       if (!confined)
         {
+          close_from_three();
           execvp(argv[0], argv);
           child_fail("execvp");
         }
 #if defined(__APPLE__)
+      close_from_three();
       {
         char *sandbox_error = NULL;
         if (profile == NULL || profile[0] == '\0')
@@ -273,7 +293,7 @@ visjail_spawn(const char *argv_blob, int argv_len,
       }
 #else
       (void) profile;
-      _exit(vis_bwrap_main(argc, argv));
+      _exit(visjail_linux_bridge_run(argv, argc, proxy_port, inbound_port));
 #endif
     }
 

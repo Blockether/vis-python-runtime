@@ -6,6 +6,7 @@
             [clojure.test :refer [deftest is testing]]
             [com.blockether.vis-python-runtime :as runtime])
   (:import
+   [java.net InetAddress ServerSocket]
    [java.nio.file Files Path]
    [java.nio.file.attribute FileAttribute]
    [java.util.concurrent TimeUnit]))
@@ -16,27 +17,35 @@
 
 (defn- macos? [] (= "Mac OS X" (System/getProperty "os.name")))
 
-(defn- seatbelt-profile [^Path root]
-  (let [ancestors (take-while some? (iterate #(.getParent ^Path %) root))
-        literals (apply str (map #(str "(literal \"" % "\")") ancestors))]
-    (str "(version 1)(import \"system.sb\")(deny default)"
-         "(allow process-fork process-exec)(allow sysctl-read)(allow ipc-posix-sem)"
-         "(allow file-read-metadata" literals "(subpath \"" root "\"))"
-         "(allow file-read* (subpath \"/usr\") (subpath \"/bin\")"
-         " (subpath \"/System\") (subpath \"/Library\")"
-         " (subpath \"/private/etc\") (subpath \"/private/var/select\")"
-         " (subpath \"/opt/homebrew\") (subpath \"/usr/local\")"
-         " (literal \"/dev/null\") (literal \"/dev/urandom\"))"
-         "(allow file-write* (subpath \"" root "\")"
-         " (literal \"/dev/null\") (literal \"/dev/tty\")"
-         " (literal \"/dev/stdout\") (literal \"/dev/stderr\"))"
-         "(allow file-ioctl)(deny network*)")))
+(defn- seatbelt-profile
+  ([^Path root] (seatbelt-profile root nil))
+  ([^Path root proxy-port]
+   (let [ancestors (take-while some? (iterate #(.getParent ^Path %) root))
+         literals (apply str (map #(str "(literal \"" % "\")") ancestors))]
+     (str "(version 1)(import \"system.sb\")(deny default)"
+          "(allow process-fork process-exec)(allow sysctl-read)(allow ipc-posix-sem)"
+          "(allow file-read-metadata" literals "(subpath \"" root "\"))"
+          "(allow file-read* (subpath \"/usr\") (subpath \"/bin\")"
+          " (subpath \"/System\") (subpath \"/Library\")"
+          " (subpath \"/private/etc\") (subpath \"/private/var/select\")"
+          " (subpath \"/opt/homebrew\") (subpath \"/usr/local\")"
+          " (literal \"/dev/null\") (literal \"/dev/urandom\"))"
+          "(allow file-write* (subpath \"" root "\")"
+          " (literal \"/dev/null\") (literal \"/dev/tty\")"
+          " (literal \"/dev/stdout\") (literal \"/dev/stderr\"))"
+          "(allow file-ioctl)(deny network*)"
+          (when proxy-port
+            (str "(allow network-outbound (remote ip \"localhost:" proxy-port "\"))"))))))
 
-(defn- linux-arguments [^Path root]
-  (vec (concat ["--die-with-parent" "--proc" "/proc" "--dev" "/dev"]
-               (mapcat #(vector "--ro-bind-try" % %)
-                       ["/usr" "/bin" "/sbin" "/lib" "/lib64" "/etc"])
-               ["--bind" (str root) (str root) "--unshare-net" "--"])))
+(defn- linux-arguments
+  ([^Path root] (linux-arguments root false))
+  ([^Path root bridged?]
+   (vec (concat ["--die-with-parent" "--proc" "/proc" "--dev" "/dev"]
+                (mapcat #(vector "--ro-bind-try" % %)
+                        ["/usr" "/bin" "/sbin" "/lib" "/lib64" "/etc"])
+                ["--bind" (str root) (str root)]
+                (when-not bridged? ["--unshare-net"])
+                ["--"]))))
 
 (defn- options [^Path root & [extra]]
   (merge {:environment {"PATH" "/usr/bin:/bin" "HOME" (str root)
@@ -52,6 +61,9 @@
         err (future (slurp (.getErrorStream p)))
         exit (.waitFor p)]
     {:exit exit :out @out :err @err}))
+
+(defn- loopback-server ^ServerSocket []
+  (ServerSocket. 0 8 (InetAddress/getLoopbackAddress)))
 
 (deftest pipes-environment-and-seatbelt-or-bubblewrap-test
   (let [root (temp-dir)
@@ -82,6 +94,40 @@
           (is (not (.isAlive p)))))
       (finally
         (when (.exists outside) (io/delete-file outside true))
+        (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))
+
+(deftest filtered-egress-crosses-only-the-native-loopback-bridge-test
+  (let [root (temp-dir)
+        allowed (loopback-server)
+        denied (loopback-server)
+        allowed-port (.getLocalPort allowed)
+        denied-port (.getLocalPort denied)
+        responder (future
+                    (with-open [socket (.accept allowed)
+                                ^java.io.BufferedReader reader (io/reader (.getInputStream socket))
+                                writer (io/writer (.getOutputStream socket))]
+                      (when (= "ping" (.readLine reader))
+                        (.write writer "pong\n")
+                        (.flush writer))))]
+    (try
+      (let [script (str "exec 3<>/dev/tcp/127.0.0.1/" allowed-port "\n"
+                        "printf 'ping\\n' >&3\n"
+                        "IFS= read -r reply <&3\n"
+                        "if exec 4<>/dev/tcp/127.0.0.1/" denied-port " 2>/dev/null; "
+                        "then printf '%s:escaped' \"$reply\"; "
+                        "else printf '%s:blocked' \"$reply\"; fi")
+            opts (assoc (options root)
+                        :proxy-port allowed-port
+                        :seatbelt-profile (when (macos?) (seatbelt-profile root allowed-port))
+                        :linux-arguments (when-not (macos?) (linux-arguments root true)))
+            result (run-process ["/bin/bash" "-c" script] opts)]
+        (is (= 0 (:exit result)) (:err result))
+        (is (= "pong:blocked" (:out result))
+            "the configured loopback bridge is reachable, every other host socket is not")
+        @responder)
+      (finally
+        (.close allowed)
+        (.close denied)
         (doseq [file (reverse (file-seq (.toFile root)))] (io/delete-file file true))))))
 
 (deftest pty-round-trip-test

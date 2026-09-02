@@ -87,6 +87,8 @@
           "jint",
           "jint",
           "jint",
+          "jint",
+          "jint",
           "void*",
           "void*",
           "jint"

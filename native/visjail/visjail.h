@@ -17,12 +17,16 @@ int vis_bwrap_main(int argc, char **argv);
  * the supplied Seatbelt profile on macOS; without it the child execs directly.
  * argv_blob and env_blob are NUL-separated UTF-8 strings. A confined Linux
  * argv is bubblewrap's complete argv (argv[0], policy flags, --, command).
- * result receives pid, stdin-write, stdout-read and stderr-read.
+ * proxy_port and inbound_port create a private Linux network namespace whose only
+ * host crossings are those two loopback endpoints; the argv must then omit
+ * --unshare-net because libvisjail owns that namespace. Result receives pid,
+ * stdin-write, stdout-read and stderr-read.
  */
 int visjail_spawn(const char *argv_blob, int argv_len,
                               const char *env_blob, int env_len,
                               const char *cwd, const char *profile,
-                              int flags, int rows, int cols,
+                               int flags, int rows, int cols,
+                               int proxy_port, int inbound_port,
                               int result[VISJAIL_RESULT_COUNT],
                               char *error, int error_cap);
 int visjail_read(int fd, void *buffer, int length);
