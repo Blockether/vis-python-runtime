@@ -45,6 +45,52 @@
           "void*",
           "jint"
         ]
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "jint"
+        ]
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "jint",
+          "jint"
+        ]
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "jint",
+          "jint",
+          "void*"
+        ]
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "jint",
+          "void*",
+          "jint"
+        ]
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "void*",
+          "jint",
+          "void*",
+          "jint",
+          "void*",
+          "void*",
+          "jint",
+          "jint",
+          "jint",
+          "void*",
+          "void*",
+          "jint"
+        ]
       }
     ],
     "upcalls": [

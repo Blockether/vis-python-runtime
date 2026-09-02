@@ -26,18 +26,15 @@
         (runtime/use-library! (str lib))
         (is (= {:source :configured :path (str lib)} (runtime/resolve-library)))
         (finally (runtime/use-library! nil)))))
-  (testing "the Linux enforcer resolves only beside the selected artifact and only when executable"
-    (let [dir  (temp-dir "vis-native-bwrap")
-          lib  (io/file (str dir) (runtime/library-name "linux-x64"))
-          tool (io/file (str dir) "bin/bwrap")]
+  (testing "the process enforcer is a sibling cdylib, never a PATH lookup"
+    (let [dir  (temp-dir "vis-native-jail")
+          lib  (io/file (str dir) (runtime/library-name))
+          jail (io/file (str dir) (if (= "Mac OS X" (System/getProperty "os.name"))
+                                    "libvisjail.dylib" "libvisjail.so"))]
       (spit lib "cdylib")
-      (is (nil? (runtime/resolve-bubblewrap {:path (str lib)})))
-      (io/make-parents tool)
-      (spit tool "bwrap")
-      (.setExecutable tool true)
-      (is (= (.getAbsolutePath tool) (runtime/resolve-bubblewrap {:path (str lib)})))
-      (.setExecutable tool false)
-      (is (nil? (runtime/resolve-bubblewrap {:path (str lib)})))))
+      (is (nil? (runtime/resolve-jail {:path (str lib)})))
+      (spit jail "cdylib")
+      (is (= (.getAbsolutePath jail) (runtime/resolve-jail {:path (str lib)})))))
   (testing "a named path that holds no library is a refusal naming it"
     (try
       (runtime/use-library! (str (temp-dir "vis-native-empty")))

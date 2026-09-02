@@ -13,7 +13,7 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]])
-  (:import [com.blockether.vispython Interpreter Sources]
+  (:import [com.blockether.vispython Interpreter Jail Sources]
            [java.lang.foreign FunctionDescriptor MemoryLayout]))
 
 (def ^:private metadata-file
@@ -37,10 +37,9 @@
    "parameterTypes" (mapv token (.argumentLayouts descriptor))})
 
 (defn- boundary
-  "A private static field of `Interpreter` — the boundary IS private, and reading
-   it is what keeps this test from restating it."
-  [field-name]
-  (let [field (.getDeclaredField Interpreter field-name)]
+  "A private static boundary field, read rather than restated by this test."
+  [^Class owner field-name]
+  (let [^java.lang.reflect.Field field (.getDeclaredField owner field-name)]
     (.setAccessible field true)
     (.get field nil)))
 
@@ -57,13 +56,15 @@
     (is (seq (declared "downcalls"))))
 
   (testing "every downcall shape in SIGNATURES is declared"
-    (let [shapes (into (sorted-set) (map (comp pr-str shape)) (vals (boundary "SIGNATURES")))
+    (let [shapes (into (sorted-set) (map (comp pr-str shape))
+                       (concat (vals (boundary Interpreter "SIGNATURES"))
+                               (vals (boundary Jail "SIGNATURES"))))
           have (into (sorted-set) (map pr-str) (declared "downcalls"))]
       (is (empty? (remove have shapes))
           (str "undeclared downcall shapes: " (pr-str (remove have shapes))))))
 
   (testing "the host upcall stub is declared"
-    (is (contains? (declared "upcalls") (shape (boundary "HOST_DESCRIPTOR"))))))
+    (is (contains? (declared "upcalls") (shape (boundary Interpreter "HOST_DESCRIPTOR"))))))
 
 (deftest the-python-this-library-reads-is-declared-as-a-resource-test
   (testing "the source manifest is a declared resource"

@@ -13,10 +13,10 @@
 
 (def lib 'com.blockether/vis-python-runtime)
 (def native-platforms #{"linux-x64" "linux-arm64" "darwin-arm64" "darwin-x64"})
-(def native-libs {"linux-x64"    "libvispython.so"
-                  "linux-arm64"  "libvispython.so"
-                  "darwin-arm64" "libvispython.dylib"
-                  "darwin-x64"   "libvispython.dylib"})
+(def native-libs {"linux-x64"    ["libvispython.so" "libvisjail.so"]
+                  "linux-arm64"  ["libvispython.so" "libvisjail.so"]
+                  "darwin-arm64" ["libvispython.dylib" "libvisjail.dylib"]
+                  "darwin-x64"   ["libvispython.dylib" "libvisjail.dylib"]})
 
 (def version
   "The repo-root VIS_PYTHON_VERSION file, verbatim — the single version source,
@@ -113,29 +113,22 @@
 
 (defn platform-archive
   "Write the release asset for one platform: everything under
-   `resources/prebuilds/<platform>/` — the cdylib and vendored interpreter plus
-   the private `bin/bwrap` process enforcer on Linux — as a gzipped tar. Contents
-   sit at the archive root, so unpacking into a directory yields exactly the tree
-   `Locations/pythonHome` and `Locations/bubblewrap` expect.
-
-   `tar` rather than a jar or zip preserves the interpreter's symlinks and
-   executable bits. Linux archives fail closed unless `bin/bwrap` exists and is
-   executable."
+   `resources/prebuilds/<platform>/` — both cdylibs and the vendored interpreter
+   — as a gzipped tar. `libvispython` embeds CPython; `libvisjail` embeds upstream
+   bubblewrap on Linux and enters Seatbelt on macOS. Contents sit at the archive
+   root, exactly where `Locations` resolves them. `tar` preserves the interpreter's
+   symlinks and executable bits."
   [{:keys [platform]}]
   (let [platform (some-> platform name)]
     (when-not (native-platforms platform)
       (throw (ex-info (str "Unknown native platform: " platform) {:platform platform :known native-platforms})))
-    (let [dir      (io/file "resources/prebuilds" platform)
-          src      (io/file dir (native-libs platform))
-          enforcer (io/file dir "bin" "bwrap")
-          out      (io/file (format "target/%s-%s-%s.tar.gz" (name lib) platform version))]
-      (when-not (.exists src)
-        (throw (ex-info (str "runtime cdylib not found (build native/vispython first): " src)
-                        {:platform platform :path (str src)})))
-      (when (and (str/starts-with? platform "linux-")
-                 (not (and (.isFile enforcer) (.canExecute enforcer))))
-        (throw (ex-info (str "Linux runtime has no executable private bubblewrap: " enforcer)
-                        {:platform platform :path (str enforcer)})))
+    (let [dir  (io/file "resources/prebuilds" platform)
+          libs (mapv #(io/file dir %) (native-libs platform))
+          out  (io/file (format "target/%s-%s-%s.tar.gz" (name lib) platform version))]
+      (doseq [src libs]
+        (when-not (.isFile src)
+          (throw (ex-info (str "runtime cdylib not found (build native/vispython first): " src)
+                          {:platform platform :path (str src)}))))
       (b/delete {:path (str out)})
       (io/make-parents out)
       ;; SOURCE only, as in the jar: `__pycache__` is bytecode compiled against

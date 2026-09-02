@@ -68,19 +68,16 @@ public final class Locations {
     return Files.isDirectory(vendored) ? vendored.toString() : null;
   }
 
-  /**
-   * The private Linux process-jail enforcer beside the resolved cdylib.
-   *
-   * <p>Linux platform archives carry {@code bin/bwrap} at their root. Returning
-   * null for an incomplete archive is deliberate: a host must fail closed rather
-   * than resolve an unrelated executable from {@code PATH}.
-   */
-  public static String bubblewrap(String libraryPath) {
+  /** The process-jail cdylib beside the resolved CPython cdylib, or null. */
+  public static String jail(String libraryPath) {
     if (libraryPath == null) {
       return null;
     }
-    Path candidate = Path.of(libraryPath).toAbsolutePath().getParent().resolve("bin/bwrap");
-    return Files.isRegularFile(candidate) && Files.isExecutable(candidate) ? candidate.toString() : null;
+    Path root = Path.of(libraryPath).toAbsolutePath().getParent();
+    String name = Native.platform().startsWith("darwin-")
+        ? "libvisjail.dylib" : "libvisjail.so";
+    Path candidate = root.resolve(name);
+    return Files.isRegularFile(candidate) ? candidate.toString() : null;
   }
 
   /**

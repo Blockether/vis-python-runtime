@@ -38,6 +38,7 @@ if [ "${VIS_PYTHON_SYSTEM:-0}" = "1" ]; then
      -o "$out/$lib" \
      "$here/vispython.c" \
      $($pycfg --ldflags --embed)
+  "$repo/native/visjail/build.sh"
   echo "$out/$lib"
   exit 0
 fi
@@ -86,8 +87,6 @@ cc -O2 -fPIC -shared -pthread -Wall -Wextra \
    -L"$home/lib" -lpython"$minor" \
    -Wl,-rpath,"$rpath"
 
-if [ "$os" = linux ]; then
-  "$repo/native/bubblewrap/build.sh"
-fi
+"$repo/native/visjail/build.sh"
 
 echo "$out/$lib"

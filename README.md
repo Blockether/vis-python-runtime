@@ -18,10 +18,10 @@ CPython's own speed.
 
 ## Shape
 
-    java/                   the bridge: FFM downcalls, the host upcall, pip
-    src/                    the Clojure API over it, and nothing else
+    java/                   FFM bridges: CPython, process jail, pip
+    src/                    the Clojure API over them, and nothing else
     native/vispython/       the C shim + the CPython vendoring build
-    native/bubblewrap/      the static Linux process-enforcer build
+    native/visjail/         the process ABI: bubblewrap / Seatbelt
     resources/vispython/    the guest half of the boundary (`vis_runtime.py`)
     resources/vis-python/   Vis' sandbox modules, mirrored byte for byte
     resources/prebuilds/    build output per platform (git-ignored)
@@ -31,9 +31,11 @@ Nothing is published to Clojars. Consumers take the JVM API directly from a
 release commit as a tools.deps git dependency; each tagged GitHub Release also
 carries the convenience jar and the complete
 `vis-python-runtime-<platform>-<version>.tar.gz` archives. Vis downloads the one
-archive for its platform, unpacks it and names the selected cdylib with
-`runtime/use-library!`. Every Linux archive includes its own static `bin/bwrap`;
-`resolve-bubblewrap` finds it beside that cdylib and never searches `PATH`.
+archive for its platform, unpacks it and names the installation with
+`runtime/use-library!`. Every archive carries adjacent `libvispython` and
+`libvisjail` cdylibs. The latter compiles upstream bubblewrap into the library on
+Linux and enters the operating system's Seatbelt policy on macOS; neither backend
+uses `PATH` or requires a separately installed enforcer.
 
 ```clojure
 {:deps

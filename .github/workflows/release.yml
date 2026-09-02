@@ -28,7 +28,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential binutils linux-libc-dev meson musl-tools ninja-build pkg-config
+          sudo apt-get install -y build-essential binutils linux-libc-dev meson ninja-build pkg-config
       - uses: actions/setup-java@v5
         with:
           distribution: temurin

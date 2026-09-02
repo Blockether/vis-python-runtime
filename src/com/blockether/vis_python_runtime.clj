@@ -27,7 +27,7 @@
    unpacked one names it here. A failure anywhere below is a
    `VisPythonException` whose `.data`
    names the symbol, status, platform or path it is about."
-  (:import [com.blockether.vispython HostFunction Interpreter Locations Native Pip]
+  (:import [com.blockether.vispython HostFunction Interpreter Jail Locations Native Pip]
            [java.util.function Consumer]))
 
 (def native-path-env
@@ -88,11 +88,23 @@
   ([] (Interpreter/pythonHome))
   ([{:keys [path]}] (Locations/pythonHome path)))
 
-(defn resolve-bubblewrap
-  "The private static `bwrap` shipped beside a Linux runtime, or nil when this
-   platform artifact carries no Linux enforcer. Never searches `PATH`."
-  ([] (resolve-bubblewrap (resolve-library)))
-  ([{:keys [path]}] (Locations/bubblewrap path)))
+(defn resolve-jail
+  "The `libvisjail` cdylib beside the selected CPython cdylib, or nil."
+  ([] (resolve-jail (resolve-library)))
+  ([{:keys [path]}] (Locations/jail path)))
+
+(defn spawn-process!
+  "Spawn `command` as a detached process through `libvisjail`, returning a
+   `java.lang.Process`. Confinement defaults on: macOS then requires
+   `:seatbelt-profile`; Linux takes `:linux-arguments`, bubblewrap policy flags
+   ending in `--`. `:environment` is the COMPLETE child environment. Setting
+   `:confined? false` keeps process-group and stream handling but applies no jail."
+  ([command] (spawn-process! command {}))
+  ([command {:keys [environment directory seatbelt-profile linux-arguments confined? pty? merge-stderr? rows columns]
+             :or {confined? true}}]
+   (Jail/spawn (vec command) (or environment {}) directory seatbelt-profile
+               (vec linux-arguments) (boolean confined?) (boolean pty?) (boolean merge-stderr?)
+               (int (or rows 0)) (int (or columns 0)))))
 
 (defn resolve-packages-dir
   "Where pip installs for the sandbox, `~/.vis/python/packages` by default. The

@@ -458,15 +458,16 @@ comes back through the guarded socket as `vis: network host … is blocked`.
 Neither package knows this library exists; the guards are the interpreter's.
 Suite: 141 tests / 638 assertions.
 
-Phase 5 now owns the Linux enforcement binary as part of the SAME platform
-artifact. `.bubblewrap-version` pins bubblewrap 0.12.0 and libcap 2.75 with source
-hashes; `native/bubblewrap/build.sh` links them statically against musl, carries
-their license notices, rejects dynamic linkage and executes a real user/mount
-namespace before accepting the result. The archive task refuses a Linux tree
-without executable `bin/bwrap`, and `Locations.bubblewrap` resolves only that
-adjacent file — never `PATH`. Measured on Ubuntu 24.04 x86-64 with no system
-bubblewrap: the shipped 161,728-byte binary wrote the allowed workspace, refused
-`/root`, and could neither resolve nor connect to the network.
+Phase 5 now owns process enforcement as a SECOND native library in the SAME
+platform artifact. `.bubblewrap-version` pins bubblewrap 0.12.0 and libcap 2.75
+with source hashes; `native/visjail/build.sh` compiles upstream bubblewrap into
+`libvisjail.so` and statically links libcap. On macOS the same ABI enters the
+system Seatbelt profile. Java sees one spawn/read/write/poll/wait/kill boundary,
+not an enforcer executable or its argv, and the child starts as its own process
+group with pipes or a PTY. The archive task refuses a tree missing either cdylib.
+Measured on macOS arm64 and Ubuntu 24.04 x86-64: the library wrote only the
+allowed workspace, refused an outside path, and restored stdout, stderr, env,
+exit status, PTY geometry and group termination.
 
 Phase 5 now has its AUTOMATION rather than a manual recipe. CI builds and tests
 linux-x64, linux-arm64, darwin-arm64 and darwin-x64 against their real native

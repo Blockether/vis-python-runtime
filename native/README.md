@@ -24,12 +24,13 @@ are built with LTO by a newer LLVM than Apple's linker reads), so a static
 `libpython3.14.a` does NOT link with the system toolchain. The vendored shared
 library is the supported path, and it is self-contained all the same.
 
-Linux builds also run `bubblewrap/build.sh`. It pins bubblewrap and libcap,
-links both into one static musl executable, and puts it at `bin/bwrap` in the
-same platform tree. The artifact therefore borrows neither a system `bwrap`
-nor its libc. Building it requires `musl-tools`, Meson, Ninja, pkg-config and
-Linux UAPI headers; the script verifies both source hashes and executes a real
-namespace before accepting the binary.
+`visjail/build.sh` produces the second cdylib in every platform tree. On Linux
+it hash-pins bubblewrap and libcap, compiles the upstream bubblewrap sources into
+`libvisjail.so`, and statically links libcap; libc is the only host ABI and there
+is no `bwrap` executable or package lookup. On macOS the same ABI forks a child,
+enters the supplied system Seatbelt profile with `sandbox_init`, and execs the
+command. In both cases the JVM calls one spawn/read/write/wait/kill surface and
+never assembles an enforcer command.
 
 Consumers get the whole tree from the per-platform archive built with
 `clojure -T:build platform-archive :platform <tag>`.

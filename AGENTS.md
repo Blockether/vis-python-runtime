@@ -38,9 +38,10 @@ docstring or a test can state lives there, not here.
   as the GitHub release asset `vis-python-runtime-<platform>-<version>.tar.gz`
   built by `clojure -T:build platform-archive :platform <tag>`, NEVER as a maven
   artifact: the tree is tens of megabytes, past what Clojars accepts, and a jar
-  carries neither symlinks nor execute bits an interpreter needs. Every Linux
-  tree also carries its pinned, static process enforcer at `bin/bwrap`; consumers
-  resolve that adjacent file and NEVER search `PATH` or require a system package.
+  carries neither symlinks nor execute bits an interpreter needs. Every tree also
+  carries `libvisjail` beside `libvispython`: upstream bubblewrap is compiled into
+  the Linux cdylib and the macOS cdylib enters the system Seatbelt policy. Consumers
+  never search `PATH` or require a separately installed enforcer.
 - **The repo-root `VIS_PYTHON_VERSION` file is the single version source**, the
   same convention as vis' `VIS_VERSION`: verbatim, no env override, no snapshot
   suffix. The build writes it into the jar as the NAMESPACED resource
