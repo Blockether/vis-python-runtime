@@ -26,9 +26,11 @@ docstring or a test can state lives there, not here.
   `vis-python-runtime-test/skin-test` fails when the ratio slips or a body grows.
   Java is compiled by
   `clojure -T:build javac` into `target/classes`, which is on `:paths`.
-- **No runtime dependencies in `deps.edn`.** This library is linked into someone
-  else's GraalVM native image; every dependency declared here becomes reachable
-  code in their binary. Keep `:deps {}`.
+- **No runtime dependencies in `deps.edn`, and no Clojars deployment.** This
+  library is linked into someone else's GraalVM native image; every dependency
+  declared here becomes reachable code in their binary. Consumers pin a release
+  commit as a tools.deps git dependency; tags publish the JVM jar and all native
+  archives only as GitHub Release assets.
 - **Nothing links at build time.** The cdylib is resolved when first needed
   (`VIS_PYTHON_NATIVE_PATH`, then the per-platform classpath resource). Never
   `System/loadLibrary` against a fixed path or a bundled absolute location.

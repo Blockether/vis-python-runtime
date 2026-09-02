@@ -27,18 +27,19 @@ CPython's own speed.
     resources/prebuilds/    build output per platform (git-ignored)
     test/                   clojure -T:build javac && clojure -M:test
 
-The jar carries no native payload. It resolves a runtime tree at runtime from a
-path the host names (`runtime/use-library!`), else `VIS_PYTHON_NATIVE_PATH`, else
-the classpath resource `prebuilds/<platform>/<file>` a built checkout has. The
-published platform artifact is the release asset
-`vis-python-runtime-<platform>-<version>.tar.gz`, unpacked by its consumer. Every
-Linux artifact includes its own static `bin/bwrap`; `resolve-bubblewrap` finds it
-beside the selected cdylib and never searches `PATH`.
+Nothing is published to Clojars. Consumers take the JVM API directly from a
+release commit as a tools.deps git dependency; each tagged GitHub Release also
+carries the convenience jar and the complete
+`vis-python-runtime-<platform>-<version>.tar.gz` archives. Vis downloads the one
+archive for its platform, unpacks it and names the selected cdylib with
+`runtime/use-library!`. Every Linux archive includes its own static `bin/bwrap`;
+`resolve-bubblewrap` finds it beside that cdylib and never searches `PATH`.
 
 ```clojure
-(require '[com.blockether.vis-python-runtime :as runtime])
-(runtime/platform)         ;=> "darwin-arm64"
-(runtime/resolve-library)  ;=> {:source :env :path "/…/libvispython.dylib"}
+{:deps
+ {com.blockether/vis-python-runtime
+  {:git/url "https://github.com/Blockether/vis-python-runtime.git"
+   :git/sha "<release-commit>"}}}
 ```
 
 ## Status

@@ -1,0 +1,86 @@
+name: GitHub Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  native:
+    name: package ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x64,    os: ubuntu-24.04,     jdk-arch: x64 }
+          - { platform: linux-arm64,  os: ubuntu-24.04-arm, jdk-arch: aarch64 }
+          - { platform: darwin-arm64, os: macos-14,         jdk-arch: aarch64 }
+          - { platform: darwin-x64,   os: macos-13,         jdk-arch: x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify tag matches VIS_PYTHON_VERSION
+        shell: bash
+        run: test "v$(tr -d '\r\n' < VIS_PYTHON_VERSION)" = "$GITHUB_REF_NAME"
+      - name: Install Linux native build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential binutils linux-libc-dev meson musl-tools ninja-build pkg-config
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          architecture: ${{ matrix.jdk-arch }}
+      - uses: DeLaGuardo/setup-clojure@13.6.1
+        with:
+          cli: latest
+      - name: Build and verify the complete runtime
+        run: |
+          native/vispython/build.sh
+          clojure -T:build javac
+          clojure -M:test
+          clojure -T:build platform-archive :platform '${{ matrix.platform }}'
+          scripts/verify-platform-archive.sh '${{ matrix.platform }}'
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.platform }}
+          path: target/vis-python-runtime-${{ matrix.platform }}-*.tar.gz
+          if-no-files-found: error
+
+  jar:
+    name: package JVM API
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify tag matches VIS_PYTHON_VERSION
+        run: test "v$(tr -d '\r\n' < VIS_PYTHON_VERSION)" = "$GITHUB_REF_NAME"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: DeLaGuardo/setup-clojure@13.6.1
+        with:
+          cli: latest
+      - run: clojure -T:build jar
+      - uses: actions/upload-artifact@v6
+        with:
+          name: jvm-api
+          path: target/vis-python-runtime-*.jar
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub Release assets
+    needs: [native, jar]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: release-assets/*
+          generate_release_notes: true

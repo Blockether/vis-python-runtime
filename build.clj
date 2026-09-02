@@ -1,27 +1,22 @@
 (ns build
-  "Build/deploy for vis-python-runtime. The `com.blockether/vis-python-runtime`
-   jar is small — the Java bridge, one namespace, and the Python the runtime
-   executes.
+  "Build/package tasks for vis-python-runtime. The small JVM API jar and every
+   complete per-platform runtime are GitHub Release assets; nothing is published
+   to Clojars or another Maven repository.
 
-   The vendored CPython does NOT ship as a maven artifact. A platform tree is
-   tens of megabytes, past what Clojars accepts, and a jar carries neither
-   symlinks nor permission bits — an unpacked interpreter would be broken.
-   `platform-archive` writes `target/vis-python-runtime-<platform>-<version>.tar.gz`
-   from `resources/prebuilds/<platform>/`, and those tarballs are the assets of
-   the `v<version>` GitHub release. A consumer downloads one for its platform,
-   unpacks it and points the runtime at the result with `runtime/use-library!`."
+   The vendored CPython tree cannot live in a jar: it is tens of megabytes and
+   needs symlinks and executable bits. `platform-archive` therefore writes
+   `target/vis-python-runtime-<platform>-<version>.tar.gz`; a consumer downloads
+   one release asset, unpacks it and calls `runtime/use-library!`."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.tools.build.api :as b]
-            [deps-deploy.deps-deploy :as dd]))
+            [clojure.tools.build.api :as b]))
 
 (def lib 'com.blockether/vis-python-runtime)
-(def native-platforms #{"linux-x64" "linux-arm64" "darwin-arm64" "darwin-x64" "windows-x64"})
+(def native-platforms #{"linux-x64" "linux-arm64" "darwin-arm64" "darwin-x64"})
 (def native-libs {"linux-x64"    "libvispython.so"
                   "linux-arm64"  "libvispython.so"
                   "darwin-arm64" "libvispython.dylib"
-                  "darwin-x64"   "libvispython.dylib"
-                  "windows-x64"  "vispython.dll"})
+                  "darwin-x64"   "libvispython.dylib"})
 
 (def version
   "The repo-root VIS_PYTHON_VERSION file, verbatim — the single version source,
@@ -153,12 +148,3 @@
           (throw (ex-info "tar failed" {:platform platform :exit exit}))))
       (println "Built:" (str out) (format "(%.1f MB)" (/ (.length out) 1048576.0)))
       (str out))))
-
-(defn deploy [_]
-  (jar nil)
-  (dd/deploy {:installer :remote :artifact jar-file :pom-file (b/pom-path {:lib lib :class-dir jar-class-dir})}))
-
-(defn install [_]
-  (jar nil)
-  (dd/deploy {:installer :local :artifact jar-file :pom-file (b/pom-path {:lib lib :class-dir jar-class-dir})}))
-
