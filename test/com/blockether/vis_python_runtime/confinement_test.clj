@@ -147,3 +147,40 @@
                                             (str "import subprocess\n"
                                                  "print(subprocess.run(['/bin/echo', 'hi'],"
                                                  " capture_output=True).stdout.decode().strip())"))))))))))
+
+(harness/defbuilt-test concurrent-confinement-test
+  ;; The policy is PROCESS state and the host sets it from whatever thread it
+  ;; happens to be on, while the audit hook reads it from whatever thread the
+  ;; guest is on. Replacing it used to free the very roots a hook was comparing:
+  ;; SIGSEGV inside `strcmp`, reported from a gateway that confined two sessions
+  ;; at once on macOS arm64. So this case does not assert a refusal, it asserts
+  ;; the PROCESS is still alive — a regression here does not fail, it aborts the
+  ;; JVM — and that the policy standing at the end is the one set last.
+  (let [inside   (temp-dir "vis-concurrent-inside")
+        outside  (temp-dir "vis-concurrent-outside")
+        sessions (mapv (fn [_] (harness/block-session)) (range 4))
+        stop     (atom false)
+        readers  (mapv (fn [session]
+                         (Thread/startVirtualThread
+                           (fn []
+                             (while (not @stop)
+                               (block session (str "import os\nos.listdir('" inside "')"))))))
+                       sessions)
+        writers  (mapv (fn [i]
+                         (Thread/startVirtualThread
+                           (fn []
+                             (dotimes [_ 200]
+                               (runtime/confine! [inside (if (even? i) outside inside)]
+                                                 [inside]
+                                                 "")))))
+                       (range 4))]
+    (spit (str inside "/in.txt") "INSIDE")
+    (spit (str outside "/out.txt") "OUTSIDE")
+    (run! (fn [^Thread t] (.join t)) writers)
+    (reset! stop true)
+    (run! (fn [^Thread t] (.join t)) readers)
+    (runtime/confine! [inside] [inside] "")
+    (testing "the interpreter survived every swap and the last policy is the one in force"
+      (is (= "INSIDE" (str/trim (str (:stdout (block (first sessions)
+                                                     (str "print(open('" inside "/in.txt').read())")))))))
+      (is (refused? (block (first sessions) (str "print(open('" outside "/out.txt').read())")))))))

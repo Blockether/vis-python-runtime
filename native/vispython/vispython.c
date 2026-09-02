@@ -559,6 +559,27 @@ static vis_py_roots vis_py_read_roots;
 static vis_py_roots vis_py_write_roots;
 static int vis_py_confined = 0;
 
+/* What the policy STORES - the two root lists and the two refusal sentences -
+   is read and written under this lock. The policy is set by the HOST, on
+   whatever thread the host runs on, and read by the audit hook, on whatever
+   thread the guest runs on: without the lock a host replacing a policy frees the
+   very strings a hook is comparing, and a `strcmp` against a freed root is
+   exactly the crash that got reported (macOS arm64, two sessions confining at
+   once).
+
+   The two FLAGS - confined and network - are read unlocked on the hook's first
+   line, which runs for every audited event in the process and is meant to cost a
+   load and a branch. A word-sized flag cannot tear, so an unlocked read answers
+   either the policy before a swap or the policy after it, and the hook holds the
+   lock for the comparison that actually reads memory the swap frees.
+
+   The lock is never held across a call into Python. A hook already holds the GIL
+   when it takes this lock, so a host that took the lock and then reached for the
+   GIL would close a cycle; `vispython_confine` therefore builds the whole next
+   policy - interpreter roots and all - into locals FIRST and only then takes the
+   lock to swap it in. Lock order is GIL, then this. */
+static pthread_mutex_t vis_py_policy_lock = PTHREAD_MUTEX_INITIALIZER;
+
 /* Whether the guest may reach the network AT ALL. This is a CAPABILITY, not part
    of confinement: a session whose host granted no egress must not resolve a name
    or dial an address, and that is a different question from which directories it
@@ -784,6 +805,7 @@ static int vis_py_check(const char *event, PyObject *arg, int writing)
 {
     char raw[PATH_MAX];
     char canon[PATH_MAX];
+    int allowed;
 
     if (!vis_py_arg_path(arg, raw, sizeof raw)) {
         return 0;
@@ -791,10 +813,14 @@ static int vis_py_check(const char *event, PyObject *arg, int writing)
     if (!vis_py_canonical(raw, canon, sizeof canon)) {
         return vis_py_refuse(event, raw, writing);
     }
-    if (vis_py_under(canon, &vis_py_write_roots)) {
-        return 0;
-    }
-    if (writing || !vis_py_under(canon, &vis_py_read_roots)) {
+    /* Both lists are read in ONE hold: a host swapping the policy between the two
+       questions could otherwise answer them from different policies. Refusing
+       happens after the unlock, because `vis_py_refuse` raises in Python. */
+    pthread_mutex_lock(&vis_py_policy_lock);
+    allowed = vis_py_under(canon, &vis_py_write_roots)
+              || (!writing && vis_py_under(canon, &vis_py_read_roots));
+    pthread_mutex_unlock(&vis_py_policy_lock);
+    if (!allowed) {
         return vis_py_refuse(event, canon, writing);
     }
     return 0;
@@ -864,6 +890,16 @@ static const char *const vis_py_network_events[] = {
     "socket.getaddrinfo",   "socket.gethostbyname", "socket.gethostbyaddr",
     "socket.sendto",        NULL};
 
+/* The refusal sentence to raise: the host's wording when it set one, else the
+   library's. Copied out under the policy lock, because the host may be rewording
+   it on another thread while this hook reads it. */
+static void vis_py_refusal(const char *chosen, const char *fallback, char *out, size_t cap)
+{
+    pthread_mutex_lock(&vis_py_policy_lock);
+    snprintf(out, cap, "%s", chosen[0] != '\0' ? chosen : fallback);
+    pthread_mutex_unlock(&vis_py_policy_lock);
+}
+
 static int vis_py_event_in(const char *event, const char *const *events)
 {
     int i;
@@ -882,6 +918,7 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
     Py_ssize_t count;
     Py_ssize_t i;
     int writing;
+    char refusal[512];
 
     (void)userdata;
     /* The thread budget is not part of confinement - it bounds the PROCESS - so
@@ -892,18 +929,16 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
     /* Network is the process's capability too, so like the thread budget it is
        answered whether a filesystem policy is in force or not. */
     if (event != NULL && !vis_py_net_allowed && vis_py_event_in(event, vis_py_network_events)) {
-        PyErr_SetString(PyExc_PermissionError, vis_py_network_refusal[0] != '\0'
-                                                   ? vis_py_network_refusal
-                                                   : VIS_PY_NETWORK_REFUSAL);
+        vis_py_refusal(vis_py_network_refusal, VIS_PY_NETWORK_REFUSAL, refusal, sizeof refusal);
+        PyErr_SetString(PyExc_PermissionError, refusal);
         return -1;
     }
     if (!vis_py_confined || event == NULL || args == NULL || !PyTuple_Check(args)) {
         return 0;
     }
     if (vis_py_event_in(event, vis_py_process_events)) {
-        PyErr_SetString(PyExc_RuntimeError, vis_py_process_refusal[0] != '\0'
-                                                ? vis_py_process_refusal
-                                                : VIS_PY_PROCESS_REFUSAL);
+        vis_py_refusal(vis_py_process_refusal, VIS_PY_PROCESS_REFUSAL, refusal, sizeof refusal);
+        PyErr_SetString(PyExc_RuntimeError, refusal);
         return -1;
     }
     if (vis_py_event_in(event, vis_py_native_events)) {
@@ -1294,7 +1329,7 @@ int vispython_host(void *fn)
    runtime's job, since only the runtime knows where it was installed. Read at
    CONFINE time, because a host appends its package directory to `sys.path`
    after startup. */
-static void vis_py_add_interpreter_roots(void)
+static void vis_py_add_interpreter_roots(vis_py_roots *roots)
 {
     static const char *const names[] = {"prefix", "base_prefix", "exec_prefix", NULL};
     PyGILState_STATE gil;
@@ -1322,7 +1357,7 @@ static void vis_py_add_interpreter_roots(void)
             continue;
         }
         if (PyUnicode_Check(value)) {
-            vis_py_roots_add(&vis_py_read_roots, PyUnicode_AsUTF8(value));
+            vis_py_roots_add(roots, PyUnicode_AsUTF8(value));
         }
         Py_DECREF(value);
     }
@@ -1340,7 +1375,7 @@ static void vis_py_add_interpreter_roots(void)
                 if (entry != NULL && PyUnicode_Check(entry)) {
                     const char *text = PyUnicode_AsUTF8(entry);
                     if (text != NULL && text[0] == '/') {
-                        vis_py_roots_add(&vis_py_read_roots, text);
+                        vis_py_roots_add(roots, text);
                     }
                 }
             }
@@ -1359,16 +1394,16 @@ static void vis_py_add_interpreter_roots(void)
    ordinary Python - measured: `pytest` cannot start global capture without
    `/dev/null` and dies in its own plugin manager. Null is writable as well,
    because discarding output is what it is for. */
-static void vis_py_add_device_roots(void)
+static void vis_py_add_device_roots(vis_py_roots *read_roots, vis_py_roots *write_roots)
 {
     static const char *const readable[] = {"/dev/null", "/dev/zero", "/dev/urandom", "/dev/random",
                                            NULL};
     int i;
 
     for (i = 0; readable[i] != NULL; i++) {
-        vis_py_roots_add(&vis_py_read_roots, readable[i]);
+        vis_py_roots_add(read_roots, readable[i]);
     }
-    vis_py_roots_add(&vis_py_write_roots, "/dev/null");
+    vis_py_roots_add(write_roots, "/dev/null");
 }
 
 /* Confine the interpreter to `read_roots` and `write_roots`, each a
@@ -1388,19 +1423,40 @@ static void vis_py_add_device_roots(void)
 int vispython_confine(const char *read_roots, const char *write_roots, const char *refusal,
                        char *out, int cap)
 {
+    /* The next policy, assembled entirely off to the side: nothing here is
+       reachable by a hook until the swap below, so the interpreter's own roots
+       can be read under the GIL without this thread holding the policy lock. */
+    vis_py_roots next_read = {{0}, 0};
+    vis_py_roots next_write = {{0}, 0};
+    vis_py_roots old_read;
+    vis_py_roots old_write;
     char summary[64];
+    int confined;
 
-    vis_py_roots_set(&vis_py_read_roots, read_roots);
-    vis_py_roots_set(&vis_py_write_roots, write_roots);
+    vis_py_roots_set(&next_read, read_roots);
+    vis_py_roots_set(&next_write, write_roots);
+    confined = (next_read.count + next_write.count) > 0;
+    if (confined) {
+        vis_py_roots_add(&next_write, vis_py_pycache_prefix);
+        vis_py_add_interpreter_roots(&next_read);
+        vis_py_add_device_roots(&next_read, &next_write);
+    }
+    snprintf(summary, sizeof summary, "%d %d", next_read.count, next_write.count);
+
+    pthread_mutex_lock(&vis_py_policy_lock);
+    old_read = vis_py_read_roots;
+    old_write = vis_py_write_roots;
+    vis_py_read_roots = next_read;
+    vis_py_write_roots = next_write;
+    vis_py_confined = confined;
     snprintf(vis_py_process_refusal, sizeof vis_py_process_refusal, "%s",
              refusal != NULL ? refusal : "");
-    vis_py_confined = (vis_py_read_roots.count + vis_py_write_roots.count) > 0;
-    if (vis_py_confined) {
-        vis_py_roots_add(&vis_py_write_roots, vis_py_pycache_prefix);
-        vis_py_add_interpreter_roots();
-        vis_py_add_device_roots();
-    }
-    snprintf(summary, sizeof summary, "%d %d", vis_py_read_roots.count, vis_py_write_roots.count);
+    pthread_mutex_unlock(&vis_py_policy_lock);
+
+    /* The strings the swap displaced are unreachable now, so freeing them cannot
+       race a hook that was mid-comparison when the swap happened. */
+    vis_py_roots_clear(&old_read);
+    vis_py_roots_clear(&old_write);
     return vis_py_copy_out(summary, out, cap);
 }
 
@@ -1417,12 +1473,14 @@ int vispython_network(const char *policy, const char *refusal, char *out, int ca
     int want = 1;
     char summary[8];
 
+    pthread_mutex_lock(&vis_py_policy_lock);
     if (policy != NULL && sscanf(policy, "%d", &want) == 1) {
         vis_py_net_allowed = (want != 0);
     }
     if (refusal != NULL) {
         snprintf(vis_py_network_refusal, sizeof vis_py_network_refusal, "%s", refusal);
     }
+    pthread_mutex_unlock(&vis_py_policy_lock);
     snprintf(summary, sizeof summary, "%d", vis_py_net_allowed);
     return vis_py_copy_out(summary, out, cap);
 }
