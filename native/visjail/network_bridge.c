@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "network_bridge.h"
 
 #if defined(__linux__)
@@ -7,6 +9,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/capability.h>
 #include <net/if.h>
 #include <poll.h>
 #include <sched.h>
@@ -81,6 +84,14 @@ write_text(const char *path, const char *text)
       offset += (size_t) count;
     }
   return close(fd);
+}
+
+static int
+drop_namespace_capabilities(void)
+{
+  struct __user_cap_header_struct header = {_LINUX_CAPABILITY_VERSION_3, 0};
+  struct __user_cap_data_struct data[2] = {{0}};
+  return (int) syscall(SYS_capset, &header, &data);
 }
 
 static int
@@ -431,6 +442,14 @@ run_inside(char **argv, int argc, int control, int proxy_port, int inbound_port)
   if (payload == 0)
     {
       close_except(-1, -1);
+      /* Bubblewrap expects an unprivileged caller and creates its own nested
+       * user namespace. The outer namespace grants capabilities only so this
+       * supervisor can create and configure the private network namespace. */
+      if (drop_namespace_capabilities() != 0)
+        {
+          bridge_error("drop capabilities");
+          _exit(125);
+        }
       _exit(vis_bwrap_main(argc, argv));
     }
   while (!payload_done)
