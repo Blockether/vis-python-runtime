@@ -14,21 +14,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux-x64,    os: ubuntu-24.04,     jdk-arch: x64 }
-          - { platform: linux-arm64,  os: ubuntu-24.04-arm, jdk-arch: aarch64 }
-          - { platform: darwin-arm64, os: macos-14,         jdk-arch: aarch64 }
-          - { platform: darwin-x64,   os: macos-13,         jdk-arch: x64 }
+          - { platform: linux-x64, os: ubuntu-24.04, jdk-arch: x64, prefix: "" }
+          - { platform: linux-arm64, os: ubuntu-24.04-arm, jdk-arch: aarch64, prefix: "" }
+          - { platform: darwin-arm64, os: vis-macos-arm64, jdk-arch: aarch64, prefix: "" }
+          - { platform: darwin-x64, os: vis-macos-arm64, jdk-arch: x64, prefix: "/usr/bin/arch -x86_64" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - name: Verify tag matches VIS_PYTHON_VERSION
         shell: bash
         run: test "v$(tr -d '\r\n' < VIS_PYTHON_VERSION)" = "$GITHUB_REF_NAME"
+      - name: Keep this build out of the runner's real home
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          home="$RUNNER_TEMP/ci-home"
+          rm -rf "$home"
+          mkdir -p "$home"
+          echo "HOME=$home" >> "$GITHUB_ENV"
+      - name: Verify Rosetta for the x64 build
+        if: matrix.platform == 'darwin-x64'
+        run: /usr/bin/arch -x86_64 /usr/bin/uname -m | grep -qx x86_64
       - name: Install Linux native build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential binutils linux-libc-dev meson ninja-build pkg-config
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -39,11 +53,11 @@ jobs:
           cli: latest
       - name: Build and verify the complete runtime
         run: |
-          native/vispython/build.sh
-          clojure -T:build javac
-          clojure -M:test
-          clojure -T:build platform-archive :platform '${{ matrix.platform }}'
-          scripts/verify-platform-archive.sh '${{ matrix.platform }}'
+          ${{ matrix.prefix }} native/vispython/build.sh
+          ${{ matrix.prefix }} clojure -T:build javac
+          ${{ matrix.prefix }} clojure -M:test
+          ${{ matrix.prefix }} clojure -T:build platform-archive :platform '${{ matrix.platform }}'
+          ${{ matrix.prefix }} scripts/verify-platform-archive.sh '${{ matrix.platform }}'
       - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.platform }}

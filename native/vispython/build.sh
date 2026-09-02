@@ -17,8 +17,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 
 case "$(uname -s)" in
-  Darwin) os=darwin; lib=libvispython.dylib; rpath='@loader_path/python/lib' ;;
-  Linux)  os=linux;  lib=libvispython.so;    rpath='$ORIGIN/python/lib' ;;
+  Darwin) os=darwin; lib=libvispython.dylib; rpath='@loader_path/python/lib'; dl_lib= ;;
+  Linux)  os=linux;  lib=libvispython.so;    rpath='$ORIGIN/python/lib'; dl_lib=-ldl ;;
   *) echo "unsupported operating system: $(uname -s)" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
@@ -26,6 +26,11 @@ case "$(uname -m)" in
   x86_64|amd64)  arch=x64 ;;
   *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
+if [ "$os" = darwin ]; then
+  [ "$arch" = x64 ] && cc_arch="-arch x86_64" || cc_arch="-arch arm64"
+else
+  cc_arch=
+fi
 
 out="$repo/resources/prebuilds/$os-$arch"
 mkdir -p "$out"
@@ -80,12 +85,11 @@ minor="${CPYTHON_VERSION%.*}"
 # `pycache_prefix` under the user's own directory, so the first run compiles what
 # it imports, every run after that is cached, and the shipped tree never changes.
 find "$home" -type d -name __pycache__ -prune -exec rm -rf {} +
-cc -O2 -fPIC -shared -pthread -Wall -Wextra \
+cc $cc_arch -O2 -fPIC -shared -pthread -Wall -Wextra \
    -I"$home/include/python$minor" \
    -o "$out/$lib" \
    "$here/vispython.c" \
-   -L"$home/lib" -lpython"$minor" \
-   -Wl,-rpath,"$rpath"
+   -L"$home/lib" -lpython"$minor" $dl_lib -Wl,-rpath,"$rpath"
 
 "$repo/native/visjail/build.sh"
 

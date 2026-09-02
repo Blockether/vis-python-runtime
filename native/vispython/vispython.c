@@ -18,6 +18,9 @@
 #include <Python.h>
 #include <errno.h>
 #include <fcntl.h>
+#if defined(__linux__)
+#include <dlfcn.h>
+#endif
 #include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -31,6 +34,12 @@
 #define VIS_PY_ERR_INIT   (-2) /* interpreter is not running */
 #define VIS_PY_ERR_PYTHON (-3) /* Python raised; buffer holds str(exception) */
 
+#if defined(__linux__)
+#define VIS_PY_STRINGIFY_INNER(value) #value
+#define VIS_PY_STRINGIFY(value) VIS_PY_STRINGIFY_INNER(value)
+#define VIS_PY_LIBPYTHON "libpython" VIS_PY_STRINGIFY(PY_MAJOR_VERSION) "."                          VIS_PY_STRINGIFY(PY_MINOR_VERSION) ".so.1.0"
+static void *vis_py_global_libpython = NULL;
+#endif
 static int vis_py_started = 0;
 static int vis_py_inittab = 0;
 
@@ -1580,6 +1589,18 @@ int vispython_initialize(const char *home, const char *pycache_prefix, char *out
     if (vis_py_started) {
         return 0;
     }
+#if defined(__linux__)
+    /* FFM loads this cdylib RTLD_LOCAL. Binary extension modules intentionally leave
+       CPython C-API references unresolved and expect the embedding process to export
+       them globally, so promote the already-loaded adjacent libpython before import. */
+    if (vis_py_global_libpython == NULL) {
+        vis_py_global_libpython = dlopen(VIS_PY_LIBPYTHON, RTLD_NOW | RTLD_GLOBAL);
+        if (vis_py_global_libpython == NULL) {
+            vis_py_copy_out(dlerror(), out, cap);
+            return VIS_PY_ERR_INIT;
+        }
+    }
+#endif
     if (!vis_py_inittab && PyImport_AppendInittab("_vis_host", vis_py_host_init) != 0) {
         vis_py_copy_out("PyImport_AppendInittab refused _vis_host", out, cap);
         return VIS_PY_ERR_INIT;

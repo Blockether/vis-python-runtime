@@ -20,7 +20,8 @@ out="$repo/resources/prebuilds/$os-$arch"
 mkdir -p "$out/licenses"
 
 if [ "$os" = darwin ]; then
-  cc -O2 -fPIC -dynamiclib -Wall -Wextra -Werror -Wno-deprecated-declarations \
+  [ "$arch" = x64 ] && cc_arch="-arch x86_64" || cc_arch="-arch arm64"
+  cc $cc_arch -O2 -fPIC -dynamiclib -Wall -Wextra -Werror -Wno-deprecated-declarations \
      -o "$out/$lib" "$here/visjail.c" -lsandbox -lutil
   echo "$out/$lib"
   exit 0
