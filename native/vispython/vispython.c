@@ -16,6 +16,7 @@
  * human-readable reason, so one call yields both the verdict and the message.
  */
 #include <Python.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #if defined(__linux__)
@@ -28,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define VIS_PY_ERR_BUFFER (-1) /* caller passed no room for a result */
@@ -969,134 +971,96 @@ static vis_py_host_fn vis_py_host = NULL;
  * WHO IS CALLING.
  *
  * The host binds a tool PER SESSION, so every upcall has to say whose it is -
- * and the guest must not be the one saying it. `vis_runtime.host_call` is an
- * ordinary module function and the session in its envelope is JSON the GUEST
- * writes, so a block that names a neighbouring session reaches that session's
- * tools. Measured, in three lines, from a block confined to a temp directory:
- * it read a file the policy had refused it one statement earlier, through a
- * tool bound in another namespace.
+ * and the guest must not be the one saying it. Two answers were tried and one
+ * of them is measurably wrong, so both are written down here.
  *
- * The one thing a block cannot forge is the IDENTITY of a session's globals.
- * It can copy any value out of another namespace, rebind its own `__name__`,
- * even write `sys.modules` - but it cannot make its own globals BE another
- * session's dict. So the namespaces this file created are remembered here, and
- * the caller is the nearest frame whose globals is one of them.
+ * NOT the envelope: `vis_runtime.host_call` is an ordinary function and the
+ * session in its payload is JSON the GUEST writes. A block that named a
+ * neighbouring session was served the neighbour's tools - three lines, and a
+ * confined block read through them a file its own policy had refused it.
  *
- * The table holds a WEAK reference to each session module, because the host
- * drops a finished session by taking it out of `sys.modules` and a strong one
- * here would keep every session that ever ran alive. A dead entry frees its own
- * slot on the next walk. All of it runs under the GIL, like every other entry
- * point in this file, so the table needs no lock of its own.
+ * NOT the calling frame either, which is the subtler one. A session is a module
+ * in `sys.modules`, so ANY session can take another's globals dict and
+ * `exec(code, dict)` into it: the running frame then belongs to the victim, and
+ * an identity taken from frames answers with the victim. Measured, same three
+ * lines, against the frame-walking version of this file.
+ *
+ * What cannot be forged is what the RUNTIME is executing. The host asks this
+ * library to run code in a named session; that name is pushed here for the
+ * duration of the call and popped after it, per thread, and a host call reads
+ * the top of that stack. `exec` into a foreign dict does not change what the
+ * runtime was asked to run, so the block stays the block. Nesting is ordinary:
+ * a block calls a tool, the host runs an extension's Python inside that call,
+ * and the extension's own upcalls see the extension until it returns.
+ *
+ * A thread the GUEST started has an empty stack and is attributed to nobody,
+ * which the host answers as a refusal rather than a guess.
  * ------------------------------------------------------------------------ */
 
-#define VIS_PY_SESSIONS_MAX 512
 #define VIS_PY_SESSION_NAME 128
+#define VIS_PY_RUN_DEPTH 32
+#define VIS_PY_TRUSTED_MAX 64
 
 typedef struct {
-    PyObject *weak; /* weakref to the session MODULE, or NULL for a free slot */
     char name[VIS_PY_SESSION_NAME];
-} vis_py_session;
+} vis_py_run_entry;
 
-static vis_py_session vis_py_sessions[VIS_PY_SESSIONS_MAX];
+static _Thread_local vis_py_run_entry vis_py_run_stack[VIS_PY_RUN_DEPTH];
+static _Thread_local int vis_py_run_depth = 0;
 
-/* The module a slot still names, or NULL when the session is gone (and the slot
-   is freed on the way out, which is the only reaping this table needs). */
-static PyObject *vis_py_session_module(vis_py_session *slot)
+/* The sessions the HOST marked trusted: extension code, which is the user's own
+   and runs at the host's trust level. Only `vispython_trust` writes this, and
+   only the host can call it - it is not reachable from Python at all. */
+static char vis_py_trusted[VIS_PY_TRUSTED_MAX][VIS_PY_SESSION_NAME];
+static pthread_mutex_t vis_py_trust_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void vis_py_run_push(const char *session)
 {
-    PyObject *module = NULL;
+    if (vis_py_run_depth >= VIS_PY_RUN_DEPTH) {
+        vis_py_run_depth++; /* counted, so the pop stays balanced */
+        return;
+    }
+    snprintf(vis_py_run_stack[vis_py_run_depth].name, VIS_PY_SESSION_NAME, "%s",
+             session == NULL ? "" : session);
+    vis_py_run_depth++;
+}
 
-    if (slot->weak == NULL) {
+static void vis_py_run_pop(void)
+{
+    if (vis_py_run_depth > 0) {
+        vis_py_run_depth--;
+    }
+}
+
+/* The session this thread is running code for, or NULL for a thread the runtime
+   was never asked to run anything on. */
+static const char *vis_py_current_session(void)
+{
+    int top = vis_py_run_depth - 1;
+
+    if (top < 0 || top >= VIS_PY_RUN_DEPTH) {
         return NULL;
     }
-    if (PyWeakref_GetRef(slot->weak, &module) < 0) {
-        PyErr_Clear();
-        module = NULL;
-    }
-    if (module == NULL) {
-        Py_CLEAR(slot->weak);
-        slot->name[0] = '\0';
-        return NULL;
-    }
-    Py_DECREF(module); /* borrowed from here on: the caller holds the GIL */
-    return module;
+    return vis_py_run_stack[top].name[0] == '\0' ? NULL : vis_py_run_stack[top].name;
 }
 
-/* Remember `module` as the session called `name`. Idempotent, and silent when
-   the table is full: a host that ran out of slots loses the ABILITY TO NAME a
-   caller, which the call path answers as "unknown", never as somebody else. */
-static void vis_py_session_remember(const char *name, PyObject *module)
+static int vis_py_session_trusted(const char *session)
 {
-    int free_slot = -1;
+    int trusted = 0;
     int i;
 
-    if (name == NULL || name[0] == '\0' || strlen(name) >= VIS_PY_SESSION_NAME) {
-        return;
+    if (session == NULL || session[0] == '\0') {
+        return 0;
     }
-    for (i = 0; i < VIS_PY_SESSIONS_MAX; i++) {
-        PyObject *live = vis_py_session_module(&vis_py_sessions[i]);
-        if (live == NULL) {
-            if (free_slot < 0) {
-                free_slot = i;
-            }
-            continue;
-        }
-        if (live == module) {
-            return; /* already known, under whatever name it was created with */
-        }
-    }
-    if (free_slot < 0) {
-        return;
-    }
-    vis_py_sessions[free_slot].weak = PyWeakref_NewRef(module, NULL);
-    if (vis_py_sessions[free_slot].weak == NULL) {
-        PyErr_Clear();
-        return;
-    }
-    snprintf(vis_py_sessions[free_slot].name, VIS_PY_SESSION_NAME, "%s", name);
-}
-
-/* The session whose globals dict is `globals`, or NULL for a frame that belongs
-   to no session (`vis_runtime`'s own module, the standard library, an import). */
-static const char *vis_py_session_named(PyObject *globals)
-{
-    int i;
-
-    for (i = 0; i < VIS_PY_SESSIONS_MAX; i++) {
-        PyObject *module = vis_py_session_module(&vis_py_sessions[i]);
-        if (module != NULL && PyModule_GetDict(module) == globals) {
-            return vis_py_sessions[i].name;
-        }
-    }
-    return NULL;
-}
-
-/* The session the current call is being made FROM: the nearest frame whose
-   globals belongs to one. `host_call` itself is defined in `vis_runtime`, whose
-   frame belongs to no session, so the walk skips it and lands on the block. */
-static const char *vis_py_calling_session(void)
-{
-    PyFrameObject *frame = PyEval_GetFrame();
-    const char *found = NULL;
-    int depth;
-
-    Py_XINCREF(frame);
-    for (depth = 0; frame != NULL && depth < 256; depth++) {
-        PyObject *globals = PyFrame_GetGlobals(frame);
-        PyFrameObject *back;
-
-        if (globals != NULL) {
-            found = vis_py_session_named(globals);
-            Py_DECREF(globals);
-        }
-        if (found != NULL) {
+    pthread_mutex_lock(&vis_py_trust_lock);
+    for (i = 0; i < VIS_PY_TRUSTED_MAX; i++) {
+        if (strcmp(vis_py_trusted[i], session) == 0) {
+            trusted = 1;
             break;
         }
-        back = PyFrame_GetBack(frame);
-        Py_DECREF(frame);
-        frame = back;
     }
-    Py_XDECREF(frame);
-    return found;
+    pthread_mutex_unlock(&vis_py_trust_lock);
+    return trusted;
 }
 
 /* `_vis_host.call(name, payload)` -> the host's reply as `str`. */
@@ -1125,8 +1089,7 @@ static PyObject *vis_py_host_call(PyObject *self, PyObject *args)
     if (buffer == NULL) {
         return PyErr_NoMemory();
     }
-    /* Read BEFORE the GIL is released: it walks Python frames. */
-    session = vis_py_calling_session();
+    session = vis_py_current_session();
     if (session == NULL) {
         session = "";
     }
@@ -1383,6 +1346,382 @@ static PyObject *vis_py_threads(PyObject *self, PyObject *args)
                          vis_py_live_threads(), "idle", vis_py_pool.idle, "queued",
                          vis_py_pool.queued);
 }
+/* --------------------------------------------------------------------------
+ * The TRUSTED filesystem, in C.
+ *
+ * Confinement is for the model's code. An extension is the user's OWN code, at
+ * the host's trust level, and the files it owns are not the session's:
+ * `~/.config/gh`, a cache, a checkout it maintains. Under a jail the audit hook
+ * refuses those paths to Python - correctly, it cannot tell whose Python it is -
+ * so a trusted session reaches them through these doors instead, which do the
+ * I/O in C where no hook stands. It is the filesystem counterpart of `shell`:
+ * a capability someone was GIVEN, not a policy everybody in the process
+ * inherits, and nothing here widens the roots for anyone.
+ *
+ * The guard is the run stack, for the reason written above it: what the runtime
+ * was ASKED to run cannot be forged from inside Python, while a name, a frame or
+ * an envelope can. A block that reaches these functions - and it can, they are a
+ * module like any other - is refused, because the session the runtime is running
+ * is the block's.
+ *
+ * Text is not assumed: `read` answers bytes and `write` takes bytes or str, so a
+ * PNG survives the crossing that JSON could not carry.
+ * ------------------------------------------------------------------------ */
+
+static int vis_py_fs_allowed(void)
+{
+    const char *session = vis_py_current_session();
+
+    if (vis_py_session_trusted(session)) {
+        return 1;
+    }
+    PyErr_SetString(PyExc_PermissionError,
+                    "vis sandbox: the host filesystem is for extension code, which the host "
+                    "trusts; this session is not trusted here. Read and write what the session's "
+                    "roots hold with ordinary `open`, and ask the host for anything else.");
+    return 0;
+}
+
+/* `_vis_fs.read(path)` -> bytes */
+static PyObject *vis_py_fs_read(PyObject *self, PyObject *args)
+{
+    const char *path = NULL;
+    FILE *file;
+    char *buffer = NULL;
+    size_t size = 0;
+    size_t room = 65536;
+    PyObject *answer;
+
+    (void)self;
+    if (!vis_py_fs_allowed() || !PyArg_ParseTuple(args, "s", &path)) {
+        return NULL;
+    }
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        return PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+    }
+    buffer = (char *)malloc(room);
+    if (buffer == NULL) {
+        fclose(file);
+        return PyErr_NoMemory();
+    }
+    for (;;) {
+        size_t got;
+        if (size == room) {
+            char *grown = (char *)realloc(buffer, room * 2);
+            if (grown == NULL) {
+                free(buffer);
+                fclose(file);
+                return PyErr_NoMemory();
+            }
+            buffer = grown;
+            room *= 2;
+        }
+        got = fread(buffer + size, 1, room - size, file);
+        size += got;
+        if (got == 0) {
+            break;
+        }
+    }
+    if (ferror(file)) {
+        free(buffer);
+        fclose(file);
+        return PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+    }
+    fclose(file);
+    answer = PyBytes_FromStringAndSize(buffer, (Py_ssize_t)size);
+    free(buffer);
+    return answer;
+}
+
+/* `_vis_fs.write(path, data, append=0)` -> the number of bytes written */
+static PyObject *vis_py_fs_write(PyObject *self, PyObject *args)
+{
+    const char *path = NULL;
+    PyObject *data = NULL;
+    int append = 0;
+    const char *bytes = NULL;
+    Py_ssize_t length = 0;
+    FILE *file;
+    size_t wrote;
+
+    (void)self;
+    if (!vis_py_fs_allowed() || !PyArg_ParseTuple(args, "sO|p", &path, &data, &append)) {
+        return NULL;
+    }
+    if (PyBytes_Check(data)) {
+        bytes = PyBytes_AS_STRING(data);
+        length = PyBytes_GET_SIZE(data);
+    } else if (PyUnicode_Check(data)) {
+        bytes = PyUnicode_AsUTF8AndSize(data, &length);
+        if (bytes == NULL) {
+            return NULL;
+        }
+    } else {
+        PyErr_SetString(PyExc_TypeError, "write takes str or bytes");
+        return NULL;
+    }
+    file = fopen(path, append ? "ab" : "wb");
+    if (file == NULL) {
+        return PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+    }
+    wrote = fwrite(bytes, 1, (size_t)length, file);
+    if (fclose(file) != 0 || wrote != (size_t)length) {
+        return PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+    }
+    return PyLong_FromSsize_t((Py_ssize_t)wrote);
+}
+
+/* `_vis_fs.list(path)` -> the entry NAMES, sorted by the platform's readdir
+   order left as it comes: a caller that wants an order sorts it in Python. */
+static PyObject *vis_py_fs_list(PyObject *self, PyObject *args)
+{
+    const char *path = NULL;
+    DIR *dir;
+    struct dirent *entry;
+    PyObject *names;
+
+    (void)self;
+    if (!vis_py_fs_allowed() || !PyArg_ParseTuple(args, "s", &path)) {
+        return NULL;
+    }
+    dir = opendir(path);
+    if (dir == NULL) {
+        return PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+    }
+    names = PyList_New(0);
+    if (names == NULL) {
+        closedir(dir);
+        return NULL;
+    }
+    while ((entry = readdir(dir)) != NULL) {
+        PyObject *name;
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        name = PyUnicode_DecodeFSDefault(entry->d_name);
+        if (name == NULL || PyList_Append(names, name) != 0) {
+            Py_XDECREF(name);
+            Py_DECREF(names);
+            closedir(dir);
+            return NULL;
+        }
+        Py_DECREF(name);
+    }
+    closedir(dir);
+    return names;
+}
+
+/* The bytes of `from` into `to`, answering how many. Shared by `copy` and by
+   `move` when the two paths sit on different filesystems. */
+static int vis_py_fs_copy_bytes(const char *from, const char *to, size_t *copied)
+{
+    FILE *in;
+    FILE *out;
+    char chunk[65536];
+    size_t got;
+    struct stat info;
+
+    in = fopen(from, "rb");
+    if (in == NULL) {
+        PyErr_SetFromErrnoWithFilename(PyExc_OSError, from);
+        return -1;
+    }
+    out = fopen(to, "wb");
+    if (out == NULL) {
+        fclose(in);
+        PyErr_SetFromErrnoWithFilename(PyExc_OSError, to);
+        return -1;
+    }
+    *copied = 0;
+    while ((got = fread(chunk, 1, sizeof chunk, in)) > 0) {
+        if (fwrite(chunk, 1, got, out) != got) {
+            fclose(in);
+            fclose(out);
+            PyErr_SetFromErrnoWithFilename(PyExc_OSError, to);
+            return -1;
+        }
+        *copied += got;
+    }
+    if (ferror(in)) {
+        fclose(in);
+        fclose(out);
+        PyErr_SetFromErrnoWithFilename(PyExc_OSError, from);
+        return -1;
+    }
+    fclose(in);
+    if (fclose(out) != 0) {
+        PyErr_SetFromErrnoWithFilename(PyExc_OSError, to);
+        return -1;
+    }
+    /* The mode travels with the bytes: a copied script that lost its execute bit
+       is a file that no longer does what the original did. */
+    if (stat(from, &info) == 0) {
+        chmod(to, info.st_mode & 07777);
+    }
+    return 0;
+}
+
+/* `_vis_fs.copy(src, dst)` -> bytes copied */
+static PyObject *vis_py_fs_copy(PyObject *self, PyObject *args)
+{
+    const char *from = NULL;
+    const char *to = NULL;
+    size_t copied = 0;
+
+    (void)self;
+    if (!vis_py_fs_allowed() || !PyArg_ParseTuple(args, "ss", &from, &to)) {
+        return NULL;
+    }
+    if (vis_py_fs_copy_bytes(from, to, &copied) != 0) {
+        return NULL;
+    }
+    return PyLong_FromSsize_t((Py_ssize_t)copied);
+}
+
+/* `_vis_fs.move(src, dst)` -> None. `rename` first, because a move inside one
+   filesystem must stay atomic; a cross-device move falls back to copy + remove,
+   which is what every tool does and the only thing POSIX offers. */
+static PyObject *vis_py_fs_move(PyObject *self, PyObject *args)
+{
+    const char *from = NULL;
+    const char *to = NULL;
+    size_t copied = 0;
+
+    (void)self;
+    if (!vis_py_fs_allowed() || !PyArg_ParseTuple(args, "ss", &from, &to)) {
+        return NULL;
+    }
+    if (rename(from, to) == 0) {
+        Py_RETURN_NONE;
+    }
+    if (errno != EXDEV) {
+        return PyErr_SetFromErrnoWithFilename(PyExc_OSError, from);
+    }
+    if (vis_py_fs_copy_bytes(from, to, &copied) != 0) {
+        return NULL;
+    }
+    if (unlink(from) != 0) {
+        return PyErr_SetFromErrnoWithFilename(PyExc_OSError, from);
+    }
+    Py_RETURN_NONE;
+}
+
+/* `_vis_fs.remove(path)` -> True when something was removed. A directory is
+   removed only when it is empty, because a recursive delete behind a door this
+   quiet is how an extension loses somebody's work to one wrong string. */
+static PyObject *vis_py_fs_remove(PyObject *self, PyObject *args)
+{
+    const char *path = NULL;
+    struct stat info;
+
+    (void)self;
+    if (!vis_py_fs_allowed() || !PyArg_ParseTuple(args, "s", &path)) {
+        return NULL;
+    }
+    if (stat(path, &info) != 0) {
+        Py_RETURN_FALSE;
+    }
+    if (S_ISDIR(info.st_mode)) {
+        if (rmdir(path) != 0) {
+            return PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+        }
+        Py_RETURN_TRUE;
+    }
+    if (unlink(path) != 0) {
+        return PyErr_SetFromErrnoWithFilename(PyExc_OSError, path);
+    }
+    Py_RETURN_TRUE;
+}
+
+/* `_vis_fs.mkdir(path)` -> True when it had to be made. Every parent too: a
+   door that writes a file into a directory the extension has not made yet is
+   the common case, not the exception. */
+static PyObject *vis_py_fs_mkdir(PyObject *self, PyObject *args)
+{
+    const char *path = NULL;
+    char work[PATH_MAX];
+    size_t i;
+    int made = 0;
+
+    (void)self;
+    if (!vis_py_fs_allowed() || !PyArg_ParseTuple(args, "s", &path)) {
+        return NULL;
+    }
+    if (strlen(path) >= sizeof work) {
+        PyErr_SetString(PyExc_ValueError, "path too long");
+        return NULL;
+    }
+    snprintf(work, sizeof work, "%s", path);
+    for (i = 1; work[i] != '\0'; i++) {
+        if (work[i] != '/') {
+            continue;
+        }
+        work[i] = '\0';
+        if (mkdir(work, 0777) == 0) {
+            made = 1;
+        } else if (errno != EEXIST) {
+            return PyErr_SetFromErrnoWithFilename(PyExc_OSError, work);
+        }
+        work[i] = '/';
+    }
+    if (mkdir(work, 0777) == 0) {
+        made = 1;
+    } else if (errno != EEXIST) {
+        return PyErr_SetFromErrnoWithFilename(PyExc_OSError, work);
+    }
+    return PyBool_FromLong(made);
+}
+
+/* `_vis_fs.stat(path)` -> {"kind", "size", "mtime"} or None when there is
+   nothing there. The one question every caller asks before the others. */
+static PyObject *vis_py_fs_stat(PyObject *self, PyObject *args)
+{
+    const char *path = NULL;
+    struct stat info;
+
+    (void)self;
+    if (!vis_py_fs_allowed() || !PyArg_ParseTuple(args, "s", &path)) {
+        return NULL;
+    }
+    if (stat(path, &info) != 0) {
+        Py_RETURN_NONE;
+    }
+    return Py_BuildValue("{s:s,s:n,s:d}", "kind",
+                         S_ISDIR(info.st_mode) ? "directory"
+                                               : (S_ISREG(info.st_mode) ? "file" : "other"),
+                         "size", (Py_ssize_t)info.st_size, "mtime", (double)info.st_mtime);
+}
+
+static PyMethodDef vis_py_fs_methods[] = {
+    {"read", vis_py_fs_read, METH_VARARGS, "read(path) -> bytes"},
+    {"write", vis_py_fs_write, METH_VARARGS, "write(path, data, append=False) -> int"},
+    {"list", vis_py_fs_list, METH_VARARGS, "list(path) -> list[str]"},
+    {"copy", vis_py_fs_copy, METH_VARARGS, "copy(src, dst) -> int"},
+    {"move", vis_py_fs_move, METH_VARARGS, "move(src, dst) -> None"},
+    {"remove", vis_py_fs_remove, METH_VARARGS, "remove(path) -> bool"},
+    {"mkdir", vis_py_fs_mkdir, METH_VARARGS, "mkdir(path) -> bool"},
+    {"stat", vis_py_fs_stat, METH_VARARGS, "stat(path) -> dict | None"},
+    {NULL, NULL, 0, NULL}
+};
+
+static struct PyModuleDef vis_py_fs_module = {
+    PyModuleDef_HEAD_INIT,
+    "_vis_fs",
+    "The filesystem a TRUSTED session reaches, performed in C.",
+    -1,
+    vis_py_fs_methods,
+    NULL,
+    NULL,
+    NULL,
+    NULL
+};
+
+static PyObject *vis_py_fs_init(void)
+{
+    return PyModule_Create(&vis_py_fs_module);
+}
+
 static PyMethodDef vis_py_host_methods[] = {
     {"call", vis_py_host_call, METH_VARARGS,
      "call(name, payload) -> str: run the host callable `name` over a text payload."},
@@ -1576,6 +1915,61 @@ int vispython_confine(const char *read_roots, const char *write_roots, const cha
    What this decides is the CAPABILITY, never a domain policy: a host that lets a
    session out decides WHERE at its proxy, which sees the request and can say no
    to one URL. Here there is nothing to see yet - only whether a socket may exist. */
+/* Mark `session` as running code the HOST trusts, or take that back with a
+   policy of 0. Only the host can call this - it is an export, unreachable from
+   Python - and it is what `_vis_fs` asks about: a trusted session reaches the
+   filesystem in C, past the confinement that is there for the model's code.
+
+   Trust is per SESSION and never per thread or per call, because a session is
+   the thing a host knows: extension namespaces are trusted, the sandbox's are
+   not, and no code can move itself from one to the other. Answers how many
+   sessions are trusted now. */
+int vispython_trust(const char *session, const char *policy, char *out, int cap)
+{
+    char summary[16];
+    int want = 1;
+    int slot = -1;
+    int count = 0;
+    int i;
+
+    if (session == NULL || session[0] == '\0' || strlen(session) >= VIS_PY_SESSION_NAME) {
+        vis_py_copy_out("a trust policy needs a session name", out, cap);
+        return VIS_PY_ERR_INIT;
+    }
+    if (policy != NULL && sscanf(policy, "%d", &want) != 1) {
+        want = 1;
+    }
+    pthread_mutex_lock(&vis_py_trust_lock);
+    for (i = 0; i < VIS_PY_TRUSTED_MAX; i++) {
+        if (strcmp(vis_py_trusted[i], session) == 0) {
+            slot = i;
+            break;
+        }
+        if (slot < 0 && vis_py_trusted[i][0] == '\0') {
+            slot = i;
+        }
+    }
+    if (slot >= 0) {
+        if (want) {
+            snprintf(vis_py_trusted[slot], VIS_PY_SESSION_NAME, "%s", session);
+        } else if (strcmp(vis_py_trusted[slot], session) == 0) {
+            vis_py_trusted[slot][0] = '\0';
+        }
+    }
+    for (i = 0; i < VIS_PY_TRUSTED_MAX; i++) {
+        if (vis_py_trusted[i][0] != '\0') {
+            count++;
+        }
+    }
+    pthread_mutex_unlock(&vis_py_trust_lock);
+    if (slot < 0) {
+        vis_py_copy_out("no room for another trusted session", out, cap);
+        return VIS_PY_ERR_INIT;
+    }
+    snprintf(summary, sizeof summary, "%d", count);
+    return vis_py_copy_out(summary, out, cap);
+}
+
 int vispython_network(const char *policy, const char *refusal, char *out, int cap)
 {
     int want = 1;
@@ -1758,6 +2152,10 @@ int vispython_initialize(const char *home, const char *pycache_prefix, char *out
         }
     }
 #endif
+    if (!vis_py_inittab && PyImport_AppendInittab("_vis_fs", vis_py_fs_init) != 0) {
+        vis_py_copy_out("PyImport_AppendInittab refused _vis_fs", out, cap);
+        return VIS_PY_ERR_INIT;
+    }
     if (!vis_py_inittab && PyImport_AppendInittab("_vis_host", vis_py_host_init) != 0) {
         vis_py_copy_out("PyImport_AppendInittab refused _vis_host", out, cap);
         return VIS_PY_ERR_INIT;
@@ -1836,7 +2234,6 @@ static PyObject *vis_py_namespace(const char *module_name, char *out, int cap)
         return NULL;
     }
     globals = PyModule_GetDict(module);
-    vis_py_session_remember(name, module);
     if (PyDict_GetItemString(globals, "__builtins__") == NULL) {
         if (PyDict_SetItemString(globals, "__builtins__", PyEval_GetBuiltins()) != 0) {
             vis_py_take_error(out, cap);
@@ -2028,7 +2425,9 @@ int vispython_eval(const char *module_name, const char *code, char *out, int cap
         return VIS_PY_ERR_INIT;
     }
     gil = PyGILState_Ensure();
+    vis_py_run_push(module_name);
     status = vis_py_eval_locked(module_name, code, out, cap);
+    vis_py_run_pop();
     PyGILState_Release(gil);
     return status;
 }
@@ -2042,7 +2441,9 @@ int vispython_exec(const char *module_name, const char *code, char *out, int cap
         return VIS_PY_ERR_INIT;
     }
     gil = PyGILState_Ensure();
+    vis_py_run_push(module_name);
     status = vis_py_exec_locked(module_name, code, out, cap);
+    vis_py_run_pop();
     PyGILState_Release(gil);
     return status;
 }
@@ -2056,7 +2457,9 @@ int vispython_run(const char *module_name, const char *code, char *out, int cap)
         return VIS_PY_ERR_INIT;
     }
     gil = PyGILState_Ensure();
+    vis_py_run_push(module_name);
     status = vis_py_run_locked(module_name, code, out, cap);
+    vis_py_run_pop();
     PyGILState_Release(gil);
     return status;
 }
@@ -2070,7 +2473,9 @@ int vispython_run_block(const char *module_name, const char *code, char *out, in
         return VIS_PY_ERR_INIT;
     }
     gil = PyGILState_Ensure();
+    vis_py_run_push(module_name);
     status = vis_py_run_block_locked(module_name, code, out, cap);
+    vis_py_run_pop();
     PyGILState_Release(gil);
     return status;
 }

@@ -85,6 +85,7 @@ public final class Interpreter {
       Map.entry("vispython_run_block", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_confine", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_network", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_trust", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_host", descriptor(ValueLayout.ADDRESS)),
       Map.entry("vispython_threads", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_logging", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
@@ -304,6 +305,22 @@ public final class Interpreter {
         String.join("\n", writeRoots), refusal == null ? "" : refusal);
     String[] counts = answer.trim().split("\\s+");
     return new int[] {Integer.parseInt(counts[0]), Integer.parseInt(counts[1])};
+  }
+
+  /**
+   * Mark {@code session} as running code the HOST trusts, answering how many
+   * sessions are trusted now.
+   *
+   * <p>A trusted session reaches the filesystem through {@code _vis_fs}, in C,
+   * past the confinement that exists for the model's code — the same shape as a
+   * shell: a capability someone was GIVEN, not a policy the process inherits.
+   * Only a host can say this; nothing in Python can reach this call, and no
+   * block can move itself into a trusted session, because trust is keyed on the
+   * session the RUNTIME was asked to run rather than on anything a frame, a name
+   * or an envelope claims.
+   */
+  public static int trust(String session, boolean trusted) {
+    return Integer.parseInt(invoke("vispython_trust", session, trusted ? "1" : "0").trim());
   }
 
   /**

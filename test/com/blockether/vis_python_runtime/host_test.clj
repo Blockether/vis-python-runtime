@@ -177,6 +177,22 @@
             (is (str/includes? (str answer) attacker)
                 "the host was told the forged session, not the caller")
             (is (not (str/includes? (str answer) privileged)))))
+        (testing "nor by running its code inside the other session's globals"
+          ;; The attack that defeats an identity taken from the calling FRAME: a
+          ;; session is a module in `sys.modules`, so its globals dict is there
+          ;; for the taking and code exec'd into it runs in a frame that belongs
+          ;; to the victim. Measured against the frame-walking version of this,
+          ;; which answered with the victim. What the runtime was ASKED to run is
+          ;; what answers now, and `exec` does not change that.
+          (let [answer (harness/ev attacker
+                                   (str "import sys, vis_runtime, json\n"
+                                        "g = sys.modules[" (pr-str privileged) "].__dict__\n"
+                                        "src = 'import vis_runtime, json\\n"
+                                        "out = vis_runtime.host_call(\"secret\", json.dumps({\"args\": []}))'\n"
+                                        "exec(compile(src, '<x>', 'exec'), g)\n"
+                                        "g['out']"))]
+            (is (str/includes? (str answer) attacker))
+            (is (not (str/includes? (str answer) privileged)))))
         (testing "every call the host saw named the session that actually made it"
           (is (= #{privileged attacker} (set (map first @callers))))))
       (finally (runtime/bind-host! nil)))))

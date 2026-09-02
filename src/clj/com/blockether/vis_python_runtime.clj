@@ -128,6 +128,19 @@
   []
   (Interpreter/version))
 
+(defn trust!
+  "Mark `session` as running code the HOST trusts, answering how many sessions
+   are trusted now. `trusted?` false takes it back.
+
+   A trusted session reaches the filesystem through the runtime's own `_vis_fs`,
+   in C, past the confinement that is there for the model's code — the same shape
+   as a shell: a capability a session was GIVEN, not a policy the process
+   inherits. Trust is keyed on the session the RUNTIME was asked to run, so no
+   block can move itself into one: a name, a frame and an envelope are all
+   forgeable from inside Python, and what the runtime is executing is not."
+  ([session] (trust! session true))
+  ([session trusted?] (Interpreter/trust (str session) (boolean trusted?))))
+
 (defn confine!
   "Confine the interpreter to `read-roots` and `write-roots`, answering the
    counts actually in force as `{:read n :write n}`.

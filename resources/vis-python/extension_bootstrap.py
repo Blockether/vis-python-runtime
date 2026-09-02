@@ -105,22 +105,20 @@ def __vis_member__(op):
     return call
 
 
+# Every `__vis_host_*__` name the host injected becomes a member of `_host`,
+# under that name with the marker trimmed: `__vis_host_jailed_shell__` is
+# `_host.jailed_shell`. The list is NOT written out here on purpose — it lived in
+# this file once, so a door added in the host meant a release of this library
+# before the host could use it, for a name this file only ever passed through.
 _vis_mod = _vis_types.ModuleType("vis")
 _vis_mod.__dict__["_host"] = _vis_types.SimpleNamespace(
-    state_get=__vis_member__(__vis_host_state_get__),
-    state_put=__vis_member__(__vis_host_state_put__),
-    state_del=__vis_member__(__vis_host_state_del__),
-    state_keys=__vis_member__(__vis_host_state_keys__),
-    log=__vis_member__(__vis_host_log__),
-    notify=__vis_member__(__vis_host_notify__),
-    shell=__vis_member__(__vis_host_shell__),
-    jailed_shell=__vis_member__(__vis_host_jailed_shell__),
-    jailed_shell_session=__vis_member__(__vis_host_jailed_shell_session__),
-    request_input=__vis_member__(__vis_host_request_input__),
-    live=__vis_member__(__vis_host_live__),
-    reveal_secret=__vis_member__(__vis_host_reveal_secret__),
-    forget_secret=__vis_member__(__vis_host_forget_secret__),
-    declare_env=__vis_member__(__vis_host_declare_env__),
+    **{
+        _vis_name[len("__vis_host_") : -len("__")]: __vis_member__(_vis_door)
+        for _vis_name, _vis_door in list(globals().items())
+        if _vis_name.startswith("__vis_host_")
+        and _vis_name.endswith("__")
+        and callable(_vis_door)
+    }
 )
 exec(compile(_vis_body, "vis/__init__.py", "exec"), _vis_mod.__dict__)
 _vis_sys.modules["vis"] = _vis_mod
