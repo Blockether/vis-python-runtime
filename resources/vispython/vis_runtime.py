@@ -239,18 +239,26 @@ def _host_tool(name, session=None):
 def install_tool(namespace, name):
     """Bind the host tool `name` into `namespace`, answering the name bound.
 
-    A tool is not an ordinary function: `__vis_deferred__` wraps it, so calling
-    one hands back a thunk — the seam `await`, `gather` and top-level
-    auto-settle are built on. The name joins `__vis_protected_names__` too,
-    because a bound tool is precisely a name a block may not shadow with an
-    import or a top-level `def`.
+    A dotted name publishes one method through a guarded capability namespace;
+    the raw host function never becomes an ordinary session global. Flat and
+    dotted tools are deferred alike, and their protected name is the root a block
+    would otherwise shadow.
     """
     deferred = namespace.get("__vis_deferred__")
     if deferred is None:
         raise RuntimeError("install(namespace) has to run before a tool is bound")
-    namespace[name] = deferred(_host_tool(name, namespace.get("__vis_session__")), name)
+    if "." in name:
+        namespace["__vis_set_dotted_tool__"](
+            name, _host_tool(name, namespace.get("__vis_session__"))
+        )
+        protected = name.split(".", 1)[0]
+    else:
+        namespace[name] = deferred(
+            _host_tool(name, namespace.get("__vis_session__")), name
+        )
+        protected = name
     namespace["__vis_protected_names__"] = sorted(
-        set(namespace.get("__vis_protected_names__") or ()) | {name}
+        set(namespace.get("__vis_protected_names__") or ()) | {protected}
     )
     return name
 

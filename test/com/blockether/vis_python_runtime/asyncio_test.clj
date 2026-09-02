@@ -504,3 +504,14 @@ except ValueError as exc:
                 "{\"arg\": \"b\", \"nested\": {\"deep\": [1, 2, 3]}, \"tool\": \"row\"}, "
                 "\"<c>\", 42, [\"<x>\", \"<y>\"]]")
            (ran to-thread-src)))))
+
+(harness/defbuilt-test dotted-tool-namespace-test
+  (testing "a dotted host tool is callable and exposes only its published member"
+    (let [session (harness/tool-session
+                   {"ledger.echo" (fn [[x]] (str "<" x ">"))})
+          answer (block session
+                        (str "print(await ledger.echo('entry'))\n"
+                             "print(dir(ledger))\n"
+                             "print(ledger.echo.__name__)"))]
+      (is (nil? (:error answer)))
+      (is (= "<entry>\n['echo']\nledger.echo" (out answer))))))
