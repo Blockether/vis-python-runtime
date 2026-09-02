@@ -82,7 +82,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: jvm-api
-          path: target/vis-python-runtime-*.jar
+          path: target/vis-python-runtime.jar
           if-no-files-found: error
 
   release:

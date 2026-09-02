@@ -132,3 +132,8 @@
                                   (.toURL (.toURI (io/file (str jar))))])]
         (Sources/roots (URLClassLoader. urls (ClassLoader/getPlatformClassLoader)) cache))
       (is (= "# vis-python/auto_imports.py" (slurp (io/file (str cache) "vis-python/auto_imports.py")))))))
+
+(deftest release-workflow-uploads-the-built-jar-test
+  (testing "the release job names the versionless jar emitted by build/jar"
+    (is (str/includes? (slurp ".github/workflows/release.yml")
+                       "path: target/vis-python-runtime.jar"))))
