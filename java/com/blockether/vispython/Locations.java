@@ -108,10 +108,10 @@ public final class Locations {
   }
 
   /**
-   * Where a platform artifact that arrived inside a jar is unpacked, beside the
-   * packages and the bytecode cache: per-version, per-platform, and rebuildable
-   * by deleting it. A cdylib and the interpreter tree it was linked against are
-   * one unit, so both land here together — see {@link Native#materialize}.
+   * Where a host unpacks the platform release archive, beside the packages and
+   * the bytecode cache: per-version, per-platform, and rebuildable by deleting
+   * it. A cdylib and the interpreter tree it was linked against are one unit, so
+   * both land here together.
    */
   public static String runtimeDir(String version, String platform) {
     return statePath("runtime", version, platform);

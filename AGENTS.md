@@ -33,8 +33,10 @@ docstring or a test can state lives there, not here.
   (`VIS_PYTHON_NATIVE_PATH`, then the per-platform classpath resource). Never
   `System/loadLibrary` against a fixed path or a bundled absolute location.
 - **`resources/prebuilds/` is build output, git-ignored.** It reaches consumers
-  only as `com.blockether/vis-python-runtime-native-<platform>` jars built by
-  `clojure -T:build native-jar :platform <tag>`.
+  as the GitHub release asset `vis-python-runtime-<platform>-<version>.tar.gz`
+  built by `clojure -T:build platform-archive :platform <tag>`, NEVER as a maven
+  artifact: the tree is tens of megabytes, past what Clojars accepts, and a jar
+  carries neither the symlinks nor the execute bits an interpreter needs.
 - **The repo-root `VIS_PYTHON_VERSION` file is the single version source**, the
   same convention as vis' `VIS_VERSION`: verbatim, no env override, no snapshot
   suffix. The build writes it into the jar as the NAMESPACED resource

@@ -1,17 +1,15 @@
 (ns build
   "Build/deploy for vis-python-runtime. The `com.blockether/vis-python-runtime`
-   jar is small — one namespace plus a namespaced VERSION. The embedded CPython
-   cdylib ships as per-platform artifacts such as
-   `com.blockether/vis-python-runtime-native-darwin-arm64`, each carrying the
-   prebuilt library under `prebuilds/<platform>/`.
+   jar is small — the Java bridge, one namespace, and the Python the runtime
+   executes.
 
-   NOT DONE, and Phase 5 of PLAN.md owns it: `native-jar` copies the cdylib
-   ALONE, while `build.sh` now vendors a whole CPython tree beside it. A jar
-   cannot carry that tree faithfully — it holds no symlinks and no permission
-   bits — so the platform artifact needs an archive resource extracted once,
-   the way the cdylib itself is extracted today. Until that lands, a published
-   native jar resolves no vendored interpreter and the interpreter falls back
-   to the machine's own standard library."
+   The vendored CPython does NOT ship as a maven artifact. A platform tree is
+   tens of megabytes, past what Clojars accepts, and a jar carries neither
+   symlinks nor permission bits — an unpacked interpreter would be broken.
+   `platform-archive` writes `target/vis-python-runtime-<platform>-<version>.tar.gz`
+   from `resources/prebuilds/<platform>/`, and those tarballs are the assets of
+   the `v<version>` GitHub release. A consumer downloads one for its platform,
+   unpacks it and points the runtime at the result with `runtime/use-library!`."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.build.api :as b]
@@ -32,7 +30,6 @@
   (str/trim (slurp "VIS_PYTHON_VERSION")))
 
 (def class-dir "target/classes")
-(def native-class-dir "target/native-classes")
 ;; The jar is assembled somewhere ELSE than `target/classes`, which `:deps/prep-lib`
 ;; owns: a consumer taking this library by :local/root has both on its classpath,
 ;; and a packaged copy of the Python sitting in the prep output would be resolved
@@ -119,54 +116,43 @@
   (b/jar {:class-dir jar-class-dir :jar-file jar-file})
   (println "Built:" jar-file "version:" version))
 
-(defn- native-lib [platform]
-  (symbol "com.blockether" (str "vis-python-runtime-native-" platform)))
+(defn platform-archive
+  "Write the release asset for one platform: everything under
+   `resources/prebuilds/<platform>/` — the cdylib and the vendored interpreter
+   tree beside it — as a gzipped tar, contents at the archive root so unpacking
+   into a directory yields exactly what `Locations/pythonHome` expects.
 
-(defn native-jar [{:keys [platform]}]
+   `tar` rather than a jar or a zip: only tar preserves the symlinks and the
+   executable bits the interpreter tree depends on."
+  [{:keys [platform]}]
   (let [platform (some-> platform name)]
     (when-not (native-platforms platform)
       (throw (ex-info (str "Unknown native platform: " platform) {:platform platform :known native-platforms})))
-    (let [fname (native-libs platform)
-          src   (format "resources/prebuilds/%s/%s" platform fname)
-          lib*  (native-lib platform)
-          jar*  (format "target/%s.jar" (name lib*))]
-      (b/delete {:path native-class-dir})
-      (b/delete {:path jar*})
-      (when-not (.exists (io/file src))
+    (let [dir (io/file "resources/prebuilds" platform)
+          src (io/file dir (native-libs platform))
+          out (io/file (format "target/%s-%s-%s.tar.gz" (name lib) platform version))]
+      (when-not (.exists src)
         (throw (ex-info (str "runtime cdylib not found (build native/vispython first): " src)
-                        {:platform platform :path src})))
-      (b/write-pom {:class-dir native-class-dir
-                    :lib lib*
-                    :version version
-                    :basis @basis
-                    :src-dirs []
-                    :pom-data (pom-data (format "Prebuilt embedded-CPython cdylib (FFM) for %s." platform))})
-      ;; The WHOLE platform directory: the cdylib plus the vendored interpreter
-      ;; tree beside it, because `Locations/pythonHome` resolves `python/` next
-      ;; to the resolved library and a shipped artifact carries its own standard
-      ;; library rather than borrowing the machine's.
-      (b/copy-dir {:src-dirs   [(format "resources/prebuilds/%s" platform)]
-                   :target-dir (format "%s/prebuilds/%s" native-class-dir platform)})
-      (b/jar {:class-dir native-class-dir :jar-file jar*})
-      (println "Built:" jar* "version:" version)
-      jar*)))
+                        {:platform platform :path (str src)})))
+      (b/delete {:path (str out)})
+      (io/make-parents out)
+      ;; SOURCE only, as in the jar: `__pycache__` is bytecode compiled against
+      ;; one absolute path on one machine, and a shipped copy of it is either
+      ;; ignored or wrong.
+      (let [{:keys [exit]} (b/process {:command-args ["tar" "-czf" (.getAbsolutePath out)
+                                                      "--exclude" "__pycache__" "--exclude" "*.pyc"
+                                                      "-C" (str dir) "."]})]
+        (when-not (zero? exit)
+          (throw (ex-info "tar failed" {:platform platform :exit exit}))))
+      (println "Built:" (str out) (format "(%.1f MB)" (/ (.length out) 1048576.0)))
+      (str out))))
 
 (defn deploy [_]
   (jar nil)
   (dd/deploy {:installer :remote :artifact jar-file :pom-file (b/pom-path {:lib lib :class-dir jar-class-dir})}))
 
-(defn deploy-native [{:keys [platform]}]
-  (let [platform (some-> platform name)
-        jar*     (native-jar {:platform platform})
-        lib*     (native-lib platform)]
-    (dd/deploy {:installer :remote :artifact jar* :pom-file (b/pom-path {:lib lib* :class-dir native-class-dir})})))
 
 (defn install [_]
   (jar nil)
   (dd/deploy {:installer :local :artifact jar-file :pom-file (b/pom-path {:lib lib :class-dir jar-class-dir})}))
 
-(defn install-native [{:keys [platform]}]
-  (let [platform (some-> platform name)
-        jar*     (native-jar {:platform platform})
-        lib*     (native-lib platform)]
-    (dd/deploy {:installer :local :artifact jar* :pom-file (b/pom-path {:lib lib* :class-dir native-class-dir})})))

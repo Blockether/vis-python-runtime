@@ -22,8 +22,10 @@
    Nothing links at build time. The library is resolved when it is first needed:
    a path the host named through `use-library!` wins, then
    `VIS_PYTHON_NATIVE_PATH`, then the classpath resource
-   `prebuilds/<platform>/<file>` that `com.blockether/vis-python-runtime-native-<platform>`
-   carries. A failure anywhere below is a `VisPythonException` whose `.data`
+   `prebuilds/<platform>/<file>` a checkout has after a native build. The
+   published platform artifact is a release archive, not a jar, so a host that
+   unpacked one names it here. A failure anywhere below is a
+   `VisPythonException` whose `.data`
    names the symbol, status, platform or path it is about."
   (:import [com.blockether.vispython HostFunction Interpreter Locations Native Pip]
            [java.util.function Consumer]))
@@ -78,16 +80,6 @@
    environment. `nil` restores ordinary resolution."
   [path]
   (Native/use (some-> path str)))
-
-(defn materialize-library!
-  "Unpack `prebuilds/<platform>/` out of a platform JAR into
-   `~/.vis/python/runtime/<version>/<platform>` and answer it like
-   `resolve-library`. The whole directory travels: the interpreter is found
-   beside its library, so the cdylib alone is a runtime that cannot import."
-  ([jar] (materialize-library! jar (platform)))
-  ([jar platform-tag]
-   (let [found (Native/materialize (.toPath (java.io.File. (str jar))) platform-tag)]
-     {:source (keyword (.source found)) :path (.path found)})))
 
 (defn resolve-python-home
   "The vendored CPython tree to root the interpreter at, or nil to let CPython

@@ -26,10 +26,11 @@ CPython's own speed.
     resources/prebuilds/    build output per platform (git-ignored)
     test/                   clojure -T:build javac && clojure -M:test
 
-The jar carries no library. It resolves one at runtime from
-`VIS_PYTHON_NATIVE_PATH`, else from the classpath resource
-`prebuilds/<platform>/<file>` shipped by
-`com.blockether/vis-python-runtime-native-<platform>`.
+The jar carries no library. It resolves one at runtime from a path the host
+names (`runtime/use-library!`), else `VIS_PYTHON_NATIVE_PATH`, else the
+classpath resource `prebuilds/<platform>/<file>` a built checkout has. The
+published platform artifact is the release asset
+`vis-python-runtime-<platform>-<version>.tar.gz`, unpacked by its consumer.
 
 ```clojure
 (require '[com.blockether.vis-python-runtime :as runtime])
