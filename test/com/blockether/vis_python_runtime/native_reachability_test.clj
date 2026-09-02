@@ -72,5 +72,4 @@
       (is (contains? globs Sources/MANIFEST)
           (str "without " Sources/MANIFEST " the embedding binary cannot find any "
                "of this library's Python"))
-      (is (some #(re-find #"vispython/.*\.py$" %) globs))
       (is (some #(re-find #"vis-python/.*\.py$" %) globs)))))

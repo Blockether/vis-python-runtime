@@ -11,8 +11,7 @@ process; a session is a namespace, and every session calls ``install`` on its
 own globals to receive the runtime's public names.
 
 The runtime body is ``resources/vis-python/async_runtime.py`` in this package
-and reaches the interpreter as a source root; Vis' copy is hashed against it
-(``sandbox-parity-test``) until Vis pins this library and deletes its own.
+and reaches the interpreter as a source root.
 """
 
 import ast

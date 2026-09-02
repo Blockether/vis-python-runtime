@@ -324,7 +324,7 @@ static void vis_py_batch_free(vis_py_batch *batch)
 
 static struct {
     pthread_mutex_t lock;
-    pthread_cond_t work;     /* a task was queued, or the pool is stopping */
+    pthread_cond_t work;     /* a task was queued */
     pthread_cond_t finished; /* a task finished */
     pthread_t worker[VIS_PY_WORKERS_MAX];
     vis_py_task *head;
@@ -332,7 +332,6 @@ static struct {
     int running; /* workers created */
     int idle;    /* workers waiting for a task, holding no thread state */
     int started;
-    int stopping;
     int queued; /* tasks waiting for a worker to claim them */
 } vis_py_pool = {PTHREAD_MUTEX_INITIALIZER,
                  PTHREAD_COND_INITIALIZER,
@@ -340,7 +339,6 @@ static struct {
                  {0},
                  NULL,
                  NULL,
-                 0,
                  0,
                  0,
                  0,
@@ -434,16 +432,12 @@ static void *vis_py_worker_main(void *arg)
 #endif
     for (;;) {
         pthread_mutex_lock(&vis_py_pool.lock);
-        while (vis_py_pool.head == NULL && !vis_py_pool.stopping) {
+        while (vis_py_pool.head == NULL) {
             vis_py_pool.idle++;
             pthread_cond_wait(&vis_py_pool.work, &vis_py_pool.lock);
             vis_py_pool.idle--;
         }
         task = vis_py_pool.head;
-        if (task == NULL) {
-            pthread_mutex_unlock(&vis_py_pool.lock);
-            return NULL;
-        }
         vis_py_pool.head = task->next;
         if (vis_py_pool.head == NULL) {
             vis_py_pool.tail = NULL;
@@ -505,33 +499,6 @@ static int vis_py_pool_start(void)
     return 0;
 }
 
-/* Stop the workers and join them. The caller must NOT hold the GIL: a worker
-   finishing its task needs it. */
-static void vis_py_pool_stop(void)
-{
-    pthread_t worker[VIS_PY_WORKERS_MAX];
-    int count;
-    int i;
-
-    pthread_mutex_lock(&vis_py_pool.lock);
-    if (!vis_py_pool.started) {
-        pthread_mutex_unlock(&vis_py_pool.lock);
-        return;
-    }
-    vis_py_pool.stopping = 1;
-    count = vis_py_pool.running;
-    memcpy(worker, vis_py_pool.worker, sizeof worker[0] * (size_t)count);
-    pthread_cond_broadcast(&vis_py_pool.work);
-    pthread_mutex_unlock(&vis_py_pool.lock);
-    for (i = 0; i < count; i++) {
-        pthread_join(worker[i], NULL);
-    }
-    pthread_mutex_lock(&vis_py_pool.lock);
-    vis_py_pool.started = 0;
-    vis_py_pool.stopping = 0;
-    vis_py_pool.running = 0;
-    pthread_mutex_unlock(&vis_py_pool.lock);
-}
 /* --------------------------------------------------------------------------
  * Confinement.
  *
@@ -1614,15 +1581,6 @@ int vispython_drain_log(char *out, int cap)
     out[written] = '\0';
     return written;
 }
-/* The thread state parked at the end of initialization, while nobody is running
-   Python. `Py_InitializeEx` leaves the GIL HELD by the thread that started the
-   interpreter; keeping it that way would force every entry point onto that one
-   thread, and a host upcall parking it would stall every other session. So
-   initialization ends with `PyEval_SaveThread` and each entry point takes the
-   GIL for itself - the ordinary embedding shape. Finalization restores this
-   state on the thread that parked it. */
-static PyThreadState *vis_py_main_state = NULL;
-
 /* Start the interpreter, rooted at `home` when one is given.
 
    `home` is a VENDORED CPython tree — the directory holding `lib/python3.14/`.
@@ -1702,8 +1660,12 @@ int vispython_initialize(const char *home, const char *pycache_prefix, char *out
     vis_py_started = 1;
     vis_py_record(VIS_PY_LOG_INFO, "init", "\"cap\":%d,\"workers\":%d", vis_py_thread_cap,
                   vis_py_worker_target());
-    /* Hand the GIL back: see `vis_py_main_state`. */
-    vis_py_main_state = PyEval_SaveThread();
+    /* Hand the GIL back. `Py_InitializeEx` leaves it HELD by the thread that
+       started the interpreter; keeping it that way would force every entry point
+       onto that one thread, and a host upcall parking it would stall every other
+       session. So initialization ends here and each entry point takes the GIL
+       for itself - the ordinary embedding shape. */
+    (void)PyEval_SaveThread();
     return 0;
 }
 
@@ -1971,23 +1933,3 @@ int vispython_run_block(const char *module_name, const char *code, char *out, in
     return status;
 }
 
-/* Stop the interpreter. Idempotent. Returns 0, or VIS_PY_ERR_INIT if CPython
-   reported a non-zero finalization status. */
-int vispython_finalize(void)
-{
-    int status;
-
-    if (!vis_py_started) {
-        return 0;
-    }
-    /* Workers first, and without the GIL: one of them may be inside a task and
-       needs the GIL to leave it. Finalizing under a live worker is a crash. */
-    vis_py_pool_stop();
-    /* Take back the state parked at initialization, on the thread that parked
-       it: `Py_FinalizeEx` runs under the GIL and wants the main thread state. */
-    PyEval_RestoreThread(vis_py_main_state);
-    vis_py_main_state = NULL;
-    status = Py_FinalizeEx();
-    vis_py_started = 0;
-    return (status == 0) ? 0 : VIS_PY_ERR_INIT;
-}

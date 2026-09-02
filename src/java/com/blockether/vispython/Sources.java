@@ -35,24 +35,11 @@ public final class Sources {
   /** Classpath resource naming every Python file the artifact ships. */
   public static final String MANIFEST = "vis-python-runtime/SOURCES";
 
-  /**
-   * The directories that go on {@code sys.path}. The tracked manifest is present
-   * in both source and packaged artifacts; {@link #ROOTS} remains the closed root
-   * vocabulary and the fallback for an explicitly constructed manifest-free
-   * classpath.
-   */
-  public static final List<String> ROOTS = List.of("vispython", "vis-python");
-
   private Sources() {}
 
   /** Every directory this artifact provides, empty when it ships none. */
   public static List<String> roots() {
     return roots(Sources.class.getClassLoader(), cache());
-  }
-
-  /** The directories that go on {@code sys.path}. */
-  public static List<String> importRoots() {
-    return roots();
   }
 
   /** Where extraction lands: {@code ~/.vis/python/sources/<version>}. */
@@ -65,7 +52,7 @@ public final class Sources {
   public static List<String> roots(ClassLoader loader, Path cache) {
     URL anchor = loader.getResource(MANIFEST);
     if (anchor == null) {
-      return onClasspath(loader);
+      return List.of();
     }
     Map<String, List<String>> listed = manifest(anchor);
     List<String> roots = new ArrayList<>();
@@ -99,30 +86,7 @@ public final class Sources {
     }
   }
 
-  /**
-   * Plain directories on a deliberately manifest-free classpath. Shipped source
-   * and jar artifacts carry the manifest; this fallback keeps the resolver total
-   * for embedders that construct an exploded tree themselves.
-   */
-  private static List<String> onClasspath(ClassLoader loader) {
-    URL url = loader.getResource(ROOTS.get(0) + "/");
-    if (url == null || !"file".equals(url.getProtocol())) {
-      return List.of();
-    }
-    List<String> roots = new ArrayList<>();
-    try {
-      Path parent = Path.of(url.toURI()).toAbsolutePath().getParent();
-      for (String root : ROOTS) {
-        Path directory = parent.resolve(root);
-        if (Files.isDirectory(directory)) {
-          roots.add(directory.toString());
-        }
-      }
-    } catch (Exception e) {
-      return List.of();
-    }
-    return List.copyOf(roots);
-  }
+
 
   /** The manifest's entries grouped by their first path segment, order kept. */
   private static Map<String, List<String>> manifest(URL anchor) {

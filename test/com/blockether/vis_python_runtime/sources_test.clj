@@ -15,7 +15,7 @@
            [java.util.jar JarEntry JarOutputStream]))
 
 (def ^:private listed
-  ["vispython/vis_runtime.py" "vis-python/auto_imports.py"])
+  ["vis-python/vis_runtime.py" "vis-python/auto_imports.py"])
 
 (defn- temp-dir [prefix]
   (.toAbsolutePath (Files/createTempDirectory prefix (make-array FileAttribute 0))))
@@ -31,7 +31,7 @@
 (deftest tracked-source-manifest-covers-every-shipped-module-test
   (testing "a git dependency is self-describing before a jar is built"
     (let [resources (io/file "resources")
-          expected (->> Sources/ROOTS
+          expected (->> ["vis-python"]
                         (mapcat #(file-seq (io/file resources %)))
                         (filter #(and (.isFile ^java.io.File %)
                                       (str/ends-with? (.getName ^java.io.File %) ".py")))
@@ -78,8 +78,7 @@
     (let [root  (exploded)
           cache (temp-dir "vis-sources-cache")
           roots (Sources/roots (loader (str root "/")) cache)]
-      (is (= 2 (count roots)))
-      (is (= [(str root "/vispython") (str root "/vis-python")] roots))
+      (is (= [(str root "/vis-python")] roots))
       (is (empty? (seq (.listFiles (io/file (str cache)))))
           "nothing is copied when the files are already files"))))
 
@@ -88,7 +87,7 @@
     (let [jar   (jarred)
           cache (temp-dir "vis-sources-cache")
           roots (Sources/roots (loader jar) cache)]
-      (is (= [(str cache "/vispython") (str cache "/vis-python")] roots))
+      (is (= [(str cache "/vis-python")] roots))
       (is (= "# vis-python/auto_imports.py" (slurp (io/file (str cache) "vis-python/auto_imports.py"))))
       (testing "the marker, not a re-read, is what makes the second call free"
         (spit (io/file (str cache) "vis-python/auto_imports.py") "# edited")
@@ -99,26 +98,33 @@
   (testing "an artifact that ships no Python contributes no import directory"
     (is (empty? (Sources/roots (loader (temp-dir "vis-sources-empty")) (temp-dir "vis-cache"))))))
 
-(deftest exploded-without-a-manifest-is-still-found-test
-  (testing "a git or :local/root dependency has no jar and so no manifest"
+(deftest without-the-manifest-nothing-is-claimed-test
+  (testing "a classpath entry that ships no manifest contributes no root, however it is shaped"
+    ;; The manifest is TRACKED, so every real shape carries it - a checkout, a
+    ;; git dependency, a :local/root, a jar, an image. Guessing at directory
+    ;; names for a shape that does not exist is how a host's own
+    ;; `resources/vis-python/` gets imported in place of ours.
     (let [root (temp-dir "vis-sources-nomanifest")]
       (doseq [entry listed] (write! root entry (str "# " entry)))
-      (is (= [(str root "/vispython") (str root "/vis-python")]
-             (Sources/roots (loader (str root "/")) (temp-dir "vis-cache")))))))
+      (is (empty? (Sources/roots (loader (str root "/")) (temp-dir "vis-cache")))))))
 
 ;; The host embedding this library carries a directory of the same name, and
 ;; its own resources come FIRST on the classpath.
 (deftest a-hosts-own-directories-are-not-mistaken-for-ours-test
-  (testing "the roots are taken from the one directory that holds `vispython/`"
+  (testing "the roots are taken from the directory holding the manifest, not from the name"
+    ;; The host's copy comes FIRST on the classpath and is named identically, so
+    ;; a lookup by name answers with it. The manifest is what only this library
+    ;; ships, and every entry is addressed relative to it.
     (let [host (temp-dir "vis-sources-host")
           ours (temp-dir "vis-sources-ours")]
       (write! host "vis-python/auto_imports.py" "# the host's own copy")
+      (write! ours Sources/MANIFEST (manifest))
       (doseq [entry listed] (write! ours entry (str "# " entry)))
       (let [urls  (into-array URL (map #(.toURL (.toURI (io/file (str % "/"))))
                                        [host ours]))
             found (Sources/roots (URLClassLoader. urls (ClassLoader/getPlatformClassLoader))
                                  (temp-dir "vis-cache"))]
-        (is (= [(str ours "/vispython") (str ours "/vis-python")] found))))))
+        (is (= [(str ours "/vis-python")] found))))))
 
 ;; The same shadowing hazard as above, but for a PACKAGED artifact: the entries
 ;; are addressed from the manifest, so a host directory earlier on the classpath

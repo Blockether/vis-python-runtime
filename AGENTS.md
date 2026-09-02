@@ -60,11 +60,20 @@ docstring or a test can state lives there, not here.
   Shims do NOT: the sandbox runs a real CPython with pip, so `numpy` is numpy
   and the only Python Vis still ships is its own host-call doors, which call
   Vis' tools and could not live anywhere else.
-- **`resources/vis-python/` is the sandbox's ambient runtime; this repository's
-  own guest Python is `resources/vispython/vis_runtime.py`.** The two are
-  separate roots with separate jobs. `native/vispython/` is build input a
-  compiler reads, never a shipped source root, so guest Python never lives
-  there.
+- **ONE Python resource root: `resources/vis-python/`.** The sandbox's ambient
+  runtime and this library's own guest half (`vis_runtime.py`) live there
+  together, because two roots differing only by a hyphen bought nothing but the
+  question of which was which. `resources/vis-python-runtime/` is NOT a root: it
+  is the metadata namespace holding `SOURCES` (and the `VERSION` the build
+  writes), named after the artifact so neither collides on a shared classpath.
+  `native/vispython/` is build input a compiler reads, never a shipped source
+  root, so guest Python never lives there.
+- **Python is addressed from the MANIFEST, never by directory name.** There is no
+  name lookup and no `user.dir` fallback: the host embedding this library carries
+  a `resources/vis-python/` of its own, earlier on the classpath, and a lookup by
+  name answers with the HOST's copies (measured). `Sources` resolves every entry
+  relative to the `SOURCES` resource's own URL, which only this library ships, so
+  an artifact carrying no manifest contributes no root at all.
 - **ONE wire dialect: JSON, in both directions.** `host_call` carries a JSON
   envelope in, `vis_runtime.to_json` renders the value out, and `run` /
   `run-block` answer JSON TEXT the caller reads with the reader it already has.

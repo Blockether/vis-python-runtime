@@ -90,8 +90,7 @@ public final class Interpreter {
       Map.entry("vispython_logging", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_drain_log", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_take_result", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
-      Map.entry("vispython_interrupt", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
-      Map.entry("vispython_finalize", descriptor()));
+      Map.entry("vispython_interrupt", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)));
 
   private static final ExecutorService THREAD = Executors.newSingleThreadExecutor(runnable -> {
     Thread thread = new Thread(runnable, "vis-python-runtime");
@@ -160,14 +159,6 @@ public final class Interpreter {
       Thread.currentThread().interrupt();
       throw new VisPythonException("interrupted waiting for the interpreter", Map.of(), e);
     }
-  }
-
-  /**
-   * Invoke {@code symbol} with an out-buffer appended, answering the buffer's
-   * text on success and throwing with it on a negative status.
-   */
-  private static String call(String symbol, String... args) {
-    return invoke(symbol, args);
   }
 
   private static String invoke(String symbol, String... args) {
@@ -275,7 +266,7 @@ public final class Interpreter {
         wiring.append("if ").append(literal(target)).append(" not in sys.path:\n");
         wiring.append("    sys.path.append(").append(literal(target)).append(")\n");
       }
-      call("vispython_exec", DEFAULT_SESSION, wiring.toString());
+      invoke("vispython_exec", DEFAULT_SESSION, wiring.toString());
     }
     return new Startup(library().path(), roots, home, cache, target);
   }
@@ -292,7 +283,7 @@ public final class Interpreter {
 
   /** The running interpreter's version string. Requires a start. */
   public static String version() {
-    return call("vispython_version");
+    return invoke("vispython_version");
   }
 
   /**
@@ -309,7 +300,7 @@ public final class Interpreter {
    * added to the roots here, so a host names only the session's directories.
    */
   public static int[] confine(List<String> readRoots, List<String> writeRoots, String refusal) {
-    String answer = call("vispython_confine", String.join("\n", readRoots),
+    String answer = invoke("vispython_confine", String.join("\n", readRoots),
         String.join("\n", writeRoots), refusal == null ? "" : refusal);
     String[] counts = answer.trim().split("\\s+");
     return new int[] {Integer.parseInt(counts[0]), Integer.parseInt(counts[1])};
@@ -327,7 +318,7 @@ public final class Interpreter {
    * PROCESS state, so it REPLACES the flag for every session.
    */
   public static boolean network(boolean allowed, String refusal) {
-    String answer = call("vispython_network", allowed ? "1" : "0", refusal == null ? "" : refusal);
+    String answer = invoke("vispython_network", allowed ? "1" : "0", refusal == null ? "" : refusal);
     return !"0".equals(answer.trim());
   }
 
@@ -349,7 +340,7 @@ public final class Interpreter {
    * gather may hold, so a wide gather cannot take the pool from other sessions.
    */
   public static int[] threads(int cap, int workers, int quota) {
-    String answer = call("vispython_threads", cap + " " + workers + " " + quota);
+    String answer = invoke("vispython_threads", cap + " " + workers + " " + quota);
     String[] numbers = answer.trim().split("\\s+");
     return new int[] {Integer.parseInt(numbers[0]), Integer.parseInt(numbers[1]),
         Integer.parseInt(numbers[2])};
@@ -371,7 +362,7 @@ public final class Interpreter {
    * so it must never be called from the thread it interrupts.
    */
   public static boolean interrupt() {
-    return "1".equals(call("vispython_interrupt").trim());
+    return "1".equals(invoke("vispython_interrupt").trim());
   }
 
   /**
@@ -382,7 +373,7 @@ public final class Interpreter {
    * is for running this library with nothing draining it.
    */
   public static String[] logging(String level, boolean mirror) {
-    return call("vispython_logging", level + " " + (mirror ? 1 : 0)).trim().split("\\s+");
+    return invoke("vispython_logging", level + " " + (mirror ? 1 : 0)).trim().split("\\s+");
   }
 
   /**
@@ -429,11 +420,6 @@ public final class Interpreter {
     }
   }
 
-  /** Drain into {@code sink} every 250 ms. */
-  public static void drainTo(Consumer<String> sink) {
-    drainTo(sink, 250);
-  }
-
   /**
    * Drain continuously into {@code sink}, which receives NDJSON text. This is
    * how a host is meant to read the runtime: the ring drops its OLDEST when
@@ -468,12 +454,12 @@ public final class Interpreter {
 
   /** Evaluate {@code code} as an expression, answering {@code str(result)}. */
   public static String eval(String session, String code) {
-    return call("vispython_eval", session, code);
+    return invoke("vispython_eval", session, code);
   }
 
   /** Run {@code code} as a module body, for its side effects. */
   public static void exec(String session, String code) {
-    call("vispython_exec", session, code);
+    invoke("vispython_exec", session, code);
   }
 
   /**
@@ -482,7 +468,7 @@ public final class Interpreter {
    * because the caller reads it with the JSON reader it already has.
    */
   public static String run(String session, String code) {
-    return call("vispython_run", session, code);
+    return invoke("vispython_run", session, code);
   }
 
   /**
@@ -492,7 +478,7 @@ public final class Interpreter {
    * this returns.
    */
   public static String runBlock(String session, String code) {
-    return call("vispython_run_block", session, code);
+    return invoke("vispython_run_block", session, code);
   }
 
   /**
@@ -639,24 +625,6 @@ public final class Interpreter {
       } catch (Throwable t) {
         throw new VisPythonException("vis-python: could not bind the host", Map.of(), t);
       }
-    });
-  }
-
-  /** Stop the interpreter. Idempotent. */
-  public static void shutdown() {
-    MethodHandle handle = handles().get("vispython_finalize");
-    onRuntimeThread(() -> {
-      int status;
-      try {
-        status = (int) handle.invokeExact();
-      } catch (Throwable t) {
-        throw new VisPythonException("vis-python: could not finalize", Map.of(), t);
-      }
-      if (status < 0) {
-        throw new VisPythonException("vis-python: interpreter did not finalize cleanly",
-            Map.of("symbol", "vispython_finalize", "status", status));
-      }
-      return status;
     });
   }
 }

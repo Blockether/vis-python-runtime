@@ -22,8 +22,9 @@ CPython's own speed.
     src/clj/                the Clojure API over them, and nothing else
     native/vispython/       the C shim + the CPython vendoring build
     native/visjail/         the process ABI: bubblewrap / Seatbelt
-    resources/vispython/    the guest half of the boundary (`vis_runtime.py`)
-    resources/vis-python/   Vis' sandbox modules, mirrored byte for byte
+    resources/vis-python/   ALL the Python this library ships: the guest half of
+                            the boundary (`vis_runtime.py`) and the sandbox runtime
+    resources/vis-python-runtime/  SOURCES: the manifest naming every file above
     resources/prebuilds/    build output per platform (git-ignored)
     test/                   clojure -T:build javac && clojure -M:test
 

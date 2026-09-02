@@ -34,14 +34,6 @@
   "Name of the environment variable that overrides library resolution."
   Native/NATIVE_PATH_ENV)
 
-(def python-home-env
-  "Name of the environment variable that overrides the vendored interpreter."
-  Locations/PYTHON_HOME_ENV)
-
-(def packages-dir-env
-  "Name of the environment variable that overrides the package directory."
-  Locations/PACKAGES_ENV)
-
 (def pycache-prefix-env
   "Name of the environment variable that overrides the bytecode cache location."
   Locations/PYCACHE_PREFIX_ENV)
@@ -109,24 +101,6 @@
                (vec linux-arguments) (int (or proxy-port 0)) (int (or inbound-port 0))
                (boolean confined?) (boolean pty?) (boolean merge-stderr?)
                (int (or rows 0)) (int (or columns 0)))))
-
-(defn resolve-packages-dir
-  "Where pip installs for the sandbox, `~/.vis/python/packages` by default. The
-   artifact bundles nothing, so this is where every real distribution comes
-   from — a host confining the interpreter makes it readable, never writable."
-  []
-  (Locations/packagesDir))
-
-(defn resolve-pycache-prefix
-  "Where the interpreter writes the bytecode it compiles,
-   `~/.vis/python/pycache` by default. The artifact ships none."
-  []
-  (Locations/pycachePrefix))
-
-(defn resolve-python-executable
-  "The vendored interpreter's own executable, for the host to RUN."
-  ([] (Interpreter/pythonExecutable))
-  ([python-home] (Locations/pythonExecutable python-home)))
 
 (defn initialize!
   "Start the embedded interpreter, once per process, and put `:source-paths`
@@ -333,11 +307,6 @@
      (reify HostFunction
        (call [_ name payload] (str (f name payload))))))
   nil)
-(defn finalize!
-  "Stop the interpreter. Idempotent."
-  []
-  (Interpreter/shutdown))
-
 (defn certificates-pem!
   "Export the JVM's trust anchors to a PEM file for pip and answer its path,
    `~/.vis/python/cacert.pem` by default. Pip would otherwise verify against the

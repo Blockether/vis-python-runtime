@@ -1,6 +1,5 @@
 package com.blockether.vispython;
 
-import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashSet;
@@ -24,7 +23,6 @@ public final class Locations {
   public static final String PYTHON_HOME_ENV = "VIS_PYTHON_HOME";
   public static final String PACKAGES_ENV = "VIS_PYTHON_PACKAGES";
   public static final String PYCACHE_PREFIX_ENV = "VIS_PYTHON_PYCACHE_PREFIX";
-  public static final String SOURCE_PATH_ENV = "VIS_PYTHON_SOURCE_PATH";
 
   private Locations() {}
 
@@ -160,14 +158,13 @@ public final class Locations {
 
   /**
    * Directories CPython may import from, in order: what the caller passed, then
-   * {@code VIS_PYTHON_SOURCE_PATH}, then whatever this ARTIFACT carries
-   * ({@link Sources}), then this repository's own {@code resources/vispython/}
-   * and {@code resources/vis-python/} in a dev checkout.
+   * whatever this ARTIFACT carries ({@link Sources}).
    *
-   * <p>The checkout fallback demands BOTH directories, because {@code user.dir}
-   * belongs to whoever started the JVM: an embedding host with a
-   * {@code resources/vis-python/} of its own would otherwise have its copy
-   * imported instead of this library's, silently and in preference.
+   * <p>There is no {@code user.dir} fallback and no lookup by directory name: an
+   * embedding host with a {@code resources/vis-python/} of its own would have its
+   * copy imported instead of this library's, silently and in preference. Every
+   * path here is addressed from the manifest resource, which only this library
+   * ships.
    */
   public static List<String> sourceRoots(List<String> extra) {
     Set<String> roots = new LinkedHashSet<>();
@@ -178,27 +175,7 @@ public final class Locations {
         }
       }
     }
-    String path = env(SOURCE_PATH_ENV);
-    if (path != null) {
-      for (String root : path.split(java.util.regex.Pattern.quote(File.pathSeparator))) {
-        if (!root.isBlank()) {
-          roots.add(root);
-        }
-      }
-    }
-    roots.addAll(Sources.importRoots());
-    String here = System.getProperty("user.dir");
-    if (here != null) {
-      List<Path> checkout = List.of(Path.of(here, "resources", "vispython"),
-          Path.of(here, "resources", "vis-python"));
-      if (Files.isDirectory(checkout.get(0)) && Files.isDirectory(checkout.get(1))) {
-        for (Path candidate : checkout) {
-          if (Files.isDirectory(candidate)) {
-            roots.add(candidate.toAbsolutePath().toString());
-          }
-        }
-      }
-    }
+    roots.addAll(Sources.roots());
     return List.copyOf(roots);
   }
 }

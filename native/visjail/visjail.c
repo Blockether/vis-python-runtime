@@ -25,7 +25,6 @@
 #include <util.h>
 #else
 #include <pty.h>
-extern int vis_bwrap_main(int argc, char **argv);
 #endif
 
 extern char **environ;
