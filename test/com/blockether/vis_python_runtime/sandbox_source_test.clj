@@ -1,8 +1,8 @@
 (ns com.blockether.vis-python-runtime.sandbox-source-test
   "The acceptance criterion for the whole project: the sandbox runtime this
    repository now carries loads in the embedded interpreter with no edit.
-   `async_runtime.py` is the hard one — 4.4k lines carrying the handle registry,
-   the shell driver and the descriptor discipline — so it is the file that
+   `async_runtime.py` is the hard one — 4k lines carrying the shell driver, the
+   awaitable settling and the deferred-tool protocol — so it is the file that
    decides whether this is a runtime swap or a rewrite.
 
    It is COMPILED from that file and executed INTO the session namespace:
@@ -32,5 +32,5 @@
             "the code executed into the session came from THIS repository's resources")
         (is (= "True" (runtime/eval-str session "'__VisShell__' in globals()"))
             "the shell handle type the host drives is defined")
-        (is (= "True" (runtime/eval-str session "callable(__vis_reclaim_fds__)"))
-            "the descriptor registry the sandbox sweeps with is present")))))
+        (is (= "True" (runtime/eval-str session "callable(__vis_flush_writes__)"))
+            "the flush that puts a held handle's bytes on disk before a tool reads them is present")))))

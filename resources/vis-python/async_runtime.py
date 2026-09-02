@@ -2,324 +2,98 @@ import ast as __vis_ast__
 import builtins as __vis_builtins__
 import collections as __vis_collections__
 import errno as __vis_errno__
-import gc as __vis_gc__
 import io as __vis_io__
 import linecache as __vis_linecache__
 import os as __vis_os__
-import socket as __vis_socket__
 import time as __vis_time__
 import weakref as __vis_weakref__
 
 
-# ── deterministic flush for handles a block leaves open. GraalPy does NOT
-# refcount, so the CPython idiom `open(p, "w").write(text)` — a handle dropped
-# without `close()` — is never finalized at the end of the statement: the bytes
-# sit in the buffer and the file on disk stays EMPTY until a GC that may never
-# come. That is silent data loss, and the very next tool (`git commit -F <file>`)
-# reads the empty file. Every WRITABLE handle the sandbox opens is tracked
-# WEAKLY (no lifetime is extended, no fd is held) and flushed before each tool
-# call and at the end of the block, so what a block wrote is on disk by the time
-# anything else looks at it.
+# ── deterministic flush for handles the block still HOLDS. CPython closes and
+# flushes a handle the moment its last reference drops, so `open(p, "w").write(t)`
+# is on disk before the next statement and a dropped reader gives its descriptor
+# straight back - measured on the vendored interpreter: 500 dropped `open()`s cost
+# zero descriptors, and 200 held ones are all returned the instant the list goes.
+# What refcounting does NOT reach is a handle the block keeps in a variable:
+# `f = open(p, "w"); f.write(text)` leaves the bytes in the buffer, and the very
+# next tool (`git commit -F <file>`) reads an empty file. So every WRITABLE handle
+# is tracked WEAKLY - no lifetime extended, no descriptor held - and flushed before
+# each tool call and at the end of the block. That is the whole job here.
 def __vis_survivor__(__vis_name__, __vis_make__):
     # Runtime state that must OUTLIVE a reinstall. `ensure-async-runtime!` re-evals
     # this whole preamble in the SAME globals whenever a block loses
     # `__vis_run_async__` (`globals().clear()` is legal Python), and a plain
-    # `x = {}` here would silently drop every pending write and every tracked
-    # descriptor. `__vis_pin_runtime__` mirrors each `__vis_*` global into
-    # builtins, so the FIRST value is still reachable there: re-adopt it.
+    # `x = {}` here would silently drop every pending write.
+    # `__vis_pin_runtime__` mirrors each `__vis_*` global into builtins, so the
+    # FIRST value is still reachable there: re-adopt it.
     __vis_v__ = getattr(__vis_builtins__, __vis_name__, None)
     return __vis_make__() if __vis_v__ is None else __vis_v__
 
 
 __vis_open_writes__ = __vis_survivor__("__vis_open_writes__", __vis_weakref__.WeakSet)
 # The REAL opener, captured ONCE. By the time a reinstall re-runs this line, the
-# name `open` — module global AND `builtins.open` — is already the shim, so a
+# name `open` - module global AND `builtins.open` - is already the shim, so a
 # fresh capture would make `__vis_open__` call ITSELF forever: exactly the
 # self-recursion `ensure-async-runtime!` already unwraps for `print`, one door
 # further down.
 __vis_real_open__ = __vis_survivor__("__vis_real_open__", lambda: __vis_builtins__.open)
 
-# ── DESCRIPTOR RECLAMATION + CEILING: the same non-refcounting fact, with a much
-# harsher failure. A dropped handle also keeps its PROCESS file descriptor: the
-# object is collected but the fd is not closed, and neither `__del__` nor weakref
-# callbacks ever run (measured: 200 dropped `open()`s = +200 live descriptors,
-# two `gc.collect()`s reclaim none of them). A loop over a big tree
-# (`open(p).read()` per file) therefore walks the WHOLE process into EMFILE, and
-# the first casualty is not Python: `ProcessBuilder` can no longer fork, so every
-# later `shell` call dies with the JDK's misleading "spawn helper / JDK
-# version mismatch" text and the session is wedged for good.
+
+# ── the CEILING on what the block HOLDS. Reclamation is not our job any more,
+# but occupancy still is: the descriptor table is shared with the whole JVM
+# (classpath jars, the HTTP server, SQLite, git spawns, the provider auth
+# sockets), and the first casualty of exhausting it is not Python — with no
+# descriptor left `ProcessBuilder` cannot fork, every later `shell` dies on the
+# JDK's misleading "spawn helper / JDK version mismatch" text, and the session is
+# wedged for good (vis session 7d3f9026). So an `open` that would take the
+# process past the ceiling is refused HERE instead, as an ordinary `OSError` that
+# names the fix, in the block that caused it.
 #
-# So the sandbox reclaims descriptors itself, where the leak is — the way
-# CPython's refcount would. Every handle is registered under its fd with a WEAK
-# ref; once that ref is dead the handle can never be read again, so its fd is
-# closed by hand. GraalPy's weak refs do die on their own under ordinary JVM GC,
-# so the common sweep is a cheap fstat pass with NO `gc.collect()` (a collect
-# here costs ~270ms; it is the fallback, not the rule). Identity (`st_dev`,
-# `st_ino`) is re-checked before every close, so a recycled fd number is never
-# stolen from whoever owns it now. `__vis_fd_limits__[0]` is the ceiling that cannot be
-# crossed: reaching it raises a normal Python `OSError(EMFILE)` naming the fix,
-# instead of leaving the session to die later on an unrelated toolchain error.
-__vis_fd_registry__ = __vis_survivor__(
-    "__vis_fd_registry__", dict
-)  # fd -> (weakref(owner), (st_dev, st_ino) | None)
-
-
-def __vis_fd_env_int__(__vis_name__, __vis_default__, __vis_low__):
+# `os.dup(0)` answers the LOWEST FREE descriptor number, which is the process's
+# own occupancy — sockets, subprocess pipes and JVM handles included, none of
+# which a registry of the handles WE opened would ever have seen. Two syscalls
+# per open, no bookkeeping, and nothing to keep in sync with the interpreter.
+def __vis_fd_ceiling__():
+    # The env var wins whenever it names a sane number, because a host that knows
+    # its workload is a better judge than this default. Otherwise: the real soft
+    # limit less a cushion for everything else in the process. `bin/vis-agent`
+    # raises that limit at launch, so the cushion is generous where it matters.
     try:
-        __vis_n__ = int(__vis_os__.environ.get(__vis_name__) or 0)
+        __vis_n__ = int(__vis_os__.environ.get("VIS_PY_MAX_OPEN_FILES") or 0)
     except Exception:
         __vis_n__ = 0
-    return __vis_n__ if __vis_n__ >= __vis_low__ else __vis_default__
-
-
-# Ceiling, and the mark where reclamation starts. The mark is HALF the ceiling so
-# an honest workload (handles opened and closed) never sweeps twice for nothing,
-# while a leaking one is caught long before the process limit.
-# A PROCESS resource, so both numbers are a survivor: one interpreter can serve
-# several sessions and the doors installed by one of them serve all of them, so
-# a ceiling read out of whichever namespace installed last would be somebody
-# else's. `__vis_fd_limits__` is [ceiling, sweep-at].
-def __vis_fd_default_limits__():
-    __vis_m__ = __vis_fd_env_int__("VIS_PY_MAX_OPEN_FILES", 512, 8)
-    return [__vis_m__, max(16, __vis_m__ // 2)]
-
-
-__vis_fd_limits__ = __vis_survivor__("__vis_fd_limits__", __vis_fd_default_limits__)
-
-
-def __vis_fd_owner__(__vis_h__):
-    # The object that actually OWNS the descriptor. `open()` hands back a STACK
-    # (TextIOWrapper -> BufferedReader -> FileIO) and a lower layer happily
-    # outlives the one above it: `buf = open(p).buffer` drops the wrapper while
-    # the file stays perfectly readable through `buf` (measured). Weak-referencing
-    # the TOP layer would close a descriptor still in use, so track the BOTTOM.
-    __vis_o__ = __vis_h__
-    for _ in range(4):  # 2 in practice; the bound keeps a pathological cycle finite
-        try:
-            __vis_n__ = getattr(__vis_o__, "buffer", None)
-            if __vis_n__ is None:
-                __vis_n__ = getattr(__vis_o__, "raw", None)
-        except Exception:
-            __vis_n__ = None  # detached/closed layer: this is as deep as we get
-        if __vis_n__ is None or __vis_n__ is __vis_o__:
-            break
-        __vis_o__ = __vis_n__
-    return __vis_o__
-
-
-def __vis_fd_track__(__vis_h__):
-    # WEAK by construction: tracking must never keep a handle (or its buffer)
-    # alive — that would turn a descriptor leak into a memory leak.
+    if __vis_n__ >= 8:
+        return __vis_n__
     try:
-        __vis_fd__ = __vis_h__.fileno()
+        import resource as __vis_resource__
+
+        __vis_soft__ = __vis_resource__.getrlimit(__vis_resource__.RLIMIT_NOFILE)[0]
     except Exception:
-        return  # StringIO & friends own no descriptor
-    if not isinstance(__vis_fd__, int) or __vis_fd__ < 0:
-        return
-    try:
-        __vis_st__ = __vis_os__.fstat(__vis_fd__)
-        __vis_id__ = (__vis_st__.st_dev, __vis_st__.st_ino)
-    except Exception:
-        __vis_id__ = None
-    try:
-        __vis_fd_registry__[__vis_fd__] = (
-            __vis_weakref__.ref(__vis_fd_owner__(__vis_h__)),
-            __vis_id__,
-        )
-    except Exception:
-        pass  # unweakrefable handle: nothing we can track, hand it back as-is
-
-
-# ── SOCKETS: the THIRD door onto a descriptor, and the one neither shim above can
-# see. Every HTTP call in the sandbox rides the stdlib `urllib` -> `http.client`
-# -> a real socket (`requests` is pure Python over urllib, and `httpx`/`urllib3`
-# are layers on top of `requests`), so a response whose body is never fully read
-# leaks a CONNECTED descriptor exactly the way a dropped `open()` leaks a file:
-# measured, 20 dropped unread responses = +63 process descriptors, reclaimed by
-# neither two `gc.collect()`s nor the block boundary, and counted by nothing — a
-# socket is minted by `socket.socket(...)`, never by `open`, so the ceiling that
-# exists to keep the session out of EMFILE never saw one.
-#
-# A socket cannot reuse the file identity: `fstat` on one reports
-# `st_dev == st_ino == 0` (measured), so every socket looks like every other one
-# and the recycled-number guard would eventually close the JVM's OWN connections.
-# A socket's identity is its ADDRESS PAIR, `(getsockname(), getpeername())`,
-# captured at every point the sandbox touches it while it is still alive —
-# creation, `connect`, `bind`, and each sweep — because a socket is born ANONYMOUS
-# and only becomes identifiable once it is connected or bound. The number is
-# re-checked after the fact by REBINDING a probe onto it:
-# `socket.socket(fileno=fd)` adopts a descriptor without duplicating it,
-# `detach()` hands it back untouched and `close()` reclaims it (all measured).
-__vis_sock_tag__ = "vis-socket"
-# A depth counter, not a flag: reentrancy here is not hypothetical — the probe is
-# built INSIDE a sweep, and a tracked probe would re-enter admit -> reclaim ->
-# probe without end.
-__vis_sock_hook_off__ = __vis_survivor__("__vis_sock_hook_off__", lambda: [0])
-__vis_real_socket_init__ = __vis_survivor__(
-    "__vis_real_socket_init__", lambda: __vis_socket__.socket.__init__
-)
-__vis_real_socket_connect__ = __vis_survivor__(
-    "__vis_real_socket_connect__", lambda: __vis_socket__.socket.connect
-)
-__vis_real_socket_connect_ex__ = __vis_survivor__(
-    "__vis_real_socket_connect_ex__", lambda: __vis_socket__.socket.connect_ex
-)
-__vis_real_socket_bind__ = __vis_survivor__(
-    "__vis_real_socket_bind__", lambda: __vis_socket__.socket.bind
-)
-
-
-def __vis_sock_id__(__vis_s__):
-    __vis_name__ = None
-    __vis_peer__ = None
-    try:
-        __vis_name__ = __vis_s__.getsockname()
-    except Exception:
-        pass  # unbound, or already closed: that IS part of the identity
-    try:
-        __vis_peer__ = __vis_s__.getpeername()
-    except Exception:
-        pass  # not connected
-    return (__vis_sock_tag__, __vis_name__, __vis_peer__)
-
-
-def __vis_is_sock_id__(__vis_id__):
-    return (
-        isinstance(__vis_id__, tuple)
-        and len(__vis_id__) == 3
-        and __vis_id__[0] == __vis_sock_tag__
-    )
-
-
-def __vis_sock_track__(__vis_s__):
-    # WEAK, like every other entry: tracking a socket must never keep the
-    # connection open.
-    try:
-        __vis_fd__ = __vis_s__.fileno()
-    except Exception:
-        return
-    if not isinstance(__vis_fd__, int) or __vis_fd__ < 0:
-        return
-    try:
-        __vis_fd_registry__[__vis_fd__] = (
-            __vis_weakref__.ref(__vis_s__),
-            __vis_sock_id__(__vis_s__),
-        )
-    except Exception:
-        pass  # unweakrefable socket: nothing we can track
-
-
-def __vis_sock_drop__(__vis_fd__, __vis_id__):
-    # Close ONE unreachable socket, and only while that number still carries the
-    # same address pair: a recycled number belongs to whoever holds it NOW.
-    __vis_sock_hook_off__[0] += 1
-    try:
-        __vis_p__ = __vis_socket__.socket(fileno=__vis_fd__)
-    except Exception:
-        return 0  # already closed, or not a socket any more: hands off
-    finally:
-        __vis_sock_hook_off__[0] -= 1
-    try:
-        if __vis_sock_id__(__vis_p__) == __vis_id__:
-            __vis_p__.close()
-            return 1
-    except Exception:
-        return 0
-    try:
-        __vis_p__.detach()  # somebody else's descriptor: give it back untouched
-    except Exception:
-        pass
-    return 0
-
-
-def __vis_fd_drop__(__vis_fd__, __vis_id__):
-    # Close ONE unreachable descriptor, but only while it still is the file we
-    # opened: if the number was recycled, `fstat` either fails (already closed)
-    # or reports another file, and both mean hands off.
-    __vis_fd_registry__.pop(__vis_fd__, None)
-    if __vis_is_sock_id__(__vis_id__):
-        return __vis_sock_drop__(__vis_fd__, __vis_id__)
-    try:
-        __vis_st__ = __vis_os__.fstat(__vis_fd__)
-    except Exception:
-        return 0  # already closed; nothing to reclaim
-    if __vis_id__ is not None and (__vis_st__.st_dev, __vis_st__.st_ino) != __vis_id__:
-        return 0
-    try:
-        __vis_os__.close(__vis_fd__)
-        return 1
-    except Exception:
-        return 0
-
-
-def __vis_reclaim_fds__(force=False):
-    # Drop entries the block closed itself, close the ones it dropped. Cheap:
-    # one `fstat` per tracked handle, no collect. Returns descriptors closed.
-    # Runs AFTER `__vis_flush_writes__`, and only ever closes a handle whose weak
-    # ref is already dead — such a handle can no longer be flushed by anyone
-    # (its buffer died with it), so closing its descriptor loses nothing that was
-    # not lost the moment the block dropped it.
-    if not __vis_fd_registry__:
-        return 0
-    if not force and len(__vis_fd_registry__) < __vis_fd_limits__[1]:
-        return 0
-    __vis_closed__ = 0
-    for __vis_fd__ in list(__vis_fd_registry__):
-        __vis_e__ = __vis_fd_registry__.get(__vis_fd__)
-        if __vis_e__ is None:
-            continue
-        __vis_h__ = __vis_e__[0]()
-        if __vis_h__ is None:
-            __vis_closed__ += __vis_fd_drop__(__vis_fd__, __vis_e__[1])
-            continue
-        if __vis_is_sock_id__(__vis_e__[1]):
-            # A live socket has no `.closed`, and it may have CONNECTED since it
-            # was tracked: refresh the address pair now, while there still is an
-            # object to ask.
-            try:
-                if __vis_h__.fileno() < 0:
-                    __vis_fd_registry__.pop(__vis_fd__, None)
-                else:
-                    __vis_fd_registry__[__vis_fd__] = (
-                        __vis_e__[0],
-                        __vis_sock_id__(__vis_h__),
-                    )
-            except Exception:
-                __vis_fd_registry__.pop(__vis_fd__, None)
-            continue
-        try:
-            if __vis_h__.closed:
-                __vis_fd_registry__.pop(__vis_fd__, None)
-        except Exception:
-            __vis_fd_registry__.pop(__vis_fd__, None)
-    return __vis_closed__
+        __vis_soft__ = 0
+    if __vis_soft__ <= 0:  # RLIM_INFINITY, or a platform that will not say
+        return 65536
+    return max(256, __vis_soft__ - 1024)
 
 
 def __vis_fd_admit__():
-    # Runs before every sandbox `open`. Under the mark it costs one int compare;
-    # at the mark it reclaims, and only a workload that really holds the ceiling
-    # open at once is refused — with the message that names the actual fix.
-    if len(__vis_fd_registry__) < __vis_fd_limits__[1]:
-        return
-    __vis_reclaim_fds__(True)
-    if len(__vis_fd_registry__) >= __vis_fd_limits__[0]:
-        # Last resort: force the collect the cheap pass did not need, in case
-        # this VM has not gotten around to clearing those weak refs yet.
-        __vis_gc__.collect()
-        __vis_reclaim_fds__(True)
-    if len(__vis_fd_registry__) < __vis_fd_limits__[0]:
+    try:
+        __vis_probe__ = __vis_os__.dup(0)
+        __vis_os__.close(__vis_probe__)
+    except OSError:
+        return  # no descriptor 0 to probe with: nothing to measure, nothing to refuse
+    __vis_max__ = __vis_fd_ceiling__()
+    if __vis_probe__ < __vis_max__:
         return
     raise OSError(
         __vis_errno__.EMFILE,
-        "too many open files in this sandbox: "
-        + str(len(__vis_fd_registry__))
-        + " handles are open at once and the ceiling is "
-        + str(__vis_fd_limits__[0])
-        + ". Sandbox Python does NOT close a file or a socket when you drop it,"
-        " so `open(p).read()` in a loop leaks one descriptor per iteration — and"
-        " so does every HTTP response whose body is never read — until no"
-        " `shell` process can start at all. Use `with open(p) as f:` (or"
-        " `Path(p).read_text()`), and close the sockets and responses you keep."
+        "too many open files in this process: "
+        + str(__vis_probe__)
+        + " descriptors are in use and the sandbox ceiling is "
+        + str(__vis_max__)
+        + ". A file or socket you DROP is closed for you, so what fills the table"
+        " is what is still held — a list of open handles, an HTTP response whose"
+        " body is never read, a shell left running. Close what you keep (`with"
+        " open(p) as f:`), and `sh.stop()` the shells you are done with."
         " VIS_PY_MAX_OPEN_FILES raises the ceiling.",
     )
 
@@ -332,11 +106,6 @@ def __vis_open__(*__vis_a__, **__vis_kw__):
             __vis_open_writes__.add(__vis_h__)
     except Exception:
         pass  # unweakrefable / no writable(): not ours to track, hand it back as-is
-    # `closefd=False` (kwarg, or the 7th positional) says the CALLER owns that
-    # descriptor and merely lent it to this wrapper; reclaiming it when the
-    # wrapper dies would close a file the block is still using elsewhere.
-    if __vis_kw__.get("closefd", True) and (len(__vis_a__) < 7 or __vis_a__[6]):
-        __vis_fd_track__(__vis_h__)
     return __vis_h__
 
 
@@ -349,109 +118,13 @@ def __vis_flush_writes__():
             pass  # best-effort: one broken handle must never break the block
 
 
-# EVERY door onto a descriptor, not just this module's global. `io.open` is a
-# DIFFERENT object from `builtins.open` here, `pathlib.Path.open` and `tempfile.*`
-# go through `io.open`, and any stdlib module calling bare `open()` reaches
-# `builtins.open` — each of those three leaked 50 descriptors per 50 iterations
-# while only the module global was shimmed (measured). `__vis_real_open__` is the
-# pre-shim `builtins.open`, which does NOT delegate to `io.open` (measured), so no
-# door leads back into the shim.
+# BOTH doors, because they are different objects: `pathlib.Path.open` and
+# `tempfile.*` go through `io.open`, while a stdlib module calling bare `open()`
+# reaches `builtins.open`. `__vis_real_open__` is the pre-shim `builtins.open`,
+# which does NOT delegate to `io.open` (measured), so no door leads back in.
 open = __vis_open__
 __vis_builtins__.open = __vis_open__
 __vis_io__.open = __vis_open__
-
-
-# The RAW doors, which reach a descriptor without passing through any `open` at
-# all (measured: 25 leaked descriptors per 25 iterations, seen by neither shim
-# above): `io.FileIO(p)` IS the descriptor-owning class, and `io.open_code(p)`
-# hands back one. `io.FileIO` is an immutable type — its `__init__` cannot be
-# hooked (TypeError) — so the shim is a SUBCLASS whose metaclass forwards
-# `isinstance`/`issubclass` to the real class: the raws built INSIDE `open` are
-# real `FileIO`s, and code asking `isinstance(f.raw, io.FileIO)` must still get
-# True after the swap. What stays the CALLER's: `os.open` hands back a bare int
-# with no object to weak-ref, so that descriptor is theirs to `os.close`, exactly
-# like `closefd=False`.
-__vis_real_FileIO__ = __vis_survivor__("__vis_real_FileIO__", lambda: __vis_io__.FileIO)
-
-
-class __vis_FileIOMeta__(type(__vis_real_FileIO__)):
-    def __instancecheck__(cls, __vis_o__):
-        return isinstance(__vis_o__, __vis_real_FileIO__)
-
-    def __subclasscheck__(cls, __vis_c__):
-        return issubclass(__vis_c__, __vis_real_FileIO__)
-
-
-class __vis_FileIO__(__vis_real_FileIO__, metaclass=__vis_FileIOMeta__):
-    # `FileIO(name, mode="r", closefd=True, opener=None)`: `closefd=False` (kwarg
-    # or 3rd positional) means the caller merely lent us its descriptor, exactly
-    # as in `__vis_open__`. Nothing joins `__vis_open_writes__` here — a FileIO is
-    # unbuffered, so it never holds bytes that a flush could still rescue.
-    def __init__(self, *__vis_a__, **__vis_kw__):
-        __vis_fd_admit__()
-        super().__init__(*__vis_a__, **__vis_kw__)
-        if __vis_kw__.get("closefd", True) and (len(__vis_a__) < 3 or __vis_a__[2]):
-            __vis_fd_track__(self)
-
-
-def __vis_open_code__(__vis_p__):
-    return __vis_FileIO__(__vis_p__, "rb")
-
-
-__vis_io__.FileIO = __vis_FileIO__
-__vis_io__.open_code = __vis_open_code__
-
-
-# The socket doors. `__init__` catches every socket the sandbox mints — including
-# the `SSLSocket` that `wrap_socket` builds over an already-connected descriptor
-# and the one `accept()` hands back (measured: both pass through here) — and
-# `connect`/`connect_ex`/`bind` re-track it at the moment it stops being
-# anonymous, which is the only moment a socket created and dropped inside ONE
-# block is ever identifiable. Nothing hooks `close`: a closed socket reports
-# `fileno() == -1` and the next sweep drops its entry.
-def __vis_socket_init__(self, *__vis_a__, **__vis_kw__):
-    if __vis_sock_hook_off__[0]:
-        return __vis_real_socket_init__(self, *__vis_a__, **__vis_kw__)
-    __vis_fd_admit__()
-    __vis_r__ = __vis_real_socket_init__(self, *__vis_a__, **__vis_kw__)
-    __vis_sock_track__(self)
-    return __vis_r__
-
-
-def __vis_socket_connect__(self, *__vis_a__, **__vis_kw__):
-    try:
-        return __vis_real_socket_connect__(self, *__vis_a__, **__vis_kw__)
-    finally:
-        __vis_sock_track__(self)
-
-
-def __vis_socket_connect_ex__(self, *__vis_a__, **__vis_kw__):
-    try:
-        return __vis_real_socket_connect_ex__(self, *__vis_a__, **__vis_kw__)
-    finally:
-        __vis_sock_track__(self)
-
-
-def __vis_socket_bind__(self, *__vis_a__, **__vis_kw__):
-    try:
-        return __vis_real_socket_bind__(self, *__vis_a__, **__vis_kw__)
-    finally:
-        __vis_sock_track__(self)
-
-
-# The doors go on ONCE per interpreter. A reinstall re-DEFINES the functions
-# above, so re-assigning them would throw away whatever another layer wrapped on
-# top of a door — `network_guard` patches this same `connect` — and leave the
-# pristine method underneath it, silently unguarded. The doors installed by the
-# first session keep serving every later one, because every table they touch is
-# a survivor.
-__vis_socket_doors_on__ = __vis_survivor__("__vis_socket_doors_on__", lambda: [])
-if not __vis_socket_doors_on__:
-    __vis_socket__.socket.__init__ = __vis_socket_init__
-    __vis_socket__.socket.connect = __vis_socket_connect__
-    __vis_socket__.socket.connect_ex = __vis_socket_connect_ex__
-    __vis_socket__.socket.bind = __vis_socket_bind__
-    __vis_socket_doors_on__.append(1)
 
 
 def __vis_count_forms__(src):
@@ -655,14 +328,10 @@ def __vis_exec_call__(c):
         # vis tools already take a trailing opts dict — `find("x", paths=[...])`,
         # `rg(query="x")`, `run_tests(language="python")` — so folding
         # kwargs to one dict matches their contract (all-kwargs collapses to a spec map).
-        # Flush what the block wrote through a still-open handle FIRST: a tool
-        # that reads a just-written file (`git commit -F /tmp/msg`) must not see
-        # GraalPy's unflushed buffer.
+        # Flush what the block wrote through a handle it still holds: a tool that
+        # reads a just-written file (`git commit -F /tmp/msg`) must not see the
+        # buffer instead of the bytes.
         __vis_flush_writes__()
-        # Same boundary, the descriptor half: a tool that spawns a process
-        # (`shell`) needs free descriptors to fork with, so give back the
-        # ones this block already dropped. Below the mark this is a no-op.
-        __vis_reclaim_fds__()
         c.res = c.fn(*c.a, dict(c.k)) if c.k else c.fn(*c.a)
         # COLLAPSE a call that answered with ANOTHER deferred call. Handing a TOOL
         # ITSELF to the pool — `asyncio.to_thread(grep, q)`,
@@ -4306,13 +3975,9 @@ def __vis_run_async__(src):
         g["__vis_err_obj__"] = __vis_err__
         raise
     finally:
-        # The block is over: everything it wrote through a handle it never closed
-        # is on disk now, success or failure alike (GraalPy would otherwise leave
-        # the buffer unflushed until an arbitrary later GC).
+        # The block is over: everything it wrote through a handle it still holds
+        # is on disk now, success or failure alike.
         __vis_flush_writes__()
-        # ... and every descriptor it dropped is handed back, so a block that
-        # leaks handles cannot bleed into the next one (or into the next spawn).
-        __vis_reclaim_fds__(True)
     return assigned
 
 
