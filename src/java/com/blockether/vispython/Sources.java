@@ -36,12 +36,10 @@ public final class Sources {
   public static final String MANIFEST = "vis-python-runtime/SOURCES";
 
   /**
-   * The directories this library ships its Python in, and the names a classpath
-   * carries them under. A jar answers through {@link #MANIFEST}; an EXPLODED
-   * classpath - a git or {@code :local/root} dependency, where {@code resources/}
-   * is a classpath entry and no jar was ever built - has no manifest, and these
-   * are what is probed for instead, all three from the ONE directory holding
-   * the first.
+   * The directories that go on {@code sys.path}. The tracked manifest is present
+   * in both source and packaged artifacts; {@link #ROOTS} remains the closed root
+   * vocabulary and the fallback for an explicitly constructed manifest-free
+   * classpath.
    */
   public static final List<String> ROOTS = List.of("vispython", "vis-python");
 
@@ -102,11 +100,9 @@ public final class Sources {
   }
 
   /**
-   * The shipped directories that are plain directories on this classpath, for
-   * an artifact carrying no manifest - a git or {@code :local/root} dependency
-   * whose {@code resources/} was never packaged. All of them come from the ONE
-   * directory holding {@code vispython/}, for the same reason {@link #beside}
-   * exists.
+   * Plain directories on a deliberately manifest-free classpath. Shipped source
+   * and jar artifacts carry the manifest; this fallback keeps the resolver total
+   * for embedders that construct an exploded tree themselves.
    */
   private static List<String> onClasspath(ClassLoader loader) {
     URL url = loader.getResource(ROOTS.get(0) + "/");

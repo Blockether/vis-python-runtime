@@ -84,11 +84,12 @@
                 :basis @basis
                 :src-dirs ["src/clj"]
                 :pom-data (pom-data "Embedded CPython for the Vis sandbox — vendored per platform, reached over FFM, without Truffle.")})
-  ;; No prebuilds: the cdylib belongs to the per-platform native jars. The
+  ;; No prebuilds: the cdylib belongs to the per-platform native archives. The
   ;; Python DOES ship here — a consumer that took a jar has no `resources/`
   ;; directory to point `sys.path` at — and so does the namespaced VERSION,
   ;; because a bare `VERSION` resource would collide with another library's on a
-  ;; shared classpath.
+  ;; shared classpath. SOURCES is tracked under resources so a git dependency and
+  ;; a native-image see the same self-describing artifact before any jar exists.
   (b/copy-dir {:src-dirs ["src/clj"] :target-dir jar-class-dir})
   (doseq [root source-roots]
     ;; SOURCE only: `__pycache__` is per-machine bytecode compiled against one
@@ -102,16 +103,9 @@
   ;; META-INF/native-image/<group>/<artifact>/ from the classpath by itself —
   ;; a flag in their build.clj is a contract we cannot keep for them.
   (b/copy-dir {:src-dirs ["resources/META-INF"] :target-dir (str jar-class-dir "/META-INF")})
-  (let [listed (->> source-roots
-                    (mapcat (fn [root]
-                              (let [dir (io/file jar-class-dir root)]
-                                (->> (file-seq dir)
-                                     (filter #(and (.isFile ^java.io.File %)
-                                                   (str/ends-with? (.getName ^java.io.File %) ".py")))
-                                     (map #(str root "/" (.relativize (.toPath dir) (.toPath ^java.io.File %))))))))
-                    sort)]
-    (write-version-resource! jar-class-dir)
-    (spit (io/file jar-class-dir "vis-python-runtime" "SOURCES") (str (str/join "\n" listed) "\n")))
+  (b/copy-dir {:src-dirs ["resources/vis-python-runtime"]
+               :target-dir (str jar-class-dir "/vis-python-runtime")})
+  (write-version-resource! jar-class-dir)
   (b/jar {:class-dir jar-class-dir :jar-file jar-file})
   (println "Built:" jar-file "version:" version))
 

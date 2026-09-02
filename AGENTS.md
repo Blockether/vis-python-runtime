@@ -133,12 +133,12 @@ registrations live in `resources/META-INF/native-image/com.blockether/vis-python
 and travel inside the jar — never as a command-line flag in a consumer's build.
 
 **The Python this library ships is addressed from its own manifest, never
-looked up by name.** `vis-python-runtime/SOURCES` lists every file the jar
-carries, and `Sources` resolves each one RELATIVE to that resource's URL. A
-lookup by name (`getResource("vis-python/async_runtime.py")`) answers whichever
-classpath entry comes first, and the host embedding this library carries a
-directory of the same name — measured: from a Vis checkout the runtime imported
-VIS' copies and its own never won. The same rule is why an artifact
-with no manifest takes all three roots from the one directory holding
-`vispython/`, and why `target/classes` (which `:deps/prep-lib` owns) carries no
-Python: the jar is assembled in `target/jar-classes`.
+looked up by name.** The TRACKED `resources/vis-python-runtime/SOURCES` lists
+every shipped file, so a source git dependency is already self-describing before
+a jar exists and a native image never has to discover a classpath directory.
+`Sources` resolves each entry RELATIVE to that resource's URL. A lookup by name
+(`getResource("vis-python/async_runtime.py")`) answers whichever classpath entry
+comes first, and the host embedding this library carries a directory of the same
+name — measured: from a Vis checkout the runtime imported VIS' copies and its own
+never won. `target/classes` (which `:deps/prep-lib` owns) still carries no Python:
+the source tree and the jar both take the manifest and files from `resources/`.

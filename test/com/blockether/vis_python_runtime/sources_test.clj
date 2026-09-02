@@ -28,6 +28,24 @@
 
 (defn- manifest [] (str (str/join "\n" listed) "\n"))
 
+(deftest tracked-source-manifest-covers-every-shipped-module-test
+  (testing "a git dependency is self-describing before a jar is built"
+    (let [resources (io/file "resources")
+          expected (->> Sources/ROOTS
+                        (mapcat #(file-seq (io/file resources %)))
+                        (filter #(and (.isFile ^java.io.File %)
+                                      (str/ends-with? (.getName ^java.io.File %) ".py")))
+                        (map #(-> (str (.relativize (.toPath resources) (.toPath ^java.io.File %)))
+                                  (str/replace java.io.File/separator "/")))
+                        sort
+                        vec)
+          actual (->> (slurp (io/file resources Sources/MANIFEST))
+                      str/split-lines
+                      (remove str/blank?)
+                      vec)]
+      (is (= expected actual)
+          "resources/vis-python-runtime/SOURCES must change with the shipped Python tree"))))
+
 (defn- exploded
   "A classpath DIRECTORY holding the manifest and every file it names."
   []
