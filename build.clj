@@ -41,6 +41,11 @@
 
 (defn clean [_] (b/delete {:path "target"}))
 
+(defn- write-version-resource! [target-dir]
+  (let [vfile (io/file target-dir "vis-python-runtime" "VERSION")]
+    (io/make-parents vfile)
+    (spit vfile version)))
+
 (defn javac
   "Compile the Java bridge into `target/classes`.
 
@@ -56,7 +61,8 @@
             :basis @basis
             ;; The FFM calls are restricted by design and the runtime opts in
             ;; with `--enable-native-access`, so that warning is noise here.
-            :javac-opts ["--release" "22" "-Xlint:all,-restricted"]}))
+            :javac-opts ["--release" "22" "-Xlint:all,-restricted"]})
+  (write-version-resource! class-dir))
 
 (defn- pom-data [description]
   [[:description description]
@@ -96,8 +102,7 @@
   ;; META-INF/native-image/<group>/<artifact>/ from the classpath by itself —
   ;; a flag in their build.clj is a contract we cannot keep for them.
   (b/copy-dir {:src-dirs ["resources/META-INF"] :target-dir (str jar-class-dir "/META-INF")})
-  (let [vfile  (io/file jar-class-dir "vis-python-runtime" "VERSION")
-        listed (->> source-roots
+  (let [listed (->> source-roots
                     (mapcat (fn [root]
                               (let [dir (io/file jar-class-dir root)]
                                 (->> (file-seq dir)
@@ -105,8 +110,7 @@
                                                    (str/ends-with? (.getName ^java.io.File %) ".py")))
                                      (map #(str root "/" (.relativize (.toPath dir) (.toPath ^java.io.File %))))))))
                     sort)]
-    (io/make-parents vfile)
-    (spit vfile version)
+    (write-version-resource! jar-class-dir)
     (spit (io/file jar-class-dir "vis-python-runtime" "SOURCES") (str (str/join "\n" listed) "\n")))
   (b/jar {:class-dir jar-class-dir :jar-file jar-file})
   (println "Built:" jar-file "version:" version))

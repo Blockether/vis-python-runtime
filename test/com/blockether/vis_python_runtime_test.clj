@@ -6,10 +6,11 @@
   (:import [com.blockether.vispython VisPythonException]))
 
 (deftest version-test
-  (is (re-matches #"\d+\.\d+\.\d+" (str/trim (slurp "VIS_PYTHON_VERSION")))
-      "repo-root VIS_PYTHON_VERSION is the single version source and is semver-shaped")
-  (is (contains? #{"dev"} runtime/version)
-      "a source checkout has no built VERSION resource, so the version reads dev"))
+  (let [expected (str/trim (slurp "VIS_PYTHON_VERSION"))]
+    (is (re-matches #"\d+\.\d+\.\d+" expected)
+        "repo-root VIS_PYTHON_VERSION is the single version source and is semver-shaped")
+    (is (= expected runtime/version)
+        "the prepared class directory carries the runtime version")))
 
 (deftest platform-test
   (testing "os and architecture spellings we actually meet"
