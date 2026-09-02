@@ -108,7 +108,8 @@
                                 writer (io/writer (.getOutputStream socket))]
                       (when (= "ping" (.readLine reader))
                         (.write writer "pong\n")
-                        (.flush writer))))]
+                        (.flush writer))
+                      :responded))]
     (try
       (let [script (str "exec 3<>/dev/tcp/127.0.0.1/" allowed-port "\n"
                         "printf 'ping\\n' >&3\n"
@@ -124,7 +125,8 @@
         (is (= 0 (:exit result)) (:err result))
         (is (= "pong:blocked" (:out result))
             "the configured loopback bridge is reachable, every other host socket is not")
-        @responder)
+        (is (= :responded (deref responder 5 ::timeout))
+            "the host-side proxy endpoint must receive the bridged connection"))
       (finally
         (.close allowed)
         (.close denied)
