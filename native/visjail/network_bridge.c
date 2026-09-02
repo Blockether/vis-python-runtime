@@ -9,7 +9,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <linux/capability.h>
 #include <net/if.h>
 #include <poll.h>
 #include <sched.h>
@@ -86,13 +85,6 @@ write_text(const char *path, const char *text)
   return close(fd);
 }
 
-static int
-drop_namespace_capabilities(void)
-{
-  struct __user_cap_header_struct header = {_LINUX_CAPABILITY_VERSION_3, 0};
-  struct __user_cap_data_struct data[2] = {{0}};
-  return (int) syscall(SYS_capset, &header, &data);
-}
 
 static int
 enter_network_namespace(void)
@@ -105,13 +97,12 @@ enter_network_namespace(void)
     return -1;
   if (write_text("/proc/self/setgroups", "deny") != 0 && errno != ENOENT)
     return -1;
-  /* Keep the caller mapped as a non-root identity. The setup process retains
-   * namespace capabilities until it has raised loopback; Bubblewrap then sees
-   * an ordinary unprivileged caller and creates its own nested user namespace. */
-  snprintf(mapping, sizeof(mapping), "1 %u 1\n", (unsigned int) uid);
+  /* Map namespace root to the caller. Its capabilities are scoped to this user
+   * namespace, while filesystem ownership still resolves to the invoking user. */
+  snprintf(mapping, sizeof(mapping), "0 %u 1\n", (unsigned int) uid);
   if (write_text("/proc/self/uid_map", mapping) != 0)
     return -1;
-  snprintf(mapping, sizeof(mapping), "1 %u 1\n", (unsigned int) gid);
+  snprintf(mapping, sizeof(mapping), "0 %u 1\n", (unsigned int) gid);
   if (write_text("/proc/self/gid_map", mapping) != 0)
     return -1;
   if (unshare(CLONE_NEWNET) != 0)
@@ -445,14 +436,6 @@ run_inside(char **argv, int argc, int control, int proxy_port, int inbound_port)
   if (payload == 0)
     {
       close_except(-1, -1);
-      /* Bubblewrap expects an unprivileged caller and creates its own nested
-       * user namespace. The outer namespace grants capabilities only so this
-       * supervisor can create and configure the private network namespace. */
-      if (drop_namespace_capabilities() != 0)
-        {
-          bridge_error("drop capabilities");
-          _exit(125);
-        }
       _exit(vis_bwrap_main(argc, argv));
     }
   while (!payload_done)
