@@ -105,10 +105,13 @@ enter_network_namespace(void)
     return -1;
   if (write_text("/proc/self/setgroups", "deny") != 0 && errno != ENOENT)
     return -1;
-  snprintf(mapping, sizeof(mapping), "%u %u 1\n", (unsigned int) uid, (unsigned int) uid);
+  /* Keep the caller mapped as a non-root identity. The setup process retains
+   * namespace capabilities until it has raised loopback; Bubblewrap then sees
+   * an ordinary unprivileged caller and creates its own nested user namespace. */
+  snprintf(mapping, sizeof(mapping), "1 %u 1\n", (unsigned int) uid);
   if (write_text("/proc/self/uid_map", mapping) != 0)
     return -1;
-  snprintf(mapping, sizeof(mapping), "%u %u 1\n", (unsigned int) gid, (unsigned int) gid);
+  snprintf(mapping, sizeof(mapping), "1 %u 1\n", (unsigned int) gid);
   if (write_text("/proc/self/gid_map", mapping) != 0)
     return -1;
   if (unshare(CLONE_NEWNET) != 0)
