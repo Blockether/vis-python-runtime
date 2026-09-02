@@ -10,6 +10,7 @@
    nothing else in the suite would notice."
   (:require [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
+            [com.blockether.vis-python-runtime :as runtime]
             [com.blockether.vis-python-runtime.harness :as harness :refer [block block-session]])
   (:import [com.sun.management UnixOperatingSystemMXBean]
            [java.lang.management ManagementFactory OperatingSystemMXBean]
@@ -133,3 +134,29 @@
       (is (= "redirected\n" (slurp into-file))))
     (testing "a stdin redirect reaches the child, and the pid is the OS's own"
       (is (= ["hello-stdin" "True"] (str/split-lines (str/trim (str (:stdout answer)))))))))
+
+(harness/defbuilt-test open-survives-a-host-that-deletes-a-runtime-alias-test
+  ;; The runtime is exec'd into the SESSION's globals, so every name in this file
+  ;; is one a host statement can rebind or delete. vis seeds the guest environment
+  ;; with `import os as __vis_os__ ... del __vis_os__`, which unbound the alias the
+  ;; ceiling probe read, and every `open` in that session then died with a
+  ;; NameError no block could explain. Nothing on the hot path may depend on a
+  ;; name from outside this file. The session is built the way a host builds one -
+  ;; install, then seed, then run - because that order is what exposed it.
+  (let [session (str "alias-" (System/nanoTime))
+        file (temp-file "probe\n")]
+    (runtime/initialize!)
+    (runtime/install-runtime! session)
+    ;; The host's own `del` clears the session global; the builtins copy goes with
+    ;; it because `__vis_pin_runtime__` mirrors every `__vis_*` name there once a
+    ;; block has run, and in a live gateway the seeding happens BEFORE the first
+    ;; block - so a session that only cleared the global would still find the name
+    ;; and this case would pass for a reason the product does not have.
+    (runtime/exec! session (str "import builtins\n"
+                                "import os as __vis_os__\n"
+                                "del __vis_os__\n"
+                                "_ = builtins.__dict__.pop('__vis_os__', None)"))
+    (let [answer (harness/block session (str "print(open(" (pr-str file) ").read().strip())"))]
+      (testing "a block still opens files after the host took that name away"
+        (is (nil? (:error answer)))
+        (is (= "probe" (str/trim (str (:stdout answer)))))))))

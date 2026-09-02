@@ -4,7 +4,6 @@ import collections as __vis_collections__
 import errno as __vis_errno__
 import io as __vis_io__
 import linecache as __vis_linecache__
-import os as __vis_os__
 import time as __vis_time__
 import weakref as __vis_weakref__
 
@@ -58,6 +57,13 @@ def __vis_fd_ceiling__():
     # its workload is a better judge than this default. Otherwise: the real soft
     # limit less a cushion for everything else in the process. `bin/vis-agent`
     # raises that limit at launch, so the cushion is generous where it matters.
+    # `os` is imported HERE, not held as a module-level alias: the runtime is
+    # exec'd into the session's own globals, so a host statement that ends with
+    # `del __vis_os__` unbinds it for every later block (vis did exactly that
+    # while seeding the environment). A name on the hot path must not be one
+    # anybody outside this file can take away.
+    import os as __vis_os__
+
     try:
         __vis_n__ = int(__vis_os__.environ.get("VIS_PY_MAX_OPEN_FILES") or 0)
     except Exception:
@@ -76,6 +82,8 @@ def __vis_fd_ceiling__():
 
 
 def __vis_fd_admit__():
+    import os as __vis_os__
+
     try:
         __vis_probe__ = __vis_os__.dup(0)
         __vis_os__.close(__vis_probe__)
