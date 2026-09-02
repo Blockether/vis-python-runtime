@@ -1166,17 +1166,27 @@ class __VisGrep__(__VisResultStr__):
 __vis_paged_tools__ = frozenset(("grep", "find_files", "find"))
 
 
+class ForeignObject:
+    # A typed extension result crossed the process boundary as data. Public
+    # attributes are readable; methods and private state never cross.
+    def __init__(self, type_name, attrs):
+        self.__vis_type__ = str(type_name)
+        for name, value in attrs.items():
+            if str(name).isidentifier() and not str(name).startswith("_"):
+                setattr(self, str(name), __vis_typed_value__(value))
+
+    def __repr__(self):
+        return "<%s %s>" % (self.__vis_type__, self.__dict__)
+
+
 def __vis_typed_result__(__vis_d__):
-    # Type ONE tool-result dict AND every map inside it. `op` is stamped by the
-    # engine on results only, so a model-built dict can never impersonate one, and
-    # a shell answer additionally naming a live id is the HANDLE (see __VisShell__)
-    # that drives its process.
-    #
-    # The walk is what makes a NESTED miss readable: the host hands back a plain
-    # decoded tree, so without it `r['nested']['b']` died with a bare KeyError and
-    # the model had to re-run the tool to learn the inner shape.
+    # Type ONE tool-result dict AND every map inside it. A tagged extension
+    # object becomes a read-only-by-capability ForeignObject carrying only the
+    # public attributes its trusted process serialized.
     if isinstance(__vis_d__, __VisDict__):
         return __vis_d__
+    if "__vis_object__" in __vis_d__ and "__vis_attrs__" in __vis_d__:
+        return ForeignObject(__vis_d__["__vis_object__"], __vis_d__["__vis_attrs__"])
     __vis_t__ = {__k__: __vis_typed_value__(__v__) for __k__, __v__ in __vis_d__.items()}
     if "op" in __vis_t__:
         if __vis_t__.get("op") in __VisShell__.__vis_shell_ops__ and "id" in __vis_t__:

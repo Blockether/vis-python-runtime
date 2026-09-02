@@ -44,6 +44,16 @@ def __vis_seal__(value):
         return {str(k): __vis_seal__(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [__vis_seal__(v) for v in value]
+    attrs = getattr(value, "__dict__", None)
+    if isinstance(attrs, dict):
+        return {
+            "__vis_object__": type(value).__name__,
+            "__vis_attrs__": {
+                str(k): __vis_seal__(v)
+                for k, v in attrs.items()
+                if not str(k).startswith("_")
+            },
+        }
     return value
 
 

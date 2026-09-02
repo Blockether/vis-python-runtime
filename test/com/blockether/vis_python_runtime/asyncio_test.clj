@@ -508,10 +508,17 @@ except ValueError as exc:
 (harness/defbuilt-test dotted-tool-namespace-test
   (testing "a dotted host tool is callable and exposes only its published member"
     (let [session (harness/tool-session
-                   {"ledger.echo" (fn [[x]] (str "<" x ">"))})
+                   {"ledger.echo" (fn [[x]] (str "<" x ">"))
+                    "ledger.status" (fn [[x]]
+                                      {"__vis_object__" "BuildStatus"
+                                       "__vis_attrs__" {"state" (str x)}})})
           answer (block session
-                        (str "print(await ledger.echo('entry'))\n"
+                        (str "item = await ledger.status('ready')\n"
+                             "print(await ledger.echo('entry'))\n"
                              "print(dir(ledger))\n"
-                             "print(ledger.echo.__name__)"))]
+                             "print(ledger.echo.__name__)\n"
+                             "print(type(item).__name__, item.state)"))]
       (is (nil? (:error answer)))
-      (is (= "<entry>\n['echo']\nledger.echo" (out answer))))))
+      (is (= (str "<entry>\n['echo', 'status']\nledger.echo\n"
+                  "ForeignObject ready")
+             (out answer))))))
