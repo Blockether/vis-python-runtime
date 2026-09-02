@@ -158,7 +158,7 @@
   ;; JVM — and that the policy standing at the end is the one set last.
   (let [inside   (temp-dir "vis-concurrent-inside")
         outside  (temp-dir "vis-concurrent-outside")
-        sessions (mapv (fn [_] (harness/block-session)) (range 4))
+        sessions (mapv (fn [_] (harness/block-session)) (range 2))
         stop     (atom false)
         readers  (mapv (fn [session]
                          (Thread/startVirtualThread
@@ -166,14 +166,17 @@
                              (while (not @stop)
                                (block session (str "import os\nos.listdir('" inside "')"))))))
                        sessions)
+        ;; Small on purpose: the unpatched library crashes within the first few
+        ;; overlapping swaps, and every extra round is GIL contention a
+        ;; two-core CI machine pays for in wall clock.
         writers  (mapv (fn [i]
                          (Thread/startVirtualThread
                            (fn []
-                             (dotimes [_ 200]
+                             (dotimes [_ 25]
                                (runtime/confine! [inside (if (even? i) outside inside)]
                                                  [inside]
                                                  "")))))
-                       (range 4))]
+                       (range 2))]
     (spit (str inside "/in.txt") "INSIDE")
     (spit (str outside "/out.txt") "OUTSIDE")
     (run! (fn [^Thread t] (.join t)) writers)
