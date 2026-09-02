@@ -99,6 +99,11 @@
     (b/copy-dir {:src-dirs   [(str "resources/" root)]
                  :target-dir (str jar-class-dir "/" root)
                  :ignores    [#".*__pycache__.*" #".*\.pyc$"]}))
+  ;; The FFM registrations for our downcalls and the host upcall. They travel
+  ;; INSIDE the jar because a consumer's native-image build reads
+  ;; META-INF/native-image/<group>/<artifact>/ from the classpath by itself —
+  ;; a flag in their build.clj is a contract we cannot keep for them.
+  (b/copy-dir {:src-dirs ["resources/META-INF"] :target-dir (str jar-class-dir "/META-INF")})
   (let [vfile  (io/file jar-class-dir "vis-python-runtime" "VERSION")
         listed (->> source-roots
                     (mapcat (fn [root]
@@ -136,7 +141,12 @@
                     :basis @basis
                     :src-dirs []
                     :pom-data (pom-data (format "Prebuilt embedded-CPython cdylib (FFM) for %s." platform))})
-      (b/copy-file {:src src :target (format "%s/prebuilds/%s/%s" native-class-dir platform fname)})
+      ;; The WHOLE platform directory: the cdylib plus the vendored interpreter
+      ;; tree beside it, because `Locations/pythonHome` resolves `python/` next
+      ;; to the resolved library and a shipped artifact carries its own standard
+      ;; library rather than borrowing the machine's.
+      (b/copy-dir {:src-dirs   [(format "resources/prebuilds/%s" platform)]
+                   :target-dir (format "%s/prebuilds/%s" native-class-dir platform)})
       (b/jar {:class-dir native-class-dir :jar-file jar*})
       (println "Built:" jar* "version:" version)
       jar*)))

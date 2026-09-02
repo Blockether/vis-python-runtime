@@ -1,0 +1,82 @@
+{
+  "comment": "FFM registrations for the one C boundary (com.blockether.vispython.Interpreter) and the resources the runtime reads at run time. Every downcall in SIGNATURES and the host upcall stub must be declared here: a native image links no descriptor it was not told about, and the failure is a MissingForeignRegistrationError in a user's terminal, never in the JVM suite. The Python is addressed from vis-python-runtime/SOURCES, so that manifest ships with the files it names.",
+  "foreign": {
+    "downcalls": [
+      {
+        "returnType": "jint",
+        "parameterTypes": []
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "void*"
+        ]
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "void*",
+          "jint"
+        ]
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "void*",
+          "void*",
+          "jint"
+        ]
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "void*",
+          "void*",
+          "void*",
+          "jint"
+        ]
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "void*",
+          "void*",
+          "void*",
+          "void*",
+          "jint"
+        ]
+      }
+    ],
+    "upcalls": [
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "void*",
+          "void*",
+          "void*",
+          "jint"
+        ]
+      }
+    ]
+  },
+  "resources": [
+    {
+      "glob": "vis-python-runtime/SOURCES"
+    },
+    {
+      "glob": "vis-python-runtime/VERSION"
+    },
+    {
+      "glob": "vispython/*.py"
+    },
+    {
+      "glob": "vispython/**/*.py"
+    },
+    {
+      "glob": "vis-python/*.py"
+    },
+    {
+      "glob": "vis-python/**/*.py"
+    }
+  ]
+}
