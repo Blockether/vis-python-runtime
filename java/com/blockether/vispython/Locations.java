@@ -107,6 +107,16 @@ public final class Locations {
     return statePath("sources");
   }
 
+  /**
+   * Where a platform artifact that arrived inside a jar is unpacked, beside the
+   * packages and the bytecode cache: per-version, per-platform, and rebuildable
+   * by deleting it. A cdylib and the interpreter tree it was linked against are
+   * one unit, so both land here together — see {@link Native#materialize}.
+   */
+  public static String runtimeDir(String version, String platform) {
+    return statePath("runtime", version, platform);
+  }
+
   /** Where the JVM's trust anchors are exported for pip, beside the packages. */
   public static String certificatesFile() {
     String packages = packagesDir();

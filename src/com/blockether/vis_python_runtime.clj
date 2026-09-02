@@ -20,7 +20,8 @@
    made clearer by being written in Clojure.
 
    Nothing links at build time. The library is resolved when it is first needed:
-   `VIS_PYTHON_NATIVE_PATH` wins, otherwise the classpath resource
+   a path the host named through `use-library!` wins, then
+   `VIS_PYTHON_NATIVE_PATH`, then the classpath resource
    `prebuilds/<platform>/<file>` that `com.blockether/vis-python-runtime-native-<platform>`
    carries. A failure anywhere below is a `VisPythonException` whose `.data`
    names the symbol, status, platform or path it is about."
@@ -69,6 +70,23 @@
    (let [found (Native/library platform-tag)]
      ;; The source is a keyword because a caller branches on it; the path is the
      ;; one thing FFM opens.
+     {:source (keyword (.source found)) :path (.path found)})))
+
+(defn use-library!
+  "Resolve to THIS cdylib (or the directory holding it) from now on — for a host
+   that fetched the platform artifact itself, because a JVM cannot set its own
+   environment. `nil` restores ordinary resolution."
+  [path]
+  (Native/use (some-> path str)))
+
+(defn materialize-library!
+  "Unpack `prebuilds/<platform>/` out of a platform JAR into
+   `~/.vis/python/runtime/<version>/<platform>` and answer it like
+   `resolve-library`. The whole directory travels: the interpreter is found
+   beside its library, so the cdylib alone is a runtime that cannot import."
+  ([jar] (materialize-library! jar (platform)))
+  ([jar platform-tag]
+   (let [found (Native/materialize (.toPath (java.io.File. (str jar))) platform-tag)]
      {:source (keyword (.source found)) :path (.path found)})))
 
 (defn resolve-python-home
