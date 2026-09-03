@@ -142,24 +142,30 @@
       (finally
         (harness/bind-tools! {"echo" echo})))))
 
-(harness/defbuilt-test gathered-host-tools-keep-session-test
+(harness/defbuilt-test gathered-host-tools-keep-session-and-options-test
   ;; Regression, issue #166: pool workers lost the calling session, so `gather`
-  ;; and helpers run inside it could see a bound shell, grep or cat but not call it.
+  ;; could not run shell, grep or cat; grep's `is_regex` option never reached the host.
   (let [seen (atom [])]
     (try
       (runtime/bind-host!
-       (fn [session nm _payload]
-         (swap! seen conj [session nm])
+       (fn [session nm payload]
+         (swap! seen conj [session nm (get (json/read-str payload) "args")])
          (json/write-str {"value" nm})))
       (let [session (harness/block-session)]
         (doseq [nm ["shell" "grep" "cat"]]
           (runtime/install-tool! session nm))
         (is (= "['shell', 'grep', 'cat']"
                (ran session
-                    (str "async def use(tool):\n"
-                         "    return await tool()\n"
-                         "print(await gather(shell(), use(grep), use(cat)))"))))
-        (is (= #{[session "shell"] [session "grep"] [session "cat"]}
+                    (str "async def use(tool, options):
+"
+                         "    return await tool(options)
+"
+                         "print(await gather(shell({'command': 'pwd'}), "
+                         "use(grep, {'query': 'a.*b', 'is_regex': True}), "
+                         "use(cat, {'path': 'a.py'})))"))))
+        (is (= #{[session "shell" [{"command" "pwd"}]]
+                 [session "grep" [{"query" "a.*b" "is_regex" true}]]
+                 [session "cat" [{"path" "a.py"}]]}
                (set @seen))))
       (finally
         (harness/bind-tools! {"echo" echo})))))
