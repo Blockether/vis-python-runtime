@@ -16,6 +16,7 @@
    confines the network with `network_guard` instead."
   (:require [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
+            [com.blockether.vis-python-runtime :as runtime]
             [com.blockether.vis-python-runtime.harness :as harness :refer [block]]))
 
 (use-fixtures :each
@@ -505,20 +506,34 @@ except ValueError as exc:
                 "\"<c>\", 42, [\"<x>\", \"<y>\"]]")
            (ran to-thread-src)))))
 
+;; Regression, issue #166: an extension's typed result was rebuilt as the
+;; GraalPython-era synthetic object instead of staying its exact CPython object.
 (harness/defbuilt-test dotted-tool-namespace-test
-  (testing "a dotted host tool is callable and exposes only its published member"
-    (let [session (harness/tool-session
+  (testing "a dotted host tool returns the exact object retained by another namespace"
+    (let [producer (harness/block-session)
+          _ (runtime/exec! producer
+                           (str "class BuildStatus:\n"
+                                "    def __init__(self, state): self.state = state\n"
+                                "    def label(self): return self.state.upper()\n"
+                                "item = BuildStatus('ready')"))
+          ref (runtime/eval-str
+               producer
+               "__import__('vis_runtime')._hold_extension_object(item)")
+          session (harness/tool-session
                    {"ledger.echo" (fn [[x]] (str "<" x ">"))
-                    "ledger.status" (fn [[x]]
-                                      {"__vis_object__" "BuildStatus"
-                                       "__vis_attrs__" {"state" (str x)}})})
+                    "ledger.status" (fn [[_]] {"__vis_object_ref__" ref})})
           answer (block session
                         (str "item = await ledger.status('ready')\n"
+                             "again = await ledger.status('again')\n"
                              "print(await ledger.echo('entry'))\n"
                              "print(dir(ledger))\n"
                              "print(ledger.echo.__name__)\n"
-                             "print(type(item).__name__, item.state)"))]
+                             "print(type(item).__name__, item.state, item.label(), item is again)"))]
       (is (nil? (:error answer)))
       (is (= (str "<entry>\n['echo', 'status']\nledger.echo\n"
-                  "ForeignObject ready")
-             (out answer))))))
+                  "BuildStatus ready READY True")
+             (out answer)))
+      (is (= "0"
+             (runtime/eval-str
+              producer
+              "len(__import__('vis_runtime')._EXTENSION_OBJECTS)"))))))

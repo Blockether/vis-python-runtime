@@ -181,11 +181,8 @@ class __vis_ToolError__(Exception):
 
 
 def __vis_clean_msg__(exc):
-    # The bare message of a foreign host exception. `str(exc)` on a host throwable
-    # is `fully.qualified.ClassName: message`, and a deny-by-default sandbox does
-    # NOT expose its Java `getMessage()`, so strip that leading dotted class name
-    # to leave just the message. (The authoritative error channel still recovers
-    # the exact host message via ex-message at the boundary.)
+    # Keep the host's bare message when an embedding exposes one; otherwise strip
+    # the conventional qualified-class prefix from its string representation.
     try:
         m = exc.getMessage()
         if m:
@@ -203,8 +200,8 @@ def __vis_clean_msg__(exc):
 
 def __vis_wrap_tool_exc__(exc):
     # A native Python exception passes through untouched (its own type/message are
-    # the contract). A foreign host exception is wrapped so `except Exception`
-    # catches it; the original rides along as `__vis_orig__` for boundary mapping.
+    # the contract). A host exception outside that hierarchy is wrapped so
+    # `except Exception` catches it; the original remains available for mapping.
     if isinstance(exc, Exception):
         return exc
     return __vis_ToolError__(exc, __vis_clean_msg__(exc))
@@ -843,28 +840,21 @@ class __VisGrep__(__VisResultStr__):
 __vis_paged_tools__ = frozenset(("grep", "find_files", "find"))
 
 
-class ForeignObject:
-    # A typed extension result crossed the process boundary as data. Public
-    # attributes are readable; methods and private state never cross.
-    def __init__(self, type_name, attrs):
-        self.__vis_type__ = str(type_name)
-        for name, value in attrs.items():
-            if str(name).isidentifier() and not str(name).startswith("_"):
-                setattr(self, str(name), __vis_typed_value__(value))
-
-    def __repr__(self):
-        return "<%s %s>" % (self.__vis_type__, self.__dict__)
-
-
 def __vis_typed_result__(__vis_d__):
-    # Type ONE tool-result dict AND every map inside it. A tagged extension
-    # object becomes a read-only-by-capability ForeignObject carrying only the
-    # public attributes its trusted process serialized.
+    # An extension tool can retain its result in this CPython process while the
+    # call's data envelope makes the round trip through the host. Take that exact
+    # object back here; no language-interop proxy exists in the CPython runtime.
     if isinstance(__vis_d__, __VisDict__):
         return __vis_d__
-    if "__vis_object__" in __vis_d__ and "__vis_attrs__" in __vis_d__:
-        return ForeignObject(__vis_d__["__vis_object__"], __vis_d__["__vis_attrs__"])
-    __vis_t__ = {__k__: __vis_typed_value__(__v__) for __k__, __v__ in __vis_d__.items()}
+    if "__vis_object_ref__" in __vis_d__:
+        import vis_runtime as __vis_runtime__
+
+        return __vis_runtime__._resolve_extension_object(
+            __vis_d__["__vis_object_ref__"]
+        )
+    __vis_t__ = {
+        __k__: __vis_typed_value__(__v__) for __k__, __v__ in __vis_d__.items()
+    }
     if "op" in __vis_t__:
         if __vis_t__.get("op") in __VisShell__.__vis_shell_ops__ and "id" in __vis_t__:
             return __VisShell__(__vis_t__)
@@ -906,7 +896,9 @@ def __vis_as_result__(__vis_v__, __vis_paging__=None):
     if isinstance(__vis_v__, (list, tuple)):
         return __VisResultList__(
             [
-                __vis_typed_result__(__vis_e__) if isinstance(__vis_e__, dict) else __vis_e__
+                __vis_typed_result__(__vis_e__)
+                if isinstance(__vis_e__, dict)
+                else __vis_e__
                 for __vis_e__ in __vis_v__
             ]
         )
@@ -930,91 +922,10 @@ def __vis_settle_call__(__vis_c__):
     )
 
 
-try:
-    import polyglot as __vis_polyglot__
-
-    __vis_Foreign__ = __vis_polyglot__.ForeignObject
-
-    def __vis_is_foreign__(x):
-        # A host/polyglot proxy (ProxyHashMap/ProxyArray/ForeignDict/…) that
-        # crossed the Clojure->Python boundary. NATIVE python values (dict,
-        # list, set, tuple, a user object) are NEVER a ForeignObject.
-        return isinstance(x, __vis_Foreign__)
-except Exception:
-
-    def __vis_is_foreign__(x):
-        # No `polyglot` module means there are no polyglot proxies: this is
-        # CPython, where a tool result arrives as a value the host already
-        # DECODED, so nothing here needs rebuilding.
-        #
-        # The approximation this replaces — "anything that is not a primitive is
-        # a proxy" — was catastrophic off GraalPy: settle wraps the value of
-        # every top-level assignment, so `h = open(p, "rb")` rebuilt the handle
-        # by ITERATING it, and the block got a list of its own lines.
-        return False
-
-
 def __vis_pyify__(x):
-    # Tool results cross the host boundary as ProxyHashMap/ProxyArray, and GraalPy
-    # 25.1.3 shows those to Python as ForeignDict/ForeignList: subscript, len,
-    # iteration, .keys()/.get, KeyError on a missing key, dict(_) and {**_} all
-    # behave, and isinstance(_, dict) is even True. The ONE thing that does not
-    # work is json.dumps(_) ("Object of type ForeignDict is not JSON
-    # serializable"): the encoder dispatches on the EXACT type, and type(_) is not
-    # dict. Rebuild proxies into REAL python dict/list ONCE (at settle) so the
-    # model composes on true dicts AND can serialize them. A HOST proxy carrying
-    # 'op' is a tool result -> mark its type __VisResult__. Order is preserved
-    # (source is an ordered LinkedHashMap; comprehensions keep it).
-    #
-    # ONLY foreign proxies are rebuilt. A value the model itself built — set /
-    # frozenset / tuple / defaultdict / Counter / any user object — is ALREADY
-    # native python and passes through UNTOUCHED. (Blindly rebuilding by an
-    # allowlist silently downgraded set/tuple/frozenset -> list and dict
-    # subclasses -> dict, so `s = set(); s.add(1)` blew up with the
-    # 'list' object has no attribute 'add' error.)
-    try:
-        if x is None or type(x).__name__ in ("NoneType", "ForeignNone"):
-            return None
-    except BaseException:
-        # A RAW host null (not even wrapped as ForeignNone): every interop touch
-        # on it - including type(x) - raises Truffle's "Null receiver values are
-        # not supported by libraries". Treat it as python None.
-        return None
-    if not __vis_is_foreign__(x):
-        return x
-    if hasattr(x, "keys"):
-        try:
-            d = {__k__: __vis_pyify__(__v__) for __k__, __v__ in x.items()}
-        except Exception:
-            # NEVER hand back the RAW proxy: a proxy read of a key it does not have
-            # yields a HOST NULL, and the next touch (print, slice, len) dies with
-            # Truffle's null-receiver NPE instead of a normal KeyError. Rebuild
-            # key-by-key so ONE hostile value degrades to None, not the whole map.
-            d = {}
-            try:
-                for __k__ in list(x.keys()):
-                    try:
-                        __vis_v2__ = __vis_pyify__(x[__k__])
-                    except Exception:
-                        __vis_v2__ = None
-                    try:
-                        d[__k__] = __vis_v2__
-                    except Exception:
-                        pass
-            except Exception:
-                d = {}
-        if "op" in d:
-            # A shell answer is a HANDLE (see __VisShell__): same dict, plus the methods
-            # that drive the process it names. `op` is stamped by the engine on results
-            # only, so a model-built dict can never impersonate one.
-            if d.get("op") in __VisShell__.__vis_shell_ops__ and "id" in d:
-                return __VisShell__(d)
-            return __VisResult__(d)
-        return __VisDict__(d)
-    try:
-        return [__vis_pyify__(__e__) for __e__ in x]
-    except Exception:
-        return x
+    # CPython receives host answers already decoded from JSON. They are native
+    # Python values, so no language-interop proxy conversion exists or is needed.
+    return x
 
 
 def __vis_slot_thunk__(index, aw):
@@ -1333,8 +1244,8 @@ class InvalidStateError(Exception):
 class __vis_Sleep__:
     # A real blocking sleep wrapped as an awaitable. There is deliberately no
     # selector/event-loop thread. Under gather it runs on the host's bounded,
-    # self-reclaiming PLATFORM pool, so a Graal polyglot call cannot pin virtual
-    # carriers or grow an unbounded virtual-thread scheduler.
+    # self-reclaiming PLATFORM pool, so blocking work cannot grow an unbounded
+    # thread scheduler.
     __slots__ = ("delay", "result")
 
     def __init__(self, delay, result=None):
@@ -2963,8 +2874,7 @@ __vis_globals__ = __vis_builtins_mod__.globals
 
 
 def __vis_caller_frame__(depth):
-    # The frame `depth` levels above the shim, or None when frame introspection
-    # is unavailable.
+    # The frame `depth` levels above the shim, or None when no such frame exists.
     try:
         return __vis_sysmod__._getframe(depth + 1)
     except Exception:
@@ -4025,7 +3935,9 @@ def __vis_kwargs_direct_tools__():
 # global `print` ALREADY bound to `__vis_print__`, so a fresh capture would make
 # the wrapper call itself forever (`RecursionError` on the first `print` of the
 # next block). Same rule as `__vis_real_open__`: re-adopt the first value.
-__vis_real_print__ = __vis_survivor__("__vis_real_print__", lambda: __vis_builtins__.print)
+__vis_real_print__ = __vis_survivor__(
+    "__vis_real_print__", lambda: __vis_builtins__.print
+)
 
 
 def __vis_print__(*__vis_a__, **__vis_kw__):

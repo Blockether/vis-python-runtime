@@ -28,32 +28,36 @@ to spell. Every attribute below is an op in
 # callables inside dicts and lists (a provider's `auth_fn`, a symbol's `fn`).
 
 import json as _vis_json
+import vis_runtime as _vis_runtime
 
 _vis_callables = {}
 _vis_call_seq = [0]
 
 
-def __vis_seal__(value):
-    """Answer `value` with every callable replaced by its id marker."""
+def __vis_seal__(value, preserve_objects=False):
+    """Seal callables and optionally retain real CPython result objects."""
     if callable(value):
         _vis_call_seq[0] += 1
         cid = "c%d" % _vis_call_seq[0]
         _vis_callables[cid] = value
         return {"__vis_callable__": cid}
     if isinstance(value, dict):
-        return {str(k): __vis_seal__(v) for k, v in value.items()}
+        return {str(k): __vis_seal__(v, preserve_objects) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [__vis_seal__(v) for v in value]
+        return [__vis_seal__(v, preserve_objects) for v in value]
     attrs = getattr(value, "__dict__", None)
     if isinstance(attrs, dict):
-        return {
+        sealed = {
             "__vis_object__": type(value).__name__,
             "__vis_attrs__": {
-                str(k): __vis_seal__(v)
+                str(k): __vis_seal__(v, preserve_objects)
                 for k, v in attrs.items()
                 if not str(k).startswith("_")
             },
         }
+        if preserve_objects:
+            sealed["__vis_object_ref__"] = _vis_runtime._hold_extension_object(value)
+        return sealed
     return value
 
 
@@ -80,10 +84,10 @@ def __vis_unseal_host__(value):
     return value
 
 
-def __vis_call__(cid, args_json):
-    """Invoke the sealed callable `cid` on JSON-decoded args, sealing the answer."""
+def __vis_call__(cid, args_json, preserve_objects=False):
+    """Invoke sealed callable ``cid`` and seal its answer for the host trip."""
     args = __vis_unseal_host__(_vis_json.loads(args_json))
-    return __vis_seal__(_vis_callables[cid](*args))
+    return __vis_seal__(_vis_callables[cid](*args), preserve_objects)
 
 
 import sys as _vis_sys, types as _vis_types
