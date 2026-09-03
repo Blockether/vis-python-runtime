@@ -82,6 +82,18 @@
       (is (true? (runtime/stdin! nil)))
       (is (true? (truthy session "import sys\nsys.stdin is sys.__stdin__"))))))
 
+(harness/defbuilt-test block-stdout-reaches-the-host-while-it-runs-test
+  (let [writes (atom [])
+        _ (harness/bind-tools! {"__vis_capture_stdout__"
+                                (fn [args]
+                                  (swap! writes conj (first args))
+                                  nil)})
+        session (harness/block-session)]
+    (runtime/install-sync-tool! session "__vis_capture_stdout__")
+    (testing "each write reaches the host without changing the block result"
+      (is (= "before cancel" (ran session "print('before cancel')")))
+      (is (= "before cancel\n" (apply str @writes))))))
+
 (harness/defbuilt-test interrupt-unwinds-a-spinning-block-test
   (let [spinning (promise)
         session  (harness/tool-session {"ready" (fn [_] (deliver spinning true) "go")})

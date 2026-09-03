@@ -405,14 +405,34 @@ def rewrite_imports(source, namespace):
         return source
 
 
+class _BlockCapture(io.StringIO):
+    """In-memory stdout that also hands each write to an optional host sink."""
+
+    def __init__(self, sink):
+        super().__init__()
+        self._sink = sink
+
+    def write(self, text):
+        written = super().write(text)
+        if self._sink is not None and text:
+            try:
+                self._sink(text)
+            except BaseException:
+                # Capturing stdout must never make a user block fail.
+                pass
+        return written
+
+
 def run_block(source, namespace):
     """Run `source` the way `python_execution` runs a BLOCK.
 
     A block has ONE success channel — what it PRINTED — so what comes back is
-    the captured stdout, plus the error text when it raised. The boundary is
-    real: the reapers run after it, which is where the handle registry earns its
-    keep, and a block that leaves a handle unreachable pays for it HERE and not
-    in whichever unrelated block allocates next.
+    the captured stdout, plus the error text when it raised. The optional host
+    sink receives the same writes while the block runs, preserving output when
+    the host must kill code parked inside C before this function can return.
+    The boundary is real: the reapers run after it, which is where the handle
+    registry earns its keep, and a block that leaves a handle unreachable pays
+    for it HERE and not in whichever unrelated block allocates next.
     """
     runner = namespace.get("__vis_run_async__")
     if runner is None:
@@ -426,7 +446,7 @@ def run_block(source, namespace):
     if runner is None:
         raise RuntimeError("session is not equipped: install(namespace) first")
     source = rewrite_imports(source, namespace)
-    stream = io.StringIO()
+    stream = _BlockCapture(namespace.get("__vis_capture_stdout__"))
     error = None
     with contextlib.redirect_stdout(stream):
         try:
