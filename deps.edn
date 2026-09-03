@@ -1,14 +1,11 @@
-;; vis-python-runtime — the Python runtime the Vis sandbox executes, without
-;; Truffle. GraalPy costs ~300 MB in the native image (python-language alone is
-;; 95 MB in ~/.m2, and SVM expands it); this library embeds a VENDORED CPython
-;; behind a small first-party C ABI (native/vispython) reached through
-;; the JDK Foreign Function & Memory API — the same shape clj-imaging uses for
-;; its Rust cdylib, and the reason there is no JNI and no subprocess here.
+;; vis-python-runtime — the embedded CPython runtime the Vis sandbox executes.
+;; A small first-party C ABI (`native/vispython`) keeps the raw CPython API
+;; behind JDK Foreign Function & Memory downcalls, with no JNI or subprocess.
 ;;
 ;; No runtime dependencies on purpose: this library is loaded inside a GraalVM
-;; native image, so every dep it declares becomes reachable code in someone
-;; else's binary. The cdylib is resolved at RUNTIME from VIS_PYTHON_NATIVE_PATH
-;; or from a path the host names after unpacking the platform release archive
+;; native image, so every dependency becomes reachable code in the consumer.
+;; The cdylib is resolved at runtime from VIS_PYTHON_NATIVE_PATH or from a path
+;; the host names after unpacking the platform release archive
 ;; vis-python-runtime-<platform>-<version>.tar.gz.
 {:paths ["src/clj" "resources" "target/classes"]
 

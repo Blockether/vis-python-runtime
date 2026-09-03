@@ -2,11 +2,8 @@
   "Embedded CPython for the Vis sandbox: the whole Clojure API.
 
    Vis runs sandbox Python — `packages/vis-agent` plus every shim in
-   `resources/vis-shims/` — inside GraalPy today, which costs roughly 300 MB in
-   the native image. This library replaces that engine with a VENDORED CPython
-   reached through the JDK Foreign Function & Memory API over a first-party C
-   ABI (`native/vispython`), so the image carries a cdylib and an interpreter
-   tree beside it instead of a Truffle language inside it.
+   `resources/vis-shims/` — in vendored CPython reached through the JDK Foreign
+   Function & Memory API and the first-party C ABI in `native/vispython`.
 
    The bridge itself is JAVA — `src/java/com/blockether/vispython/` — and this
    namespace is a thin skin over it: Clojure argument shapes and keyword maps,

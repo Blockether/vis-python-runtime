@@ -1,20 +1,13 @@
 # vis-python-runtime
 
-Embedded CPython for the Vis sandbox — vendored per platform, reached over the
-JDK Foreign Function & Memory API, with no Truffle in the native image.
+Embedded CPython for the Vis sandbox, vendored per platform and reached through
+the JDK Foreign Function & Memory API.
 
 ## Why
 
-Vis executes sandbox Python (`packages/vis-agent` and every shim in
-`resources/vis-shims/`) inside GraalPy. That is roughly **300 MB** of the
-shipped binary: `python-language` alone is 95 MB of jar, plus `truffle-api`,
-`icu4j-shadowed` and `regex`, and SVM expands what it compiles in. GraalPy also
-does not refcount, so a dropped handle stays alive for the life of the JVM and
-the sandbox has to keep an ownership registry by hand.
-
-A vendored CPython behind a small C ABI is on the order of **20 MB** of shared
-library plus its standard library, brings real refcounting, the full C-API and
-CPython's own speed.
+A vendored CPython behind a small C ABI gives Vis real reference counting, the
+full C extension ecosystem and CPython's own speed without exposing the raw
+CPython API to the JVM.
 
 ## Shape
 

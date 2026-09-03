@@ -275,6 +275,11 @@ static void vis_py_record(int level, const char *event, const char *fields, ...)
 #define VIS_PY_CALLER_RUNS_MS 50
 #define VIS_PY_THREAD_CAP 100
 #define VIS_PY_PAR_QUOTA 8
+#define VIS_PY_SESSION_NAME 128
+
+static void vis_py_run_push(const char *session);
+static void vis_py_run_pop(void);
+static const char *vis_py_current_session(void);
 
 /* The events CPython raises when a thread starts: `threading.Thread.start()`
    and a bare `_thread.start_new_thread` alike. */
@@ -303,6 +308,7 @@ typedef struct vis_py_task {
 struct vis_py_batch {
     PyObject *thunks; /* the sequence every thunk is borrowed from */
     vis_py_task *task;
+    char session[VIS_PY_SESSION_NAME];
     int count;
     int done;        /* tasks finished */
     int outstanding; /* tasks queued or running, still touching this batch */
@@ -451,9 +457,11 @@ static void *vis_py_worker_main(void *arg)
            already holding it, so a worker and a `par` cannot hold one and want
            the other. */
         gil = PyGILState_Ensure();
+        batch = task->batch;
+        vis_py_run_push(batch->session);
         value = PyObject_CallNoArgs(task->thunk);
         error = (value == NULL) ? PyErr_GetRaisedException() : NULL;
-        batch = task->batch;
+        vis_py_run_pop();
 
         pthread_mutex_lock(&vis_py_pool.lock);
         task->value = value;
@@ -504,12 +512,9 @@ static int vis_py_pool_start(void)
 /* --------------------------------------------------------------------------
  * Confinement.
  *
- * GraalPy confined the guest by handing Truffle its own FileSystem; CPython has
- * no such seam and opens files with the whole process's credentials, so the
- * guard here is an AUDIT HOOK (PEP 578), installed before the interpreter
- * starts. A hook cannot be removed once added and guest code cannot see it, so
- * a block that rebinds `open`, reaches through `os`, or imports its way to a
- * descriptor still arrives here.
+ * CPython opens files with the process's credentials, so an audit hook (PEP 578)
+ * enforces the sandbox before the interpreter starts. Guest code cannot remove
+ * the hook, so every filesystem path reaches this boundary.
  *
  * The policy is C state the HOST sets over the ABI and the guest cannot reach:
  * two lists of canonical roots, one readable and one writable — a writable root
@@ -938,10 +943,9 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
 /* --------------------------------------------------------------------------
  * Host callables.
  *
- * A sandbox tool is HOST code the guest calls: `grep(...)` reads as Python and
- * runs as Clojure. GraalPy handed the guest a foreign proxy for that; CPython
- * has no such object, so the door here is one function pointer the host
- * registers and one builtin module the guest reaches it through.
+ * A sandbox tool such as `grep` is host code exposed through one registered
+ * function pointer and one builtin module. The guest sees an ordinary Python
+ * callable; only JSON text crosses the boundary.
  *
  * The pointer is invoked as
  * `int (*)(const char *name, const char *payload, char *out, int cap)` and
@@ -997,7 +1001,6 @@ static vis_py_host_fn vis_py_host = NULL;
  * which the host answers as a refusal rather than a guess.
  * ------------------------------------------------------------------------ */
 
-#define VIS_PY_SESSION_NAME 128
 #define VIS_PY_RUN_DEPTH 32
 #define VIS_PY_TRUSTED_MAX 64
 
@@ -1199,6 +1202,7 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
     Py_ssize_t i;
     PyObject *value;
     PyObject *error;
+    const char *session;
     struct timespec deadline;
     int submitted = 0;
     int saturated = 0;
@@ -1236,6 +1240,8 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
         return PyErr_NoMemory();
     }
     batch->thunks = thunks; /* the batch owns the sequence from here on */
+    session = vis_py_current_session();
+    snprintf(batch->session, sizeof batch->session, "%s", session == NULL ? "" : session);
     batch->count = (int)count;
     for (i = 0; i < count; i++) {
         batch->task[i].thunk = PySequence_Fast_GET_ITEM(thunks, i);
@@ -1768,14 +1774,9 @@ int vispython_host(void *fn)
    and every absolute `sys.path` entry - the vendored stdlib, the shipped
    Python and whatever directory the host appended for installed packages.
 
-   GraalPy wrapped its confined FileSystem with `allowLanguageHomeAccess`, so a
-   confined context could still read its own stdlib; here the import machinery
-   opens source through the same audited event as the guest, and a policy that
-   names only the session's directories refuses the next cold import. That is
-   not a sandbox, it is a broken interpreter - and deriving these paths is the
-   runtime's job, since only the runtime knows where it was installed. Read at
-   CONFINE time, because a host appends its package directory to `sys.path`
-   after startup. */
+   Imports pass through the same audit hook as guest reads, so the interpreter's
+   own roots must remain readable. The runtime derives them at confine time, after
+   the host has appended its package directory to `sys.path`. */
 static void vis_py_add_interpreter_roots(vis_py_roots *roots)
 {
     static const char *const names[] = {"prefix", "base_prefix", "exec_prefix", NULL};

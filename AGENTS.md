@@ -1,9 +1,8 @@
 # vis-python-runtime guidance
 
 Only what you would otherwise get wrong. This repository has one job: give Vis a
-Python runtime that costs tens of megabytes instead of the ~300 MB GraalPy adds
-to the native image. General engineering practice is assumed; a contract that a
-docstring or a test can state lives there, not here.
+compact embedded CPython runtime. General engineering practice is assumed; a
+contract that a docstring or a test can state lives there, not here.
 
 ## Hard rules
 
@@ -78,11 +77,10 @@ docstring or a test can state lives there, not here.
   envelope in, `vis_runtime.to_json` renders the value out, and `run` /
   `run-block` answer JSON TEXT the caller reads with the reader it already has.
   The bridge reads none of it; never reintroduce a second encoding.
-- **The consumer contract is the existing sandbox, unchanged.** Success is Vis'
+- **The consumer contract is the existing sandbox.** Vis'
   `resources/vis-python/async_runtime.py`, its host-call doors and
-  `packages/vis-agent/src/vis/__init__.py` running with no edit beyond the
-  GraalPy-specific call sites. If a door has to change, the design is wrong —
-  fix the bridge.
+  `packages/vis-agent/src/vis/__init__.py` define that boundary. If a door has to
+  change, fix the bridge.
 - **The filesystem boundary is C, never Python.** Confinement is an audit hook
   (PEP 578) installed before `Py_InitializeEx` over a policy the host sets
   through `vispython_confine`; guest code cannot see it, remove it or reach

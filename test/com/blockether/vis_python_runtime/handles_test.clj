@@ -1,13 +1,9 @@
 (ns com.blockether.vis-python-runtime.handles-test
   "What the interpreter does with a handle the block lets go of.
 
-   This replaces the descriptor registry `async_runtime.py` used to carry (and
-   the 272-line suite that pinned it). That machinery was written for GraalPy,
-   which does not refcount: a dropped `open()` there kept its process descriptor
-   forever and its buffered bytes were never written, so the sandbox reclaimed
-   and flushed by hand. CPython refcounts, and these cases are the measurement
-   that says so — a regression here means the machinery has to come back, and
-   nothing else in the suite would notice."
+   CPython closes dropped handles and flushes their buffers through reference
+   counting. These cases keep that behavior explicit without a second descriptor
+   registry in the guest runtime."
   (:require [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
             [com.blockether.vis-python-runtime :as runtime]
@@ -31,7 +27,7 @@
 (defn- temp-file
   ^String [text]
   (let [dir (str (.toAbsolutePath (Files/createTempDirectory "vis-handles"
-                                                            (make-array FileAttribute 0))))
+                                                             (make-array FileAttribute 0))))
         file (str dir "/probe.txt")]
     (spit file text)
     file))
@@ -81,11 +77,8 @@
       (is (= "HELD" (slurp file))))))
 
 (harness/defbuilt-test the-ceiling-refuses-before-the-process-wedges-test
-  ;; The one half of the old descriptor machinery that was never about GraalPy:
-  ;; the table is shared with the JVM, and a block that fills it stops `shell`
-  ;; from forking at all. The ceiling turns that into a Python error the block
-  ;; can read, so the test lowers it under what the process already holds and
-  ;; asks for one more handle.
+  ;; The shared JVM descriptor table refuses a new handle before a full process
+  ;; prevents `shell` from spawning. Lower the ceiling and ask for one more.
   (let [session (block-session)
         file (temp-file "probe\n")
         lower "import os\nos.environ['VIS_PY_MAX_OPEN_FILES'] = '8'\n"
@@ -109,12 +102,7 @@
       (finally (block session restore)))))
 
 (harness/defbuilt-test subprocess-redirects-need-no-repair-test
-  ;; `process_redirect.py` used to rewrite every file redirect into a pipe plus a
-  ;; daemon copier, and to swap `Popen.pid` for the host's real one, because
-  ;; GraalPy handed the host a bare INHERIT for a file redirect and answered
-  ;; `.pid` with a recycled child-slot index. Both are gone: the vendored CPython
-  ;; does its own redirects and reports its own pids. This is what says so - if it
-  ;; ever fails, the repair has to come back, and nothing else would notice.
+  ;; CPython owns redirects and reports native process ids without guest repair.
   (let [session (block-session)
         into-file (temp-file "")
         from-file (temp-file "hello-stdin\n")
@@ -156,7 +144,7 @@
                                 "import os as __vis_os__\n"
                                 "del __vis_os__\n"
                                 "_ = builtins.__dict__.pop('__vis_os__', None)"))
-    (let [answer (harness/block session (str "print(open(" (pr-str file) ").read().strip())"))]
+    (let [answer (block session (str "print(open(" (pr-str file) ").read().strip())"))]
       (testing "a block still opens files after the host took that name away"
         (is (nil? (:error answer)))
         (is (= "probe" (str/trim (str (:stdout answer)))))))))

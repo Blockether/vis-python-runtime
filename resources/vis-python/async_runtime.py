@@ -1148,13 +1148,7 @@ def __vis_drive__(coro):
         except StopIteration as e:
             return e.value
         try:
-            # PYIFY, exactly like the direct `__vis_settle__` path (see above): the
-            # value sent back into the coroutine is what `x = await tool()` binds,
-            # so it must be a REAL python value. Handing back a raw host proxy - or
-            # a host NULL for a tool that returned nil - made the next interop touch
-            # inside the coroutine die with Truffle's null-receiver NPE
-            # (Null receiver values are not supported by libraries) instead of a
-            # normal python error.
+            # Settle runtime calls before sending their values back into the coroutine.
             if isinstance(y, __vis_Call__):
                 send = __vis_settle_call__(y)
             elif isinstance(y, __vis_Gather__):
@@ -1177,11 +1171,7 @@ def __vis_is_user_file__(name):
 
 
 def __vis_error_pos__(e):
-    # Deepest user-code traceback frame -> (line, col, end_col). The
-    # async trampoline (__vis_drive__) unwinds the guest stack, so a GraalPy
-    # PolyglotException.getPolyglotStackTrace() LOSES these frames; the Python
-    # __traceback__ is the only place the failing user-code position survives.
-    # col/end_col are 0-based (co_positions), None when column info is absent.
+    # Deepest user-code traceback frame as 0-based (line, col, end_col).
     tb = getattr(e, "__traceback__", None)
     line = None
     col = None
@@ -1204,16 +1194,7 @@ def __vis_error_pos__(e):
 
 
 def __vis_err_pos_now__():
-    # HOST-CALLED, right after a block failed: compute the failing <prog>
-    # position from the exception stashed by `__vis_run_async__`, then release
-    # it (a traceback pins frames). This deliberately does NOT run inside the
-    # guest `except`: walking traceback frames touches `tb_frame`/`f_code`, and
-    # once GraalPy has COMPILED the driver those accesses can raise an INTERNAL
-    # Truffle `NullPointerException: Null receiver values are not supported by
-    # libraries` that NO guest `except` can catch - it would replace the model's
-    # real error at the host boundary (every uncaught error in a warm session
-    # became an opaque host-null fault). Called from the host's PolyglotException
-    # handler the same fault is catchable there, and costs only the caret.
+    # Compute the failed block's source position, then release its traceback.
     g = globals()
     e = g.get("__vis_err_obj__")
     g["__vis_err_obj__"] = None
@@ -1281,11 +1262,7 @@ class __vis_Sleep__:
 
 
 def __vis_clean_exception__(exc):
-    # Stored failures must not retain completed coroutine/driver frames through
-    # traceback, context, or cause links. Clearing those attributes on the RAISED
-    # object is not reliable here: GraalPy materializes `__traceback__` lazily from
-    # the underlying host exception, so it can reappear after the handler unwinds.
-    # Store a semantic COPY instead - same type, args and message, no frames.
+    # Keep stored failures semantic and detached from completed coroutine frames.
     clean = __vis_clone_exception__(__vis_wrap_tool_exc__(exc))
     for attr in ("__traceback__", "__context__", "__cause__"):
         try:
@@ -2177,14 +2154,9 @@ class __vis_AsyncioMeta__(type):
 
 
 def __vis_tool_proto__(nm, params):
-    # A stub carrying ONLY a parameter list. The tool itself has to stay
-    # permissive — GraalPy folds `tool(a=1)` into ONE trailing dict positional,
-    # so `(*a, **k)` is the only shape that can accept every call the host
-    # supports — while `inspect.signature` follows `__wrapped__`. The stub is
-    # therefore how a tool REPORTS the parameters the host declared for it
-    # without narrowing what it accepts. It has no body and no registered
-    # source, so `inspect.getsource` on a tool keeps refusing: the
-    # implementation is a host callable, not Python.
+    # A signature-only stub lets inspection show the host's declared parameters
+    # while the real callable remains permissive. It has no source because its
+    # implementation lives in the host.
     ns = {}
     try:
         __vis_real_exec__("def __vis_proto__(" + params + "): pass", ns)
@@ -2622,13 +2594,8 @@ def __vis_assigned_names__(body):
 
 
 def __vis_star_import__(module, level=0):
-    # `from mod import *` is a SyntaxError inside a function, and EVERY block is
-    # wrapped in `async def __vis_main__`. GraalPy raises that at compile time on
-    # an AST-built module with no source text, which the host then cannot even
-    # render (a bare UnsupportedOperationException). So the star import is
-    # rewritten to this call, which does what module scope would: bind the
-    # module's public names (or its `__all__`) straight into globals. A PROTECTED
-    # tool name is never overwritten.
+    # Blocks run inside `async def __vis_main__`, where star imports are invalid.
+    # Rewrite one to module-scope behavior without overwriting protected names.
     g = globals()
     mod = __import__(module or "", g, g, ["*"], level)
     prot = set(g.get("__vis_protected_names__") or [])
@@ -2738,43 +2705,6 @@ def __vis_check_module_scope__(tree, src):
         for ch in __vis_ast__.iter_child_nodes(node):
             if not isinstance(ch, __vis_scope_nodes__):
                 stack.append(ch)
-
-
-def __vis_check_compile_traps__(tree, src):
-    # Two ordinary CPython SyntaxErrors are UNCATCHABLE host faults on GraalPy:
-    # compiling `await` inside a lambda dies with a bare Java NullPointerException
-    # (null sourceRange), and a bare starred assignment target with
-    # `UnsupportedOperationException: StoreVisitor: Starred`. Neither is a Python
-    # exception, so `except SyntaxError` around compile() cannot see them and the
-    # whole block is reported as an engine fault. Reject them up front, with the
-    # message and position CPython gives. Unlike the module-scope pass this walks
-    # EVERY scope: a lambda nested in a def is just as fatal.
-    star = "starred assignment target must be in a list or tuple"
-    for node in __vis_ast__.walk(tree):
-        if isinstance(node, __vis_ast__.Lambda):
-            for sub in __vis_ast__.walk(node):
-                if isinstance(sub, __vis_ast__.Await):
-                    raise __vis_syntax_error__(
-                        "'await' outside async function", sub, src
-                    )
-        targets = ()
-        if isinstance(node, __vis_ast__.Assign):
-            targets = node.targets
-        elif isinstance(node, (__vis_ast__.AugAssign, __vis_ast__.AnnAssign)):
-            targets = (node.target,)
-        elif isinstance(node, (__vis_ast__.For, __vis_ast__.AsyncFor)):
-            targets = (node.target,)
-        elif isinstance(node, __vis_ast__.comprehension):
-            targets = (node.target,)
-        elif isinstance(node, __vis_ast__.withitem):
-            targets = (node.optional_vars,) if node.optional_vars is not None else ()
-        elif isinstance(node, __vis_ast__.Delete):
-            for t in node.targets:
-                if isinstance(t, __vis_ast__.Starred):
-                    raise __vis_syntax_error__("cannot delete starred", t, src)
-        for t in targets:
-            if isinstance(t, __vis_ast__.Starred):
-                raise __vis_syntax_error__(star, t, src)
 
 
 def __vis_check_tool_shadow__(tree, src):
@@ -3811,7 +3741,6 @@ def __vis_run_async__(src):
     tree = __vis_ast__.parse(src)
     __vis_flags__ = __vis_future_flags__(tree)
     __vis_check_module_scope__(tree, src)
-    __vis_check_compile_traps__(tree, src)
     __vis_check_tool_shadow__(tree, src)
     tree = __vis_normalize_module__(tree, __vis_flags__)
     assigned = __vis_assigned_names__(tree.body)
@@ -3885,11 +3814,7 @@ def __vis_run_async__(src):
     try:
         __vis_drive__(g["__vis_main__"]())
     except BaseException as __vis_err__:
-        # Stash the exception ONLY, then re-raise UNCHANGED. Deriving the failing
-        # position here would walk its traceback frames, which on a warm (JIT-ed)
-        # interpreter can hit an uncatchable internal Truffle null-receiver NPE and
-        # DESTROY this real error. The host asks for the position afterwards via
-        # `__vis_err_pos_now__`, where that fault is catchable.
+        # Keep the original failure for the host's separate position lookup.
         g["__vis_err_obj__"] = __vis_err__
         raise
     finally:

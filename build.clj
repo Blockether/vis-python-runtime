@@ -83,7 +83,7 @@
                 :version version
                 :basis @basis
                 :src-dirs ["src/clj"]
-                :pom-data (pom-data "Embedded CPython for the Vis sandbox — vendored per platform, reached over FFM, without Truffle.")})
+                :pom-data (pom-data "Embedded CPython for the Vis sandbox, vendored per platform and reached over FFM.")})
   ;; No prebuilds: the cdylib belongs to the per-platform native archives. The
   ;; Python DOES ship here — a consumer that took a jar has no `resources/`
   ;; directory to point `sys.path` at — and so does the namespaced VERSION,

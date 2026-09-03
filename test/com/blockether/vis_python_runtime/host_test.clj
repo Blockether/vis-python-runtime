@@ -2,12 +2,8 @@
   "The door from the sandbox back to the host: `bind-host!`, `install-tool!` and
    what a block sees when it calls one.
 
-   A tool is host code the guest calls — `grep(...)` reads as Python and runs as
-   Clojure. GraalPy passed the host object in as a foreign proxy; CPython has no
-   such object, so the door is one function pointer the host registers (an FFM
-   upcall stub) and one builtin module the guest calls it through. Only TEXT
-   crosses: the JSON envelope is the runtime's, and the C boundary reads none of
-   it.
+   A tool is host code exposed through one FFM upcall and one builtin module.
+   Only the runtime's JSON envelope crosses; the C boundary treats it as text.
 
    What these cases pin is everything that shape can get wrong: arguments and
    values arriving as data, deferral (a tool is awaited, gathered and settled
@@ -143,6 +139,28 @@
           (is (= two (ran two "print(await whose())"))))
         (testing "the host saw the name once per session, never a blank"
           (is (= [["whose" one] ["whose" two]] @seen))))
+      (finally
+        (harness/bind-tools! {"echo" echo})))))
+
+(harness/defbuilt-test gathered-host-tools-keep-session-test
+  ;; Regression, issue #166: pool workers lost the calling session, so `gather`
+  ;; and helpers run inside it could see a bound shell, grep or cat but not call it.
+  (let [seen (atom [])]
+    (try
+      (runtime/bind-host!
+       (fn [session nm _payload]
+         (swap! seen conj [session nm])
+         (json/write-str {"value" nm})))
+      (let [session (harness/block-session)]
+        (doseq [nm ["shell" "grep" "cat"]]
+          (runtime/install-tool! session nm))
+        (is (= "['shell', 'grep', 'cat']"
+               (ran session
+                    (str "async def use(tool):\n"
+                         "    return await tool()\n"
+                         "print(await gather(shell(), use(grep), use(cat)))"))))
+        (is (= #{[session "shell"] [session "grep"] [session "cat"]}
+               (set @seen))))
       (finally
         (harness/bind-tools! {"echo" echo})))))
 

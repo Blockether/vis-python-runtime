@@ -1,11 +1,9 @@
 (ns com.blockether.vis-python-runtime.confinement-test
   "The sandbox boundary in C (`native/vispython/vispython.c`).
 
-   GraalPy confined the guest with a Truffle `FileSystem` the guest could not
-   reach; CPython opens files with the whole process's credentials, so the
-   boundary is an audit hook installed before the interpreter starts and a
-   policy that lives in C. That is the point of these cases: they do not test a
-   Python guard, they test one a block cannot rebind, delete or read.
+   CPython opens files with the process's credentials, so an audit hook and C
+   policy enforce the boundary before the interpreter starts. A block cannot
+   rebind, remove or inspect that guard.
 
    Confinement is PROCESS state, like the interpreter — every session runs under
    the policy set last — so every case here lifts it again."
@@ -88,11 +86,8 @@
       (is (= "OUTSIDE" (str/trim (str (:stdout (block session
                                                       (str "print(open('" outside "/out.txt').read())"))))))))))
 
-;; GraalPy wrapped the confined FileSystem with `allowLanguageHomeAccess`, so a
-;; confined context could still read its own stdlib. Here the roots are the
-;; host's, and a policy naming only the session's directories would refuse the
-;; interpreter's next import — which is not a sandbox, it is a broken
-;; interpreter. Deriving them is the runtime's job, not every host's.
+;; The runtime adds the interpreter's own roots so a session-only policy does
+;; not break imports.
 (harness/defbuilt-test interpreter-roots-test
   (testing "a policy the host set without them still lets the interpreter import"
     (let [inside  (temp-dir "vis-import")
@@ -162,20 +157,20 @@
         stop     (atom false)
         readers  (mapv (fn [session]
                          (Thread/startVirtualThread
-                           (fn []
-                             (while (not @stop)
-                               (block session (str "import os\nos.listdir('" inside "')"))))))
+                          (fn []
+                            (while (not @stop)
+                              (block session (str "import os\nos.listdir('" inside "')"))))))
                        sessions)
         ;; Small on purpose: the unpatched library crashes within the first few
         ;; overlapping swaps, and every extra round is GIL contention a
         ;; two-core CI machine pays for in wall clock.
         writers  (mapv (fn [i]
                          (Thread/startVirtualThread
-                           (fn []
-                             (dotimes [_ 25]
-                               (runtime/confine! [inside (if (even? i) outside inside)]
-                                                 [inside]
-                                                 "")))))
+                          (fn []
+                            (dotimes [_ 25]
+                              (runtime/confine! [inside (if (even? i) outside inside)]
+                                                [inside]
+                                                "")))))
                        (range 2))]
     (spit (str inside "/in.txt") "INSIDE")
     (spit (str outside "/out.txt") "OUTSIDE")

@@ -9,11 +9,8 @@
    primitives that actually rendezvous between children settling at the same
    time.
 
-   Concurrency is the pool behind `__vis_par__`, which this library supplies
-   (`vis_runtime.par`) unless a host binds its own. Ported from Vis'
-   `env_python_form_eval_test`; the case asserting that `import socket` is a
-   no-op stayed there, because that refusal was GraalPy's sandbox and CPython
-   confines the network with `network_guard` instead."
+   Concurrency uses the bounded pool behind `__vis_par__`, supplied by
+   `vis_runtime.par` unless the host binds its own."
   (:require [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
             [com.blockether.vis-python-runtime :as runtime]
@@ -506,8 +503,8 @@ except ValueError as exc:
                 "\"<c>\", 42, [\"<x>\", \"<y>\"]]")
            (ran to-thread-src)))))
 
-;; Regression, issue #166: an extension's typed result was rebuilt as the
-;; GraalPython-era synthetic object instead of staying its exact CPython object.
+;; Regression, issue #166: an extension's typed result crossed as a synthetic
+;; placeholder instead of remaining the exact CPython object.
 (harness/defbuilt-test dotted-tool-namespace-test
   (testing "a dotted host tool returns the exact object retained by another namespace"
     (let [producer (harness/block-session)
