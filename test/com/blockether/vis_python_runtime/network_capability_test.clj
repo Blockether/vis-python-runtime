@@ -2,12 +2,10 @@
   "The network as a CAPABILITY: `vispython_network`, answered by the same audit
    hook as confinement.
 
-   WHETHER a session may reach the network at all is decided in C, where a block
-   cannot see it, rebind it or reach around it — a socket, a name lookup and a
-   connection are all refused before they exist. WHICH hosts a session that HAS
-   egress may reach is `network_guard.py`, which is guidance and lives in Python
-   where a refusal can be legible. Like confinement the flag is PROCESS state, so
-   every test here puts it back."
+   Whether a session may reach the network is decided in C, where a block cannot
+   see it, rebind it or reach around it. Host and destination policy belongs to
+   the process jail. Like confinement the flag is PROCESS state, so every test
+   here puts it back."
   (:require [clojure.test :refer [is testing]]
             [com.blockether.vis-python-runtime :as runtime]
             [com.blockether.vis-python-runtime.harness :as harness]))
@@ -38,10 +36,7 @@
        "        return 'refused'\n"))
 
 (harness/defbuilt-test network-capability-test
-  ;; One interpreter has one `socket`, so an earlier test's DOMAIN policy is still
-  ;; installed here. This file is about the capability underneath it: `*` allows
-  ;; every host in Python, and what refuses is C or nothing.
-  (let [session (harness/guarded-session ["*"] [])]
+  (let [session (harness/block-session)]
     (try
       (testing "granted, the guest resolves names and opens sockets"
         (is (true? (runtime/network! true)))

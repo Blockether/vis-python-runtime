@@ -111,6 +111,14 @@ public final class Seatbelt {
       out.append("(deny process-exec*").append(subpaths(resolved.denyExec())).append(')');
     }
     out.append(network(policy));
+    List<String> sockets = JailPolicy.realPaths(policy.unixConnect());
+    if (!sockets.isEmpty()) {
+      out.append("(allow network-outbound (remote unix-socket");
+      for (String socket : sockets) {
+        out.append("(path ").append(quote(socket)).append(')');
+      }
+      out.append("))");
+    }
     return out.toString();
   }
 

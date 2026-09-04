@@ -40,9 +40,12 @@
 
 (deftest policy-value-test
   (testing "lists are distinct, blank-free and never nil"
-    (let [p (runtime/jail-policy {:read-write ["/a" "" "/a" nil] :inbound [80 80 443]})]
+    (let [p (runtime/jail-policy {:read-write ["/a" "" "/a" nil]
+                                  :unix-connect ["/tmp/control.sock" "" "/tmp/control.sock"]
+                                  :inbound [80 80 443]})]
       (is (= ["/a"] (.readWrite p)))
       (is (= [] (.readOnly p)))
+      (is (= ["/tmp/control.sock"] (.unixConnect p)))
       (is (= [80 443] (.inbound p)))
       (is (= JailPolicy$Egress/OFF (.egress p)))
       (is (false? (.keychain p)))))
@@ -88,6 +91,13 @@
           (is (str/includes? proxied "(allow network-outbound (remote ip \"localhost:5555\"))"))
           (is (str/includes? proxied "(allow network-inbound (local ip \"*:4200\"))"))
           (is (str/includes? (compile {:network :open}) "(allow network*)"))))
+      (testing "one exact Unix control socket is reachable after the network deny"
+        (let [socket (str root "/control.sock")
+              _ (spit socket "")
+              p (compile {:unix-connect [socket]})]
+          (is (str/includes? p (str "(remote unix-socket(path \"" socket "\"))")))
+          (is (< (str/index-of p "(deny network*)")
+                 (str/index-of p "(remote unix-socket")))))
       (testing "keychain opens the Security services and the keychain databases"
         (let [p (compile {:keychain? true})]
           (is (str/includes? p "(allow mach-lookup(global-name \"com.apple.SecurityServer\")"))

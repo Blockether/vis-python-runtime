@@ -512,11 +512,8 @@ public final class Interpreter {
   }
 
   /**
-   * Execute the sandbox module {@code name} INTO the session's own globals,
-   * answering the source file that ran. This is how a CONFIGURED part of the
-   * sandbox arrives: {@code network_guard} reads the policy the session was
-   * handed as it executes, so it is executed into the namespace holding it
-   * rather than imported.
+   * Execute the sandbox module {@code name} INTO the session's own globals, answering the
+   * source file that ran. Configured modules therefore read values from that session.
    */
   public static String installModule(String session, String name) {
     exec(session, "import vis_runtime");

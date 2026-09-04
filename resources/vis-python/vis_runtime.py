@@ -120,12 +120,10 @@ def sandbox_code():
 
 
 def install_module(namespace, module):
-    """Execute one further sandbox module INTO an already equipped session.
+    """Execute a named sandbox module INTO an already equipped session.
 
-    This is how the host adds a part of the sandbox that is CONFIGURED by the
-    session: `network_guard` reads `__vis_allowed_domains__` and
-    `__vis_denied_domains__` out of the namespace as it runs. Answers the file
-    the code came from, so a caller can prove WHICH source ran.
+    Configured modules run in the namespace carrying their host-provided values.
+    Answers the source file the code came from.
     """
     code = module_code(module)
     exec(code, namespace)

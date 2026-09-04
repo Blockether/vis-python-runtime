@@ -93,12 +93,13 @@
    `:read-write`/`:read-only`/`:deny-read`/`:deny-write`/`:deny-exec` are path
    lists (`~` allowed; a deny always wins; temp and the platform's own code are
    the compiler's to add), `:network` is `:off` (default), `:open` or
-   `{:proxy <port>}` — the one loopback port sockets may reach — `:inbound` lists
-   ports additionally exposed on every interface (loopback listeners are always
-   allowed) and `:keychain?` opens the OS credential store."
-  [{:keys [read-write read-only deny-read deny-write deny-exec network inbound keychain?]}]
+   `{:proxy <port>}` — the one loopback port sockets may reach — `:unix-connect`
+   lists exact local control sockets, `:inbound` lists ports additionally exposed
+   on every interface (loopback listeners are always allowed), and `:keychain?`
+   opens the OS credential store."
+  [{:keys [read-write read-only deny-read deny-write deny-exec unix-connect network inbound keychain?]}]
   (JailPolicy. (vec read-write) (vec read-only) (vec deny-read) (vec deny-write) (vec deny-exec)
-               (egress network) (mapv int inbound) (boolean keychain?)))
+               (vec unix-connect) (egress network) (mapv int inbound) (boolean keychain?)))
 
 (defn jail-unsupported-reason
   "Why this host cannot confine a child — no Seatbelt or namespaces, WSL1, no

@@ -93,24 +93,6 @@
          (runtime/run session
                       "import sys\nsys.modules.clear()\nsys.modules.update(_vis_saved_modules)\nNone"))))
 
-(defn guarded-session
-  "A session confined to `allowed`/`denied` the way the engine confines one: the
-   two policy names in the session's globals, then `network_guard` executed into
-   it.
-
-   One interpreter has ONE `socket`, so the policy in force is the one of the
-   session configured LAST — configuring a session here is ENTERING it, and that
-   is why these tests run in sequence rather than side by side."
-  [allowed denied]
-  (runtime/initialize!)
-  (let [s (str "guard-" (System/nanoTime))]
-    (runtime/install-runtime! s)
-    (runtime/exec! s
-                   (str "__vis_allowed_domains__ = " (json/write-str allowed) "\n"
-                        "__vis_denied_domains__ = " (json/write-str denied)))
-    (runtime/install-module! s "network_guard")
-    (track! s)))
-
 (defn tool!
   "Publish `nm` in `session` as a DEFERRED tool over the Python `body`.
 

@@ -16,14 +16,15 @@ import java.util.Set;
  * {@code readWrite}; reads under {@code readWrite}, {@code readOnly} and the
  * platform's own code and configuration; a deny list always wins. The temp
  * directories and the platform read roots are the compiler's to add, so a
- * caller names only the session's directories. {@code inbound} ports are
- * additionally reachable on every interface; loopback listeners are always
- * allowed. {@code keychain} opens the OS credential store: the Security
- * services and keychain databases on macOS, the D-Bus session bus on Linux.
+ * caller names only the session's directories. {@code unixConnect} contains exact
+ * local control sockets a child may dial. {@code inbound} ports are additionally
+ * reachable on every interface; loopback listeners are always allowed.
+ * {@code keychain} opens the OS credential store: the Security services and
+ * keychain databases on macOS, the D-Bus session bus on Linux.
  */
 public record JailPolicy(List<String> readWrite, List<String> readOnly, List<String> denyRead,
-    List<String> denyWrite, List<String> denyExec, Egress egress, List<Integer> inbound,
-    boolean keychain) {
+    List<String> denyWrite, List<String> denyExec, List<String> unixConnect, Egress egress,
+    List<Integer> inbound, boolean keychain) {
 
   /** Where a child's outbound sockets may go: nowhere, one loopback proxy port, or anywhere. */
   public record Egress(Kind kind, int proxyPort) {
@@ -46,6 +47,7 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
     denyRead = strings(denyRead);
     denyWrite = strings(denyWrite);
     denyExec = strings(denyExec);
+    unixConnect = strings(unixConnect);
     egress = egress == null ? Egress.OFF : egress;
     inbound = ports(inbound);
   }
