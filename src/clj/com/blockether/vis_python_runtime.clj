@@ -202,14 +202,7 @@
    is an empty stream, which is the sandbox's answer. `nil` restores the
    process's own stdin, for the caller that owns it: the human at the CLI."
   [text]
-  (Interpreter/exec
-   default-session
-   (if (nil? text)
-     "import vis_runtime\nvis_runtime.set_stdin(None)"
-     (str "import base64, vis_runtime\nvis_runtime.set_stdin(base64.b64decode('"
-          (.encodeToString (java.util.Base64/getEncoder)
-                           (.getBytes ^String text "UTF-8"))
-          "').decode('utf-8'))")))
+  (Interpreter/stdin text)
   true)
 
 (defn threads!
@@ -354,6 +347,12 @@
   "Directory every sandbox interpreter imports host-installed wheels from."
   []
   (Locations/packagesDir))
+
+(defn resolve-worker
+  "The `vis-python-worker` executable beside the selected CPython cdylib, or nil
+   for a checkout or a jar, which run `com.blockether.vispython.Worker` on a JVM."
+  ([] (resolve-worker (resolve-library)))
+  ([{:keys [path]}] (Locations/worker path)))
 
 (defn certificates-pem!
   "Export the JVM's trust anchors to a PEM file for pip and answer its path,

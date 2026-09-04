@@ -14,10 +14,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux-x64, os: ubuntu-24.04, jdk-arch: x64, prefix: "" }
-          - { platform: linux-arm64, os: ubuntu-24.04-arm, jdk-arch: aarch64, prefix: "" }
-          - { platform: darwin-arm64, os: vis-macos-arm64, jdk-arch: aarch64, prefix: "" }
-          - { platform: darwin-x64, os: vis-macos-arm64, jdk-arch: x64, prefix: "/usr/bin/arch -x86_64" }
+          # `worker` platforms build on GraalVM CE and ship `vis-python-worker`
+          # as a native image; there is no CE build for darwin-x64, so that
+          # archive carries none (build.clj `worker-platforms`).
+          - { platform: linux-x64, os: ubuntu-24.04, worker: true, jdk-arch: x64, prefix: "" }
+          - { platform: linux-arm64, os: ubuntu-24.04-arm, worker: true, jdk-arch: aarch64, prefix: "" }
+          - { platform: darwin-arm64, os: vis-macos-arm64, worker: true, jdk-arch: aarch64, prefix: "" }
+          - { platform: darwin-x64, os: vis-macos-arm64, worker: false, jdk-arch: x64, prefix: "/usr/bin/arch -x86_64" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -39,11 +42,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential binutils linux-libc-dev meson ninja-build pkg-config
+          sudo apt-get install -y build-essential binutils linux-libc-dev meson ninja-build pkg-config zlib1g-dev
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+      - uses: ./.github/actions/setup-graalvm-25
+        if: matrix.worker
       - uses: actions/setup-java@v5
+        if: ${{ !matrix.worker }}
         with:
           distribution: temurin
           java-version: "25"
@@ -55,6 +61,7 @@ jobs:
         run: |
           ${{ matrix.prefix }} native/vispython/build.sh
           ${{ matrix.prefix }} clojure -T:build javac
+          if [ '${{ matrix.worker }}' = 'true' ]; then clojure -T:build worker-image; fi
           ${{ matrix.prefix }} clojure -M:test
           ${{ matrix.prefix }} clojure -T:build platform-archive :platform '${{ matrix.platform }}'
           ${{ matrix.prefix }} scripts/verify-platform-archive.sh '${{ matrix.platform }}'

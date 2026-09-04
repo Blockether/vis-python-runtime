@@ -79,6 +79,21 @@ public final class Locations {
   }
 
   /**
+   * The worker executable beside the resolved CPython cdylib, or null: a
+   * platform archive built with a native image carries {@link Worker#EXECUTABLE}
+   * at its root, and a checkout or a jar carries none and runs the same class on
+   * a JVM instead.
+   */
+  public static String worker(String libraryPath) {
+    if (libraryPath == null) {
+      return null;
+    }
+    Path candidate = Path.of(libraryPath).toAbsolutePath().getParent().resolve(Worker.EXECUTABLE);
+    return Files.isRegularFile(candidate) && Files.isExecutable(candidate)
+        ? candidate.toString() : null;
+  }
+
+  /**
    * Where packages installed for the sandbox live.
    *
    * <p>The artifact BUNDLES NOTHING: it is an interpreter and its standard

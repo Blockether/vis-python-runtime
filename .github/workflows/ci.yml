@@ -16,23 +16,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux-x64, os: ubuntu-24.04, jdk-arch: x64 }
-          - { platform: linux-arm64, os: ubuntu-24.04-arm, jdk-arch: aarch64 }
+          - { platform: linux-x64, os: ubuntu-24.04 }
+          - { platform: linux-arm64, os: ubuntu-24.04-arm }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential binutils linux-libc-dev meson ninja-build pkg-config
+          sudo apt-get install -y build-essential binutils linux-libc-dev meson ninja-build pkg-config zlib1g-dev
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "25"
-          architecture: ${{ matrix.jdk-arch }}
+      # GraalVM CE is the JDK here: it runs the suite AND compiles the worker image.
+      - uses: ./.github/actions/setup-graalvm-25
       - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
@@ -40,6 +37,7 @@ jobs:
         run: |
           native/vispython/build.sh
           clojure -T:build javac
+          clojure -T:build worker-image
           clojure -M:test
           clojure -T:build platform-archive :platform '${{ matrix.platform }}'
           scripts/verify-platform-archive.sh '${{ matrix.platform }}'
@@ -53,8 +51,10 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - { platform: darwin-arm64, jdk-arch: aarch64, prefix: "" }
-          - { platform: darwin-x64, jdk-arch: x64, prefix: "/usr/bin/arch -x86_64" }
+          # No GraalVM CE for darwin-x64: that archive ships without a worker image
+          # (build.clj `worker-platforms`) and is built on a stock JDK under Rosetta.
+          - { platform: darwin-arm64, worker: true, jdk-arch: aarch64, prefix: "" }
+          - { platform: darwin-x64, worker: false, jdk-arch: x64, prefix: "/usr/bin/arch -x86_64" }
     steps:
       - uses: actions/checkout@v6
       - name: Keep this run out of the runner's real home
@@ -67,7 +67,10 @@ jobs:
       - name: Verify Rosetta for the x64 build
         if: matrix.platform == 'darwin-x64'
         run: /usr/bin/arch -x86_64 /usr/bin/uname -m | grep -qx x86_64
+      - uses: ./.github/actions/setup-graalvm-25
+        if: matrix.worker
       - uses: actions/setup-java@v5
+        if: ${{ !matrix.worker }}
         with:
           distribution: temurin
           java-version: "25"
@@ -79,6 +82,7 @@ jobs:
         run: |
           ${{ matrix.prefix }} native/vispython/build.sh
           ${{ matrix.prefix }} clojure -T:build javac
+          if [ '${{ matrix.worker }}' = 'true' ]; then clojure -T:build worker-image; fi
           ${{ matrix.prefix }} clojure -M:test
           ${{ matrix.prefix }} clojure -T:build platform-archive :platform '${{ matrix.platform }}'
           ${{ matrix.prefix }} scripts/verify-platform-archive.sh '${{ matrix.platform }}'

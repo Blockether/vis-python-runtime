@@ -13,6 +13,12 @@ case "$platform" in
   darwin-arm64|darwin-x64) python_lib=libvispython.dylib; jail_lib=libvisjail.dylib ;;
   *) echo "unsupported platform: $platform" >&2; exit 2 ;;
 esac
+# The worker image ships wherever GraalVM CE builds: everywhere but darwin-x64
+# (build.clj `worker-platforms`).
+case "$platform" in
+  darwin-x64) worker="" ;;
+  *) worker=vis-python-worker ;;
+esac
 
 test -f "$archive"
 rm -rf "$unpacked"
@@ -29,6 +35,13 @@ if [[ "$platform" == linux-* ]]; then
   nm -D "$unpacked/$jail_lib" | grep -q ' visjail_spawn$'
 else
   nm -gU "$unpacked/$jail_lib" | grep -q '_visjail_spawn$'
+fi
+
+if [[ -n "$worker" ]]; then
+  test -x "$unpacked/$worker"
+  # A native image that starts, finds its VERSION resource and exits: the
+  # cheapest proof the executable in the archive is the one this tag built.
+  test "$("$unpacked/$worker" --version)" = "$version"
 fi
 
 printf '%s\n' "$archive"

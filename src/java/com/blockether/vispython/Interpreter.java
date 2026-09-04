@@ -340,6 +340,25 @@ public final class Interpreter {
   }
 
   /**
+   * Say what the guest's {@code sys.stdin} reads. PROCESS state like confinement,
+   * and for the same reason: descriptor 0 belongs to the host, so a guest
+   * {@code input()} would block on a terminal nobody is typing into and - every
+   * session's Python running on the one runtime thread - take the process with
+   * it. {@code text} is what the guest reads before EOF; empty is an empty
+   * stream, the sandbox's answer; null restores the process's own stdin, for the
+   * caller that owns it. The text travels as base64 because a Python literal
+   * cannot spell every byte a caller may hand a guest.
+   */
+  public static void stdin(String text) {
+    String code = text == null
+        ? "import vis_runtime\nvis_runtime.set_stdin(None)"
+        : "import base64, vis_runtime\nvis_runtime.set_stdin(base64.b64decode('"
+            + java.util.Base64.getEncoder().encodeToString(text.getBytes(StandardCharsets.UTF_8))
+            + "').decode('utf-8'))";
+    exec(DEFAULT_SESSION, code);
+  }
+
+  /**
    * Set the process's thread policy, answering the {@code {cap, workers, quota}}
    * in force; a zero keeps what is already set.
    *

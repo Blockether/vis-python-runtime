@@ -17,6 +17,13 @@
                   "linux-arm64"  ["libvispython.so" "libvisjail.so"]
                   "darwin-arm64" ["libvispython.dylib" "libvisjail.dylib"]
                   "darwin-x64"   ["libvispython.dylib" "libvisjail.dylib"]})
+(def worker-platforms
+  "Platforms whose archive carries `vis-python-worker`, the interpreter worker
+   compiled to a native image (`worker-image`). GraalVM CE publishes no
+   darwin-x64 build, so that archive ships without one and a host there runs
+   `com.blockether.vispython.Worker` on its own JVM instead."
+  #{"linux-x64" "linux-arm64" "darwin-arm64"})
+(def worker-executable "vis-python-worker")
 
 (def version
   "The repo-root VIS_PYTHON_VERSION file, verbatim — the single version source,
@@ -109,24 +116,107 @@
   (b/jar {:class-dir jar-class-dir :jar-file jar-file})
   (println "Built:" jar-file "version:" version))
 
+(defn- host-platform
+  "This machine's `<os>-<arch>` tag, spelled the way `Native/platform` spells it —
+   restated here because build.clj runs before `target/classes` exists."
+  []
+  (let [os   (str/lower-case (System/getProperty "os.name"))
+        arch (str/lower-case (System/getProperty "os.arch"))]
+    (str (cond (str/includes? os "mac") "darwin"
+               (str/includes? os "linux") "linux"
+               :else (throw (ex-info (str "Unsupported operating system: " os) {:os os})))
+         "-"
+         (case arch
+           ("aarch64" "arm64") "arm64"
+           ("x86_64" "amd64" "x64") "x64"
+           (throw (ex-info (str "Unsupported architecture: " arch) {:arch arch}))))))
+
+(def ^:private graal-pin
+  "`.graalvm-version`, parsed: plain KEY=\"value\" lines, the same file the CI
+   action sources. GRAAL_VERSION is what the launcher below must report."
+  (delay
+    (into {}
+          (keep (fn [line]
+                  (when-let [[_ k v] (re-matches #"\s*([A-Z0-9_]+)=\"?([^\"]*)\"?\s*" line)]
+                    [k (str/trim v)])))
+          (str/split-lines (slurp ".graalvm-version")))))
+
+(defn- native-image-launcher
+  "`bin/native-image` under GRAALVM_HOME, else JAVA_HOME, else the bare name on
+   PATH — refused unless it reports the pinned GraalVM version, because the
+   worker's FFM registrations are written against exactly that release."
+  []
+  (let [home     (or (System/getenv "GRAALVM_HOME") (System/getenv "JAVA_HOME"))
+        launcher (when home (io/file home "bin" "native-image"))
+        command  (if (and launcher (.isFile launcher)) (.getAbsolutePath launcher) "native-image")
+        want     (get @graal-pin "GRAAL_VERSION")
+        {:keys [exit out]} (try (b/process {:command-args [command "--version"] :out :capture})
+                                (catch Exception e {:exit -1 :out (str e)}))]
+    (when-not (and (zero? exit) (str/includes? (str out) want))
+      (throw (ex-info (str "worker-image needs GraalVM CE " want " (see .graalvm-version); "
+                           command " answered: " (str/trim (str out)))
+                      {:command command :want want :exit exit})))
+    command))
+
+(defn worker-image
+  "Compile `com.blockether.vispython.Worker` into
+   `resources/prebuilds/<platform>/vis-python-worker`, beside the cdylib it
+   loads — where `Locations/worker` finds it and where `platform-archive` ships
+   it. The classpath is the compiled bridge plus `resources/`: the FFM
+   registrations and the resource globs the image needs ride in
+   `META-INF/native-image/…` there, so this passes no reachability flag of its
+   own. `-march=compatibility` because one archive serves every CPU of its
+   platform; the 16 MiB stack because a CPython call runs on the very thread
+   that made the downcall."
+  [{:keys [platform]}]
+  (let [platform (or (some-> platform name) (host-platform))]
+    (when-not (worker-platforms platform)
+      (throw (ex-info (str "no worker image for " platform " — GraalVM CE has no build there")
+                      {:platform platform :known worker-platforms})))
+    (javac nil)
+    (let [out (io/file "resources/prebuilds" platform worker-executable)
+          args [(native-image-launcher)
+                "-cp" (str/join java.io.File/pathSeparator [class-dir "resources"])
+                "--enable-native-access=ALL-UNNAMED"
+                "-H:+UnlockExperimentalVMOptions" "-R:StackSize=16777216"
+                "-H:+ReportExceptionStackTraces"
+                "-march=compatibility"
+                "-Os"
+                "-o" (.getPath out)
+                "com.blockether.vispython.Worker"]]
+      (io/make-parents out)
+      (b/delete {:path (.getPath out)})
+      (let [{:keys [exit]} (b/process {:command-args args})]
+        (when-not (zero? exit)
+          (throw (ex-info "native-image failed" {:platform platform :exit exit}))))
+      (when-not (.isFile out)
+        (throw (ex-info "native-image reported success but wrote nothing" {:path (.getPath out)})))
+      (println "Built:" (.getPath out) (format "(%.1f MB)" (/ (.length out) 1048576.0)))
+      (.getPath out))))
+
 (defn platform-archive
   "Write the release asset for one platform: everything under
-   `resources/prebuilds/<platform>/` — both cdylibs and the vendored interpreter
-   — as a gzipped tar. `libvispython` embeds CPython; `libvisjail` embeds upstream
-   bubblewrap on Linux and enters Seatbelt on macOS. Contents sit at the archive
-   root, exactly where `Locations` resolves them. `tar` preserves the interpreter's
-   symlinks and executable bits."
+   `resources/prebuilds/<platform>/` — both cdylibs, the vendored interpreter and,
+   on a `worker-platforms` member, the `vis-python-worker` image — as a gzipped
+   tar. `libvispython` embeds CPython; `libvisjail` embeds upstream bubblewrap on
+   Linux and enters Seatbelt on macOS. Contents sit at the archive root, exactly
+   where `Locations` resolves them. `tar` preserves the interpreter's symlinks
+   and executable bits."
   [{:keys [platform]}]
   (let [platform (some-> platform name)]
     (when-not (native-platforms platform)
       (throw (ex-info (str "Unknown native platform: " platform) {:platform platform :known native-platforms})))
-    (let [dir  (io/file "resources/prebuilds" platform)
-          libs (mapv #(io/file dir %) (native-libs platform))
-          out  (io/file (format "target/%s-%s-%s.tar.gz" (name lib) platform version))]
+    (let [dir    (io/file "resources/prebuilds" platform)
+          libs   (mapv #(io/file dir %) (native-libs platform))
+          worker (io/file dir worker-executable)
+          out    (io/file (format "target/%s-%s-%s.tar.gz" (name lib) platform version))]
       (doseq [src libs]
         (when-not (.isFile src)
           (throw (ex-info (str "runtime cdylib not found (build native/vispython first): " src)
                           {:platform platform :path (str src)}))))
+      (when (and (worker-platforms platform) (not (.canExecute worker)))
+        (throw (ex-info (str "worker image not found (run `clojure -T:build worker-image` first): " worker)
+                        {:platform platform :path (str worker)})))
       (b/delete {:path (str out)})
       (io/make-parents out)
       ;; SOURCE only, as in the jar: `__pycache__` is bytecode compiled against
