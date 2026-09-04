@@ -214,17 +214,6 @@ visjail_spawn(const char *argv_blob, int argv_len,
       free_items(env);
       return answer_error(error, error_cap, "network bridge ports must be between 0 and 65535");
     }
-#if defined(__linux__)
-  if (confined && (proxy_port > 0 || inbound_port > 0))
-    for (int i = 0; i < argc; i++)
-      if (strcmp(argv[i], "--unshare-net") == 0)
-        {
-          free_items(argv);
-          free_items(env);
-          return answer_error(error, error_cap,
-                              "network bridge owns the namespace; remove --unshare-net");
-        }
-#endif
 
   if (use_pty)
     {

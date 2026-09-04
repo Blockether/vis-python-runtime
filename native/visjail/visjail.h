@@ -18,9 +18,9 @@ int vis_bwrap_main(int argc, char **argv);
  * argv_blob and env_blob are NUL-separated UTF-8 strings. A confined Linux
  * argv is bubblewrap's complete argv (argv[0], policy flags, --, command).
  * proxy_port and inbound_port create a private Linux network namespace whose only
- * host crossings are those two loopback endpoints; the argv must then omit
- * --unshare-net because libvisjail owns that namespace. Result receives pid,
- * stdin-write, stdout-read and stderr-read.
+ * host crossings are those two loopback endpoints. The policy compiler omits its
+ * own network-namespace flag whenever this bridge owns the namespace. Result
+ * receives pid, stdin-write, stdout-read and stderr-read.
  */
 int visjail_spawn(const char *argv_blob, int argv_len,
                               const char *env_blob, int env_len,

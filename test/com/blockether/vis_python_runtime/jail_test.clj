@@ -123,6 +123,11 @@
           (is (some #{["--ro-bind-try" "/dev/null" file]} (partition 3 1 args)))))
       (finally (delete-tree root)))))
 
+(deftest native-bridge-does-not-interpret-policy-arguments-test
+  (let [source (slurp "native/visjail/visjail.c")]
+    (is (not (str/includes? source "--unshare-net"))
+        "the native transport receives bridge ports but never parses compiler output")))
+
 (deftest pipes-environment-and-seatbelt-or-bubblewrap-test
   (let [root (temp-dir)
         outside (io/file (System/getProperty "user.home")
