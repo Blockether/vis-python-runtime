@@ -350,6 +350,11 @@
      (reify HostFunction
        (call [_ session name payload] (str (f session name payload))))))
   nil)
+(defn packages-dir
+  "Directory every sandbox interpreter imports host-installed wheels from."
+  []
+  (Locations/packagesDir))
+
 (defn certificates-pem!
   "Export the JVM's trust anchors to a PEM file for pip and answer its path,
    `~/.vis/python/cacert.pem` by default. Pip would otherwise verify against the

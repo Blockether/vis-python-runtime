@@ -12,7 +12,7 @@
             [com.blockether.vis-python-runtime.harness :as harness :refer [block temp-dir]])
   (:import [java.net InetSocketAddress Socket]
            [java.security.cert CertificateFactory]
-           [com.blockether.vispython Pip]))
+           [com.blockether.vispython Locations Pip]))
 
 (use-fixtures :each
   (fn [run]
@@ -76,6 +76,9 @@
         (Thread/sleep 10)
         (runtime/certificates-pem! path)
         (is (= stamp (.lastModified (io/file written))))))))
+
+(deftest package-directory-test
+  (is (= (Locations/packagesDir) (runtime/packages-dir))))
 
 (deftest install-command-test
   (let [command (runtime/pip-command {:python "/p/bin/python3" :target "/t" :cert "/c/cacert.pem"}
