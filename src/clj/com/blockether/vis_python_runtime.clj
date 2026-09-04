@@ -24,7 +24,8 @@
    unpacked one names it here. A failure anywhere below is a
    `VisPythonException` whose `.data`
    names the symbol, status, platform or path it is about."
-  (:import [com.blockether.vispython HostFunction Interpreter Jail JailPolicy JailPolicy$Egress Locations Native Pip]
+  (:import [com.blockether.vispython HostFunction Interpreter Jail JailPolicy JailPolicy$Egress
+            Locations Native Pip]
            [java.util.function Consumer]))
 
 (def native-path-env
@@ -68,7 +69,8 @@
    that fetched the platform artifact itself, because a JVM cannot set its own
    environment. `nil` restores ordinary resolution."
   [path]
-  (Native/use (some-> path str)))
+  (Native/use (some-> path
+                      str)))
 
 (defn resolve-python-home
   "The vendored CPython tree to root the interpreter at, or nil to let CPython
@@ -97,9 +99,17 @@
    lists exact local control sockets, `:inbound` lists ports additionally exposed
    on every interface (loopback listeners are always allowed), and `:keychain?`
    opens the OS credential store."
-  [{:keys [read-write read-only deny-read deny-write deny-exec unix-connect network inbound keychain?]}]
-  (JailPolicy. (vec read-write) (vec read-only) (vec deny-read) (vec deny-write) (vec deny-exec)
-               (vec unix-connect) (egress network) (mapv int inbound) (boolean keychain?)))
+  [{:keys [read-write read-only deny-read deny-write deny-exec unix-connect network inbound
+           keychain?]}]
+  (JailPolicy. (vec read-write)
+               (vec read-only)
+               (vec deny-read)
+               (vec deny-write)
+               (vec deny-exec)
+               (vec unix-connect)
+               (egress network)
+               (mapv int inbound)
+               (boolean keychain?)))
 
 (defn jail-unsupported-reason
   "Why this host cannot confine a child — no Seatbelt or namespaces, WSL1, no
@@ -122,8 +132,15 @@
    the COMPLETE child environment; a confined child also carries `Jail/MARKER`."
   ([command] (spawn-process! command {}))
   ([command {:keys [environment directory policy pty? merge-stderr? rows columns]}]
-   (Jail/spawn (vec command) (or environment {}) directory (some-> policy jail-policy)
-               (boolean pty?) (boolean merge-stderr?) (int (or rows 0)) (int (or columns 0)))))
+   (Jail/spawn (vec command)
+               (or environment {})
+               directory
+               (some-> policy
+                       jail-policy)
+               (boolean pty?)
+               (boolean merge-stderr?)
+               (int (or rows 0))
+               (int (or columns 0)))))
 
 (defn initialize!
   "Start the embedded interpreter, once per process, and put `:source-paths`
@@ -136,15 +153,15 @@
    idempotent; a SESSION is not."
   ([] (initialize! {}))
   ([{:keys [source-paths python-home pycache-prefix packages]
-     :or   {python-home     Interpreter/DEFAULT
-            pycache-prefix  Interpreter/DEFAULT
-            packages        Interpreter/DEFAULT}}]
+     :or {python-home Interpreter/DEFAULT
+          pycache-prefix Interpreter/DEFAULT
+          packages Interpreter/DEFAULT}}]
    (let [startup (Interpreter/initialize (vec source-paths) python-home pycache-prefix packages)]
-     {:library        (.library startup)
-      :source-paths   (vec (.sourcePaths startup))
-      :python-home    (.pythonHome startup)
+     {:library (.library startup)
+      :source-paths (vec (.sourcePaths startup))
+      :python-home (.pythonHome startup)
       :pycache-prefix (.pycachePrefix startup)
-      :packages       (.packages startup)})))
+      :packages (.packages startup)})))
 
 (defn python-version
   "The running interpreter's version string. Requires `initialize!`."
@@ -190,8 +207,8 @@
    this is PROCESS state and REPLACES the flag for every session; `refusal` is the
    sentence the guest reads."
   ([allowed?] (network! allowed? ""))
-  ([allowed? refusal]
-   (Interpreter/network (boolean allowed?) (str refusal))))
+  ([allowed? refusal] (Interpreter/network (boolean allowed?) (str refusal))))
+
 (defn stdin!
   "Say what the guest's `sys.stdin` reads, answering true.
 
@@ -266,7 +283,10 @@
    for minutes does not hold its own records back."
   ([sink] (logs! sink 250))
   ([sink every-ms]
-   (Interpreter/drainTo (when sink (reify Consumer (accept [_ text] (sink text))))
+   (Interpreter/drainTo (when sink
+                          (reify
+                            Consumer
+                              (accept [_ text] (sink text))))
                         (long every-ms))))
 
 (defn eval-str
@@ -338,11 +358,12 @@
    the guest is blocked on, so it must not re-enter this namespace, and on any
    thread, because the GIL is released for its duration."
   [f]
-  (Interpreter/bindHost
-   (when f
-     (reify HostFunction
-       (call [_ session name payload] (str (f session name payload))))))
+  (Interpreter/bindHost (when f
+                          (reify
+                            HostFunction
+                              (call [_ session name payload] (str (f session name payload))))))
   nil)
+
 (defn packages-dir
   "Directory every sandbox interpreter imports host-installed wheels from."
   []
@@ -377,6 +398,11 @@
    because the caller is a CLI that has to print pip's own words."
   ([specs] (pip-install! {} specs))
   ([{:keys [python target cert pycache-prefix upgrade? timeout-ms]} specs]
-   (let [result (Pip/install python target cert pycache-prefix (boolean upgrade?)
-                             (long (or timeout-ms 0)) (vec specs))]
+   (let [result (Pip/install python
+                             target
+                             cert
+                             pycache-prefix
+                             (boolean upgrade?)
+                             (long (or timeout-ms 0))
+                             (vec specs))]
      {:exit (.exit result) :out (.out result) :command (vec (.command result))})))

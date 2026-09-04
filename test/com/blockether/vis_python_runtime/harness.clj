@@ -15,12 +15,9 @@
 
 (def built?
   "False in a checkout where `native/vispython/build.sh` has not run."
-  (try (boolean (runtime/resolve-library))
-       (catch VisPythonException _ false)))
+  (try (boolean (runtime/resolve-library)) (catch VisPythonException _ false)))
 
-(def ^:private opened
-  "Every session this harness has handed out and not yet closed."
-  (atom []))
+(def ^:private opened "Every session this harness has handed out and not yet closed." (atom []))
 
 (defn- track!
   "Remember `session` so `close-sessions!` can drop it."
@@ -36,7 +33,8 @@
    that never closes one measures descriptor discipline against a process still
    holding everything it ever opened."
   []
-  (doseq [s @opened] (runtime/close-session! s))
+  (doseq [s @opened]
+    (runtime/close-session! s))
   (reset! opened []))
 
 (defmacro defbuilt-test
@@ -55,10 +53,7 @@
   [session code]
   (json/read-str (runtime/run session code)))
 
-(defn truthy
-  "Whether `code` answered Python `True`."
-  [session code]
-  (true? (ev session code)))
+(defn truthy "Whether `code` answered Python `True`." [session code] (true? (ev session code)))
 
 (defn block-session
   "A session that runs BLOCKS: the runtime installed in its own globals."
@@ -90,8 +85,9 @@
   (runtime/run session "import sys\n_vis_saved_modules = dict(sys.modules)\nNone")
   (try (ev session code)
        (finally
-         (runtime/run session
-                      "import sys\nsys.modules.clear()\nsys.modules.update(_vis_saved_modules)\nNone"))))
+         (runtime/run
+           session
+           "import sys\nsys.modules.clear()\nsys.modules.update(_vis_saved_modules)\nNone"))))
 
 (defn tool!
   "Publish `nm` in `session` as a DEFERRED tool over the Python `body`.
@@ -107,10 +103,23 @@
    top-level def."
   [session nm params body]
   (runtime/exec! session
-                 (str "def __vis_impl_" nm "__(" params "):\n" body "\n"
-                      nm " = __vis_deferred__(__vis_impl_" nm "__, " (pr-str nm) ")\n"
+                 (str "def __vis_impl_"
+                      nm
+                      "__("
+                      params
+                      "):\n"
+                      body
+                      "\n"
+                      nm
+                      " = __vis_deferred__(__vis_impl_"
+                      nm
+                      "__, "
+                      (pr-str nm)
+                      ")\n"
                       "__vis_protected_names__ = sorted(set(__vis_protected_names__)"
-                      " | {" (pr-str nm) "})")))
+                      " | {"
+                      (pr-str nm)
+                      "})")))
 
 (defn bind-tools!
   "Bind `tools` — tool name to a function of its ARGUMENT VECTOR — as the host this
@@ -121,16 +130,18 @@
    that throws comes back as the failure envelope, which is how the guest gets a
    catchable exception rather than a dead block."
   [tools]
-  (runtime/bind-host!
-   (fn [_session nm payload]
-     (let [args (get (json/read-str payload) "args")
-           tool (get tools nm)]
-       (json/write-str
-        (if (nil? tool)
-          {"error" (str "no tool named " nm)}
-          (try {"value" (tool args)}
-               (catch Throwable t
-                 {"error" (str (.getMessage t))})))))))
+  (runtime/bind-host! (fn [_session nm payload]
+                        (let [args
+                              (get (json/read-str payload) "args")
+
+                              tool
+                              (get tools nm)]
+
+                          (json/write-str (if (nil? tool)
+                                            {"error" (str "no tool named " nm)}
+                                            (try {"value" (tool args)}
+                                                 (catch Throwable t
+                                                   {"error" (str (.getMessage t))})))))))
   tools)
 
 (defn tool-session
@@ -139,7 +150,8 @@
   [tools]
   (bind-tools! tools)
   (let [s (block-session)]
-    (doseq [nm (keys tools)] (runtime/install-tool! s nm))
+    (doseq [nm (keys tools)]
+      (runtime/install-tool! s nm))
     s))
 
 (defn temp-dir

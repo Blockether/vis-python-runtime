@@ -24,13 +24,16 @@
 
 (def ^:private wheels
   "One directory containing numpy, a real compiled extension that opens files."
-  (delay
-    (let [target (temp-dir "vis-distribution")
-          answer (runtime/pip-install! {:target target} ["numpy"])]
-      (when-not (zero? (:exit answer))
-        (throw (ex-info "pip could not install the wheel this case measures"
-                        {:exit (:exit answer) :out (:out answer)})))
-      target)))
+  (delay (let [target
+               (temp-dir "vis-distribution")
+
+               answer
+               (runtime/pip-install! {:target target} ["numpy"])]
+
+           (when-not (zero? (:exit answer))
+             (throw (ex-info "pip could not install the wheel this case measures"
+                             {:exit (:exit answer) :out (:out answer)})))
+           target)))
 
 (defn- importable!
   "Put `target` on this session's `sys.path` BEFORE the policy is composed —
@@ -48,31 +51,34 @@
    runs afterwards. The same reason the fixture puts confinement back."
   []
   (when (realized? wheels)
-    (runtime/exec!
-     runtime/default-session
-     (str "import sys\n"
-          "target = " (pr-str @wheels) "\n"
-          "sys.path[:] = [entry for entry in sys.path if entry != target]\n"
-          "for name, module in list(sys.modules.items()):\n"
-          "    origin = getattr(module, '__file__', None) or ''\n"
-          "    if origin.startswith(target):\n"
-          "        del sys.modules[name]\n"))))
+    (runtime/exec! runtime/default-session
+                   (str "import sys\n"
+                        "target = " (pr-str @wheels)
+                        "\n" "sys.path[:] = [entry for entry in sys.path if entry != target]\n"
+                        "for name, module in list(sys.modules.items()):\n"
+                        "    origin = getattr(module, '__file__', None) or ''\n"
+                        "    if origin.startswith(target):\n" "        del sys.modules[name]\n"))))
 
 (use-fixtures :each
-  (fn [run]
-    (try (run)
-         (finally
-           ;; Confinement is PROCESS state over one interpreter, so a case that
-           ;; sets it hands it to the next namespace unless it is put back.
-           (runtime/confine! [] [])
-           (forget-wheels!)
-           (harness/close-sessions!)))))
+              (fn [run]
+                (try (run)
+                     (finally
+                       ;; Confinement is PROCESS state over one interpreter, so a case that
+                       ;; sets it hands it to the next namespace unless it is put back.
+                       (runtime/confine! [] [])
+                       (forget-wheels!)
+                       (harness/close-sessions!)))))
 
-(harness/defbuilt-test a-wheel-is-confined-like-the-rest-test
+(harness/defbuilt-test
+  a-wheel-is-confined-like-the-rest-test
   (if-not (index-reachable?)
     (println "SKIPPED a-wheel-is-confined-like-the-rest-test: pypi.org is not reachable")
-    (let [root    (temp-dir "vis-distribution-root")
-          session (harness/block-session)]
+    (let [root
+          (temp-dir "vis-distribution-root")
+
+          session
+          (harness/block-session)]
+
       (importable! session @wheels)
       (runtime/confine! [root] [root])
       (testing "a compiled extension imports and runs under the policy"

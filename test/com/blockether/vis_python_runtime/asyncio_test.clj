@@ -17,12 +17,12 @@
             [com.blockether.vis-python-runtime.harness :as harness :refer [block]]))
 
 (use-fixtures :each
-  (fn [run]
-    (try (run)
-         (finally
-           ;; These cases weigh coroutine frames against the collector, so each
-           ;; runs in a session of its own and none of them may outlive the test.
-           (harness/close-sessions!)))))
+              (fn [run]
+                (try (run)
+                     (finally
+                       ;; These cases weigh coroutine frames against the collector, so each
+                       ;; runs in a session of its own and none of them may outlive the test.
+                       (harness/close-sessions!)))))
 
 (defn- tools
   "A session with the two tools these cases drive: `echo`, which answers a
@@ -412,7 +412,8 @@ try:
 except ValueError as exc:
     print(type(exc).__name__, str(exc))")
 
-(harness/defbuilt-test asyncio-shim-test
+(harness/defbuilt-test
+  asyncio-shim-test
   (testing "asyncio.run(main()) drives a coroutine that awaits tools"
     (is (= "<x><y>" (ran run-src))))
   (testing "asyncio.gather runs awaitables through our gather"
@@ -429,33 +430,50 @@ except ValueError as exc:
     (is (= "True False True True" (ran refusal-src)))))
 
 (harness/defbuilt-test asyncio-gather-slot-test
-  ;; gather is all-or-nothing, so the ONE failure it raises has to say which
-  ;; member raised it: a bare "ValueError: boom" left three-way gathers with no
-  ;; way to tell [0] from [2], and the block's error text is the only thing the
-  ;; caller ever sees.
-  (testing "a failing member keeps its own type and message and names its slot"
-    (is (= "ValueError [1] DISTINCT_BOOM_42" (ran slot-src)))))
-(harness/defbuilt-test asyncio-sleep-test
-  (testing "asyncio.sleep really sleeps and returns its result"
-    (let [started  (System/nanoTime)
-          printed  (ran sleep-src)
-          elapsed  (/ (- (System/nanoTime) started) 1000000.0)
-          measured (second (str/split printed #"\s+"))]
-      (is (str/starts-with? printed "done "))
-      (is (<= 80.0 elapsed))
-      (is (<= 0.08 (Double/parseDouble measured))))))
+                       ;; gather is all-or-nothing, so the ONE failure it raises has to say which
+                       ;; member raised it: a bare "ValueError: boom" left three-way gathers with no
+                       ;; way to tell [0] from [2], and the block's error text is the only thing the
+                       ;; caller ever sees.
+                       (testing "a failing member keeps its own type and message and names its slot"
+                         (is (= "ValueError [1] DISTINCT_BOOM_42" (ran slot-src)))))
 
-(harness/defbuilt-test asyncio-wait-for-bounds-the-wait-test
+(harness/defbuilt-test asyncio-sleep-test
+                       (testing "asyncio.sleep really sleeps and returns its result"
+                         (let [started
+                               (System/nanoTime)
+
+                               printed
+                               (ran sleep-src)
+
+                               elapsed
+                               (/ (- (System/nanoTime) started) 1000000.0)
+
+                               measured
+                               (second (str/split printed #"\s+"))]
+
+                           (is (str/starts-with? printed "done "))
+                           (is (<= 80.0 elapsed))
+                           (is (<= 0.08 (Double/parseDouble measured))))))
+
+(harness/defbuilt-test
+  asyncio-wait-for-bounds-the-wait-test
   ;; The deadline goes INTO the wait: before it did, the last case sat on
   ;; `sleep(30)` for half a minute and only THEN reported it had taken too long.
   (testing "wait_for bounds the wait ITSELF instead of noticing the deadline afterwards"
-    (let [started (System/nanoTime)
-          printed (ran wait-for-src)
-          elapsed (/ (- (System/nanoTime) started) 1000000.0)]
+    (let [started
+          (System/nanoTime)
+
+          printed
+          (ran wait-for-src)
+
+          elapsed
+          (/ (- (System/nanoTime) started) 1000000.0)]
+
       (is (= "('bounded', True)" printed))
       (is (< elapsed 15000.0)))))
 
-(harness/defbuilt-test asyncio-frame-release-test
+(harness/defbuilt-test
+  asyncio-frame-release-test
   (testing "failed and cancelled work releases siblings, call payloads and exception frames"
     (is (= (str "(True, True, True, True, True, True, True, True, True, "
                 "True, True, True, True, True, True, True, True, True)")
@@ -463,7 +481,8 @@ except ValueError as exc:
   (testing "completed and cancelled tasks release coroutine frames without a global registry"
     (is (= "clean\n0" (ran churn-src)))))
 
-(harness/defbuilt-test asyncio-rendezvous-test
+(harness/defbuilt-test
+  asyncio-rendezvous-test
   ;; A rendezvous only means anything when two gather children settle AT THE SAME
   ;; TIME, which is what the pool behind `__vis_par__` is for. `handoff` is bound
   ;; by a TOP-LEVEL statement on purpose: an awaitable placeholder used to be
@@ -492,7 +511,8 @@ except ValueError as exc:
 ;; worker, which only BUILT that tool's thunk, so the `gather` slot came back
 ;; holding an unrun call. Binding the slot hid it (statements auto-settle);
 ;; `json.dumps(res)` did not, and refused an object the caller never created.
-(harness/defbuilt-test asyncio-to-thread-settles-a-tool-test
+(harness/defbuilt-test
+  asyncio-to-thread-settles-a-tool-test
   (testing "a tool handed to to_thread / run_in_executor settles inside its gather slot"
     ;; A tool's dict arrives as `__VisDict__`: every map rebuilt at the host
     ;; boundary is one, so a missing key raises a KeyError that names the keys
@@ -505,51 +525,62 @@ except ValueError as exc:
 
 ;; Regression, issue #166: an extension's typed result crossed as a synthetic
 ;; placeholder instead of remaining the exact CPython object.
-(harness/defbuilt-test dotted-tool-namespace-test
+(harness/defbuilt-test
+  dotted-tool-namespace-test
   (testing "a dotted host tool returns the exact object retained by another namespace"
-    (let [producer (harness/block-session)
-          _ (runtime/exec! producer
-                           (str "class BuildStatus:\n"
-                                "    def __init__(self, state): self.state = state\n"
-                                "    def label(self): return self.state.upper()\n"
-                                "item = BuildStatus('ready')"))
-          ref (runtime/eval-str
-               producer
-               "__import__('vis_runtime')._hold_extension_object(item)")
-          session (harness/tool-session
-                   {"ledger.echo" (fn [[x]] (str "<" x ">"))
-                    "ledger.status" (fn [[_]] {"__vis_object_ref__" ref})})
-          answer (block session
-                        (str "item = await ledger.status('ready')\n"
-                             "again = await ledger.status('again')\n"
-                             "print(await ledger.echo('entry'))\n"
-                             "print(dir(ledger))\n"
-                             "print(ledger.echo.__name__)\n"
-                             "print(type(item).__name__, item.state, item.label(), item is again)"))]
+    (let [producer
+          (harness/block-session)
+
+          _
+          (runtime/exec!
+            producer
+            (str "class BuildStatus:\n" "    def __init__(self, state): self.state = state\n"
+                 "    def label(self): return self.state.upper()\n" "item = BuildStatus('ready')"))
+
+          ref
+          (runtime/eval-str producer "__import__('vis_runtime')._hold_extension_object(item)")
+
+          session
+          (harness/tool-session {"ledger.echo" (fn [[x]]
+                                                 (str "<" x ">"))
+                                 "ledger.status" (fn [[_]]
+                                                   {"__vis_object_ref__" ref})})
+
+          answer
+          (block session
+                 (str "item = await ledger.status('ready')\n"
+                      "again = await ledger.status('again')\n"
+                      "print(await ledger.echo('entry'))\n" "print(dir(ledger))\n"
+                      "print(ledger.echo.__name__)\n"
+                      "print(type(item).__name__, item.state, item.label(), item is again)"))]
+
       (is (nil? (:error answer)))
-      (is (= (str "<entry>\n['echo', 'status']\nledger.echo\n"
-                  "BuildStatus ready READY True")
+      (is (= (str "<entry>\n['echo', 'status']\nledger.echo\n" "BuildStatus ready READY True")
              (out answer)))
       (is (= "0"
-             (runtime/eval-str
-              producer
-              "len(__import__('vis_runtime')._EXTENSION_OBJECTS)"))))))
+             (runtime/eval-str producer "len(__import__('vis_runtime')._EXTENSION_OBJECTS)"))))))
 
 ;; Regression, issue #171: a dotted tool accepted only one separator, and its
 ;; namespace printed CPython's internal class and memory address.
-(harness/defbuilt-test recursive-dotted-tool-namespace-test
+(harness/defbuilt-test
+  recursive-dotted-tool-namespace-test
   (testing "nested tool namespaces are navigable, readable, and pruned leaf-first"
-    (let [session (harness/tool-session
-                   {"uberworkspace.vis.find_issue" (fn [[query]] (str "found:" query))
-                    "uberworkspace.vis.create_issue" (fn [[title]] (str "created:" title))})
-          answer (block session
-                        (str "print(repr(uberworkspace))
+    (let [session
+          (harness/tool-session {"uberworkspace.vis.find_issue" (fn [[query]]
+                                                                  (str "found:" query))
+                                 "uberworkspace.vis.create_issue" (fn [[title]]
+                                                                    (str "created:" title))})
+
+          answer
+          (block session
+                 (str "print(repr(uberworkspace))
 "
-                             "print(repr(uberworkspace.vis))
+                      "print(repr(uberworkspace.vis))
 "
-                             "print(dir(uberworkspace), dir(uberworkspace.vis))
+                      "print(dir(uberworkspace), dir(uberworkspace.vis))
 "
-                             "print(await uberworkspace.vis.find_issue('needle'))"))]
+                      "print(await uberworkspace.vis.find_issue('needle'))"))]
+
       (is (nil? (:error answer)))
       (is (= (str "<vis namespace 'uberworkspace': vis>
 "
@@ -560,14 +591,12 @@ except ValueError as exc:
                   "found:needle")
              (out answer)))
       (runtime/exec! session "__vis_remove_dotted_tool__('uberworkspace.vis.find_issue')")
-      (is (= "['create_issue']"
-             (runtime/eval-str session "str(dir(uberworkspace.vis))")))
+      (is (= "['create_issue']" (runtime/eval-str session "str(dir(uberworkspace.vis))")))
       (runtime/exec! session "__vis_remove_dotted_tool__('uberworkspace.vis.create_issue')")
-      (is (= "False"
-             (runtime/eval-str session "str('uberworkspace' in globals())")))))
+      (is (= "False" (runtime/eval-str session "str('uberworkspace' in globals())")))))
   (testing "a leaf and a namespace cannot occupy the same public path"
-    (let [session (harness/tool-session {"tree.branch" (fn [_] true)})]
-      (is (thrown-with-msg?
-           Exception
-           #"extension tool path collides"
-           (runtime/install-tool! session "tree.branch.leaf"))))))
+    (let [session (harness/tool-session {"tree.branch" (fn [_]
+                                                         true)})]
+      (is (thrown-with-msg? Exception
+                            #"extension tool path collides"
+                            (runtime/install-tool! session "tree.branch.leaf"))))))

@@ -9,8 +9,7 @@
   (let [expected (str/trim (slurp "VIS_PYTHON_VERSION"))]
     (is (re-matches #"\d+\.\d+\.\d+" expected)
         "repo-root VIS_PYTHON_VERSION is the single version source and is semver-shaped")
-    (is (= expected runtime/version)
-        "the prepared class directory carries the runtime version")))
+    (is (= expected runtime/version) "the prepared class directory carries the runtime version")))
 
 (deftest platform-test
   (testing "os and architecture spellings we actually meet"
@@ -35,13 +34,15 @@
 (deftest resolve-library-missing-test
   (testing "no override and no prebuilt artifact names both ways to supply one"
     (when-not (System/getenv runtime/native-path-env)
-      (let [data (try (runtime/resolve-library "linux-riscv") nil
+      (let [data (try (runtime/resolve-library "linux-riscv")
+                      nil
                       (catch VisPythonException e (.data e)))]
         (is (= "linux-riscv" (get data "platform")))
         (is (= runtime/native-path-env (get data "env")))
         (is (str/starts-with? (get data "resource") "prebuilds/linux-riscv/"))))))
 
-(defn- line-count [dir extension]
+(defn- line-count
+  [dir extension]
   (->> (file-seq (io/file dir))
        (filter #(str/ends-with? (.getName %) extension))
        (map #(count (remove str/blank? (str/split-lines (slurp %)))))
@@ -50,12 +51,18 @@
 ;; The bridge is Java and this namespace is its skin: argument shapes, keyword
 ;; maps, EDN. Nothing else is a compiler error, so it is a test.
 (deftest skin-test
-  (let [java  (line-count "src/java" ".java")
-        clj   (line-count "src/clj" ".clj")
-        forms (->> (str/split (slurp "src/clj/com/blockether/vis_python_runtime.clj") #"\n(?=\()")
-                   (filter #(str/starts-with? % "(defn"))
-                   (map (juxt #(first (str/split-lines %))
-                              #(count (remove str/blank? (str/split-lines %))))))]
+  (let [java
+        (line-count "src/java" ".java")
+
+        clj
+        (line-count "src/clj" ".clj")
+
+        forms
+        (->> (str/split (slurp "src/clj/com/blockether/vis_python_runtime.clj") #"\n(?=\()")
+             (filter #(str/starts-with? % "(defn"))
+             (map (juxt #(first (str/split-lines %))
+                        #(count (remove str/blank? (str/split-lines %))))))]
+
     (testing "most of the runtime is Java"
       (is (<= 4.0 (/ (double java) clj))
           (str "java " java " lines against clojure " clj " - logic belongs in the bridge")))

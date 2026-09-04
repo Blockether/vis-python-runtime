@@ -17,38 +17,30 @@
 
 (def ^:private resolves
   "Resolve a name, answering `permitted`, `refused`, or the failure's own text."
-  (str "    import socket\n"
-       "    try:\n"
-       "        socket.gethostbyname('localhost')\n"
-       "        return 'permitted'\n"
-       "    except PermissionError as e:\n"
-       "        return str(e)\n"
-       "    except OSError:\n"
-       "        return 'permitted'\n"))
+  (str "    import socket\n" "    try:\n"
+       "        socket.gethostbyname('localhost')\n" "        return 'permitted'\n"
+       "    except PermissionError as e:\n" "        return str(e)\n"
+       "    except OSError:\n" "        return 'permitted'\n"))
 
 (def ^:private makes-socket
   "Make a socket with no address at all: the step before any policy about hosts."
-  (str "    import socket\n"
-       "    try:\n"
-       "        socket.socket().close()\n"
-       "        return 'permitted'\n"
-       "    except PermissionError:\n"
-       "        return 'refused'\n"))
+  (str "    import socket\n" "    try:\n"
+       "        socket.socket().close()\n" "        return 'permitted'\n"
+       "    except PermissionError:\n" "        return 'refused'\n"))
 
-(harness/defbuilt-test network-capability-test
+(harness/defbuilt-test
+  network-capability-test
   (let [session (harness/block-session)]
-    (try
-      (testing "granted, the guest resolves names and opens sockets"
-        (is (true? (runtime/network! true)))
-        (is (= "permitted" (attempt session resolves)))
-        (is (= "permitted" (attempt session makes-socket))))
-      (testing "refused, there is no socket to have and no name to learn"
-        (is (false? (runtime/network! false)))
-        (is (= "refused" (attempt session makes-socket)))
-        (is (re-find #"network is off" (attempt session resolves))
-            "the library words its own refusal when the host gave none"))
-      (testing "the sentence the guest reads is the host's when it wrote one"
-        (runtime/network! false "Refused: this session was granted no network.")
-        (is (= "Refused: this session was granted no network."
-               (attempt session resolves))))
-      (finally (runtime/network! true "")))))
+    (try (testing "granted, the guest resolves names and opens sockets"
+           (is (true? (runtime/network! true)))
+           (is (= "permitted" (attempt session resolves)))
+           (is (= "permitted" (attempt session makes-socket))))
+         (testing "refused, there is no socket to have and no name to learn"
+           (is (false? (runtime/network! false)))
+           (is (= "refused" (attempt session makes-socket)))
+           (is (re-find #"network is off" (attempt session resolves))
+               "the library words its own refusal when the host gave none"))
+         (testing "the sentence the guest reads is the host's when it wrote one"
+           (runtime/network! false "Refused: this session was granted no network.")
+           (is (= "Refused: this session was granted no network." (attempt session resolves))))
+         (finally (runtime/network! true "")))))

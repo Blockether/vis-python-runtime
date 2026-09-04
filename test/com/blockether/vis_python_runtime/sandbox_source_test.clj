@@ -14,23 +14,25 @@
             [com.blockether.vis-python-runtime :as runtime])
   (:import [com.blockether.vispython VisPythonException]))
 
-(def ^:private built?
-  (try (boolean (runtime/resolve-library))
-       (catch VisPythonException _ false)))
+(def ^:private built? (try (boolean (runtime/resolve-library)) (catch VisPythonException _ false)))
 
 (deftest sandbox-runtime-imports-test
   (if-not built?
     (println "SKIP sandbox-runtime-imports-test: no cdylib, run native/vispython/build.sh")
     (testing "the sandbox runtime installs into a session unmodified"
       (runtime/initialize!)
-      (let [session "vis-sandbox"
-            installed (runtime/install-runtime! session)]
-        (is (< 150 installed)
-            "the whole public surface of the runtime landed in the session")
+      (let [session
+            "vis-sandbox"
+
+            installed
+            (runtime/install-runtime! session)]
+
+        (is (< 150 installed) "the whole public surface of the runtime landed in the session")
         (is (str/includes? (runtime/eval-str session "__vis_run_async__.__code__.co_filename")
                            "vis-python-runtime")
             "the code executed into the session came from THIS repository's resources")
         (is (= "True" (runtime/eval-str session "'__VisShell__' in globals()"))
             "the shell handle type the host drives is defined")
-        (is (= "True" (runtime/eval-str session "callable(__vis_flush_writes__)"))
-            "the flush that puts a held handle's bytes on disk before a tool reads them is present")))))
+        (is
+          (= "True" (runtime/eval-str session "callable(__vis_flush_writes__)"))
+          "the flush that puts a held handle's bytes on disk before a tool reads them is present")))))

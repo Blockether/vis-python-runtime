@@ -19,18 +19,19 @@
             [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
             [com.blockether.vis-python-runtime :as runtime]
-            [com.blockether.vis-python-runtime.harness :as harness
-             :refer [block confined-session temp-dir]]))
+            [com.blockether.vis-python-runtime.harness :as harness :refer
+             [block confined-session temp-dir]]))
 
 (use-fixtures :each
-  (fn [run]
-    (try (run)
-         (finally
-           ;; A confined interpreter would refuse the next namespace's imports.
-           (when harness/built? (runtime/confine! [] []))
-           (harness/close-sessions!)))))
+              (fn [run]
+                (try (run)
+                     (finally
+                       ;; A confined interpreter would refuse the next namespace's imports.
+                       (when harness/built? (runtime/confine! [] []))
+                       (harness/close-sessions!)))))
 
-(harness/defbuilt-test shipped-tree-carries-no-bytecode-test
+(harness/defbuilt-test
+  shipped-tree-carries-no-bytecode-test
   (testing "the vendored interpreter ships no bytecode"
     (when-let [home (runtime/resolve-python-home)]
       (let [cached (->> (file-seq (io/file home))
@@ -39,29 +40,51 @@
                         (map str)
                         (take 3))]
         (is (empty? cached)
-            (str "the artifact carries bytecode it should compile on the host instead: " cached))))))
+            (str "the artifact carries bytecode it should compile on the host instead: "
+                 cached))))))
 
-(harness/defbuilt-test prefix-is-in-force-test
-  (let [{:keys [pycache-prefix]} (runtime/initialize!)
-        session (harness/block-session)]
+(harness/defbuilt-test
+  prefix-is-in-force-test
+  (let [{:keys [pycache-prefix]}
+        (runtime/initialize!)
+
+        session
+        (harness/block-session)]
+
     (testing "the running interpreter caches where the host said, not beside the source"
       (is (= pycache-prefix (runtime/eval-str session "__import__('sys').pycache_prefix"))))
     (testing "and the default is the user's own directory"
       (when-not (System/getenv runtime/pycache-prefix-env)
         (is (str/ends-with? (str pycache-prefix) "/.vis/python/pycache"))))))
 
-(harness/defbuilt-test cached-bytecode-lands-in-the-prefix-test
-  (let [{:keys [pycache-prefix]} (runtime/initialize!)
-        source-dir (temp-dir "vis-bytecode")
-        module     (str "vis_bytecode_probe_" (System/nanoTime))
-        session    (confined-session [source-dir] [])]
+(harness/defbuilt-test
+  cached-bytecode-lands-in-the-prefix-test
+  (let [{:keys [pycache-prefix]}
+        (runtime/initialize!)
+
+        source-dir
+        (temp-dir "vis-bytecode")
+
+        module
+        (str "vis_bytecode_probe_" (System/nanoTime))
+
+        session
+        (confined-session [source-dir] [])]
+
     (spit (io/file source-dir (str module ".py")) "VALUE = 42\n")
     (testing "a module a confined block imports is compiled and answered"
-      (is (= "42" (str/trim (str (:stdout (block session
-                                                 (str "import sys\n"
-                                                      "sys.path.insert(0, " (pr-str source-dir) ")\n"
-                                                      "import " module "\n"
-                                                      "print(" module ".VALUE)"))))))))
+      (is (= "42"
+             (str/trim (str (:stdout (block session
+                                            (str "import sys\n"
+                                                 "sys.path.insert(0, "
+                                                 (pr-str source-dir)
+                                                 ")\n"
+                                                 "import "
+                                                 module
+                                                 "\n"
+                                                 "print("
+                                                 module
+                                                 ".VALUE)"))))))))
     (testing "the cache went to the prefix, and no __pycache__ appeared beside the source"
       (is (not (.exists (io/file source-dir "__pycache__"))))
       (is (some #(str/includes? (str %) module)

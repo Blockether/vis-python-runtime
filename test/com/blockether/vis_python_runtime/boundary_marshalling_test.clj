@@ -26,9 +26,8 @@
             [com.blockether.vis-python-runtime.harness :as harness :refer [block]]))
 
 (use-fixtures :each
-  (fn [run]
-    (try (run)
-         (finally (harness/close-sessions!)))))
+              (fn [run]
+                (try (run) (finally (harness/close-sessions!)))))
 
 (defn- ran
   "Run `code` as a block, expecting it not to raise, and answer what it PRINTED,
@@ -38,48 +37,56 @@
     (is (nil? (:error answer)) code)
     (str/trim (str (:stdout answer)))))
 
-(harness/defbuilt-test pyify-container-preservation-test
+(harness/defbuilt-test
+  pyify-container-preservation-test
   (let [session (harness/block-session)]
     (testing "a set/tuple/frozenset/defaultdict the block built keeps its native type"
       ;; `hasattr(s, 'add')` is the regression itself: the allowlist rebuild
       ;; handed back a list, and the next `s.add(...)` was an AttributeError.
       (is (= ["set=set add=True" "tuple=tuple" "frozenset=frozenset" "defaultdict=defaultdict"]
              (str/split-lines
-              (ran session
-                   (str "s = set()\n"
-                        "s.add(1); s.add(1); s.add(2)\n"
-                        "t = (1, 2, 3)\n"
-                        "fs = frozenset([1, 1, 2])\n"
-                        "from collections import defaultdict\n"
-                        "dd = defaultdict(list); dd['x'].append(9)\n"
-                        "print('set='+type(s).__name__, 'add='+str(hasattr(s,'add')))\n"
-                        "print('tuple='+type(t).__name__)\n"
-                        "print('frozenset='+type(fs).__name__)\n"
-                        "print('defaultdict='+type(dd).__name__)"))))))
+               (ran session
+                    (str "s = set()\n" "s.add(1); s.add(1); s.add(2)\n"
+                         "t = (1, 2, 3)\n" "fs = frozenset([1, 1, 2])\n"
+                         "from collections import defaultdict\n"
+                         "dd = defaultdict(list); dd['x'].append(9)\n"
+                         "print('set='+type(s).__name__, 'add='+str(hasattr(s,'add')))\n"
+                         "print('tuple='+type(t).__name__)\n"
+                         "print('frozenset='+type(fs).__name__)\n"
+                         "print('defaultdict='+type(dd).__name__)"))))))
     (testing "a dict subclass is not flattened into a plain dict"
-      (is (= "Counter 2" (ran session (str "c = Counter('aab')\n"
-                                           "print(type(c).__name__, c.most_common(1)[0][1])")))))
+      (is (= "Counter 2"
+             (ran session
+                  (str "c = Counter('aab')\n" "print(type(c).__name__, c.most_common(1)[0][1])")))))
     (testing "a native set persists as a set, and stays mutable, ACROSS blocks"
       ;; Each block settles its own top-level values, so a container that
       ;; survives two blocks has been through `__vis_pyify__` twice.
       (ran session "acc = set()\nacc.add('a')")
       (is (= "kind=set vals=['a', 'b']"
-             (ran session (str "acc.add('b'); acc.add('a')\n"
-                               "print('kind='+type(acc).__name__, 'vals='+str(sorted(acc)))")))))
+             (ran session
+                  (str "acc.add('b'); acc.add('a')\n"
+                       "print('kind='+type(acc).__name__, 'vals='+str(sorted(acc)))")))))
     (testing "settle hands back the SAME object, never a rebuilt copy"
       ;; Rebuilding a native list would break aliasing silently: `alias` would be
       ;; a snapshot, and a later `append` on the original would never show up.
       (ran session "xs = []\nalias = xs")
       (is (= "True [1]" (ran session "xs.append(1)\nprint(alias is xs, alias)"))))))
 
-(harness/defbuilt-test pathlike-argument-boundary-test
-  (let [seen    (atom [])
-        session (harness/tool-session {"pathlike_probe" (fn [args]
-                                                          (swap! seen conj args)
-                                                          {"ok" true})})
-        probe   (fn [code]
-                  (reset! seen [])
-                  (ran session code))]
+(harness/defbuilt-test
+  pathlike-argument-boundary-test
+  (let [seen
+        (atom [])
+
+        session
+        (harness/tool-session {"pathlike_probe" (fn [args]
+                                                  (swap! seen conj args)
+                                                  {"ok" true})})
+
+        probe
+        (fn [code]
+          (reset! seen [])
+          (ran session code))]
+
     (testing "a Path argument reaches the tool as its filesystem string"
       (probe "pathlike_probe(Path('/tmp/vis/q.clj'))")
       (is (= [["/tmp/vis/q.clj"]] @seen)))
@@ -88,10 +95,8 @@
                   "                'path': Path('/tmp/vis')})"))
       (is (= [[{"paths" ["/tmp/vis/a.clj" "/tmp/vis/b.clj"] "path" "/tmp/vis"}]] @seen)))
     (testing "every os.PathLike answers the same duck-type, not just pathlib"
-      (probe (str "class VisTestPathLike:\n"
-                  "    def __fspath__(self):\n"
-                  "        return '/tmp/vis/duck.clj'\n"
-                  "pathlike_probe(VisTestPathLike())"))
+      (probe (str "class VisTestPathLike:\n" "    def __fspath__(self):\n"
+                  "        return '/tmp/vis/duck.clj'\n" "pathlike_probe(VisTestPathLike())"))
       (is (= [["/tmp/vis/duck.clj"]] @seen)))
     (testing "a refusing __fspath__ leaves the value alone instead of failing the call"
       ;; A path-like whose `__fspath__` raises is not a path: the call must not
@@ -100,9 +105,7 @@
       ;; filesystem string it refused to answer.
       (is (= "survived"
              (probe (str "class VisTestBadPathLike:\n"
-                         "    def __fspath__(self):\n"
-                         "        raise ValueError('no path here')\n"
-                         "pathlike_probe(VisTestBadPathLike())\n"
-                         "print('survived')"))))
+                         "    def __fspath__(self):\n" "        raise ValueError('no path here')\n"
+                         "pathlike_probe(VisTestBadPathLike())\n" "print('survived')"))))
       (is (= 1 (count @seen)))
       (is (str/includes? (str (ffirst @seen)) "VisTestBadPathLike")))))

@@ -26,12 +26,12 @@
             [com.blockether.vis-python-runtime.harness :as harness :refer [block]]))
 
 (use-fixtures :each
-  (fn [run]
-    (try (run)
-         (finally
-           ;; A session is a module the interpreter holds until it is dropped,
-           ;; and every case here opens its own.
-           (harness/close-sessions!)))))
+              (fn [run]
+                (try (run)
+                     (finally
+                       ;; A session is a module the interpreter holds until it is dropped,
+                       ;; and every case here opens its own.
+                       (harness/close-sessions!)))))
 
 (defn- ran
   "Run `code` as a block in `session`, expecting it not to raise, and answer what
@@ -53,7 +53,8 @@
     (is (nil? (:error (block s "__vis_blocks_kept__ = 1"))))
     s))
 
-(harness/defbuilt-test block-source-introspection-test
+(harness/defbuilt-test
+  block-source-introspection-test
   (let [s (harness/block-session)]
     (testing "getsource reads back a function defined in an EARLIER block"
       (block s "def source_probe(a, b=2):\n    return a + b\n")
@@ -64,18 +65,20 @@
     (testing "every block gets its own co_filename, so an older source is never overwritten"
       (block s "def source_probe_first():\n    return 1\n")
       (is (= "True\nTrue"
-             (ran s (str "import inspect\n"
-                         "def source_probe_second():\n    return 2\n"
-                         "print(source_probe_first.__code__.co_filename"
-                         " != source_probe_second.__code__.co_filename)\n"
-                         "print(inspect.getsource(source_probe_first).strip()"
-                         ".endswith('return 1'))\n")))))
+             (ran s
+                  (str "import inspect\n" "def source_probe_second():\n    return 2\n"
+                       "print(source_probe_first.__code__.co_filename"
+                       " != source_probe_second.__code__.co_filename)\n"
+                       "print(inspect.getsource(source_probe_first).strip()"
+                       ".endswith('return 1'))\n")))))
     (testing "the per-block name is the registry's own <prog:N>, tracked in order"
       (is (= "True"
-             (ran s (str "print(source_probe.__code__.co_filename.startswith('<prog:')"
-                         " and source_probe.__code__.co_filename in __vis_block_names__)")))))))
+             (ran s
+                  (str "print(source_probe.__code__.co_filename.startswith('<prog:')"
+                       " and source_probe.__code__.co_filename in __vis_block_names__)")))))))
 
-(harness/defbuilt-test live-source-eviction-test
+(harness/defbuilt-test
+  live-source-eviction-test
   (testing "the source of an old block that still backs a live definition survives"
     (let [s (narrow-session)]
       (block s "def kept_helper(a):\n    return a + 1\n")
@@ -94,9 +97,10 @@
       (block s "def churn():\n    return 2\n")
       (block s "pass")
       (is (= "2\nTrue"
-             (ran s (str "import inspect\n"
-                         "print(len(__vis_block_names__))\n"
-                         "print(inspect.getsource(churn).strip().endswith('return 2'))\n"))))))
+             (ran s
+                  (str "import inspect\n"
+                       "print(len(__vis_block_names__))\n"
+                       "print(inspect.getsource(churn).strip().endswith('return 2'))\n"))))))
   (testing "the source of the block that is about to run is never dropped"
     (let [s (narrow-session)]
       (block s "def pin_one():\n    return 1\n")
@@ -105,7 +109,7 @@
       ;; call it dead — the pass has to spare it anyway or a block loses the
       ;; source its own traceback is about to read.
       (is (= "True"
-             (ran s (str "import inspect\n"
-                         "def defined_here():\n    return 3\n"
-                         "print(inspect.getsource(defined_here).strip()"
-                         ".endswith('return 3'))\n")))))))
+             (ran s
+                  (str "import inspect\n" "def defined_here():\n    return 3\n"
+                       "print(inspect.getsource(defined_here).strip()"
+                       ".endswith('return 3'))\n")))))))

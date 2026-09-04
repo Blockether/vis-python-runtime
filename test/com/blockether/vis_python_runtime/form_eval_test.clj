@@ -23,12 +23,12 @@
             [com.blockether.vis-python-runtime.harness :as harness :refer [block]]))
 
 (use-fixtures :each
-  (fn [run]
-    (try (run)
-         (finally
-           ;; A session is a module the interpreter holds until it is dropped,
-           ;; and these tests open one per case.
-           (harness/close-sessions!)))))
+              (fn [run]
+                (try (run)
+                     (finally
+                       ;; A session is a module the interpreter holds until it is dropped,
+                       ;; and these tests open one per case.
+                       (harness/close-sessions!)))))
 
 (defn- out
   "The block's ONE success channel: what it PRINTED, trimmed. A block that
@@ -44,7 +44,8 @@
     (is (nil? (:error answer)) code)
     (out answer)))
 
-(harness/defbuilt-test sandbox-auto-import-test
+(harness/defbuilt-test
+  sandbox-auto-import-test
   (testing "the hot stdlib modules are there without an import"
     ;; One session: these names arrive on `builtins`, so what is under test is
     ;; the sandbox's ambient surface, not anything a block did before.
@@ -58,15 +59,15 @@
       (is (= "True" (ran s "print(isinstance(sys.maxsize, int))")))
       (is (= "{'a': 2, 'b': 1}" (ran s "print(dict(collections.Counter('aab')))")))
       (is (= "{'a': 1, 'b': 2}" (ran s "print(dict(Counter('abb')))")))
-      (is (= "True"
-             (ran s "print(pathlib.Path('a/b').name == 'b' and Path('a/b').name == 'b')")))
+      (is (= "True" (ran s "print(pathlib.Path('a/b').name == 'b' and Path('a/b').name == 'b')")))
       (is (= "alpha [...]" (ran s "print(textwrap.shorten('alpha beta gamma', width=11))")))
       (is (= "aGk=" (ran s "print(base64.b64encode(b'hi').decode())")))
       (is (= "4.555806" (ran s "print(round(math.sqrt(2) + math.pi, 6))")))
       (is (= "True" (ran s "print(hasattr(glob, 'glob') and callable(glob.glob))")))
       (is (= "True" (ran s "print(hasattr(builtins, 'len') and builtins.len([1, 2]) == 2)"))))))
 
-(harness/defbuilt-test per-form-eval-test
+(harness/defbuilt-test
+  per-form-eval-test
   ;; E1-E7 of the form-eval contract. There is no second, value-shaped channel:
   ;; a trailing bare expression is still EVALUATED — a bare tool call runs — but
   ;; its value is dropped.
@@ -89,35 +90,40 @@
         (is (str/includes? (str (:error answer)) "e7_boom"))
         (is (= "False" (ran s "print('e7y' in globals())")))))))
 
-(harness/defbuilt-test stdlib-import-passthrough-test
+(harness/defbuilt-test
+  stdlib-import-passthrough-test
   ;; Only `asyncio` is rewritten. Every other stdlib import — including the three
   ;; once dropped as native-crash risks — reaches the block verbatim.
   (let [s (harness/block-session)]
     (testing "import ssl / select / selectors survives, and the modules work"
       (is (= "True True True"
-             (ran s (str "import ssl, select, selectors\n"
-                         "print(ssl.CERT_NONE == 0, callable(select.select), "
-                         "selectors.SelectSelector is not None)")))))
+             (ran s
+                  (str "import ssl, select, selectors\n"
+                       "print(ssl.CERT_NONE == 0, callable(select.select), "
+                       "selectors.SelectSelector is not None)")))))
     (testing "from ssl import ... binds the name instead of vanishing"
       (is (= "True" (ran s "from ssl import CERT_NONE\nprint(CERT_NONE == 0)"))))
     (testing "the preprocessor hands such a block back byte-for-byte"
       (is (= "True"
-             (ran s (str "src = 'import ssl\\nx = 1\\n'\n"
-                         "print(__vis_strip_protected_imports__(src) == src)")))))))
+             (ran s
+                  (str "src = 'import ssl\\nx = 1\\n'\n"
+                       "print(__vis_strip_protected_imports__(src) == src)")))))))
 
 (harness/defbuilt-test guest-threads-test
-  ;; Guest Python may CREATE threads — importlib's import machinery, `threading`,
-  ;; and libraries that allocate a `_thread` lock all need them.
-  (let [s (harness/block-session)]
-    (testing "threading.Thread runs to completion"
-      (is (= "7"
-             (ran s (str "import threading\nout = []\n"
-                         "t = threading.Thread(target=lambda: out.append(7))\n"
-                         "t.start()\nt.join()\nprint(out[0])")))))
-    (testing "_thread.allocate_lock works (the import-machinery / lock path)"
-      (is (= "ok"
-             (ran s (str "import _thread\nlk = _thread.allocate_lock()\n"
-                         "lk.acquire()\nlk.release()\nprint('ok')")))))))
+                       ;; Guest Python may CREATE threads — importlib's import machinery, `threading`,
+                       ;; and libraries that allocate a `_thread` lock all need them.
+                       (let [s (harness/block-session)]
+                         (testing "threading.Thread runs to completion"
+                           (is (= "7"
+                                  (ran s
+                                       (str "import threading\nout = []\n"
+                                            "t = threading.Thread(target=lambda: out.append(7))\n"
+                                            "t.start()\nt.join()\nprint(out[0])")))))
+                         (testing "_thread.allocate_lock works (the import-machinery / lock path)"
+                           (is (= "ok"
+                                  (ran s
+                                       (str "import _thread\nlk = _thread.allocate_lock()\n"
+                                            "lk.acquire()\nlk.release()\nprint('ok')")))))))
 
 (defn- echo-session
   "A session whose one tool answers `<x>` — the moved tests' `echo`."
@@ -134,7 +140,8 @@
     (harness/tool! s "tick" "" "    CALLS.append(1)\n    return 'n' + str(len(CALLS))")
     s))
 
-(harness/defbuilt-test deferred-tool-test
+(harness/defbuilt-test
+  deferred-tool-test
   ;; Async by default: tools are DEFERRED, so `await` runs one ANYWHERE
   ;; (including nested), a bare top-level call auto-settles, and `print` settles
   ;; an unawaited one instead of showing a thunk.
@@ -182,15 +189,17 @@
 ;; failure arrived at the driver rather than at the coroutine's own await point,
 ;; so `try: await boom() except Exception:` never saw it and the turn ended on an
 ;; error the model had already written the handler for.
-(harness/defbuilt-test tool-failure-catchable-test
+(harness/defbuilt-test
+  tool-failure-catchable-test
   (testing "`except Exception` catches a tool failure and sees the clean message"
     (is (= "caught: boom message"
            (ran (boom-session)
                 "try:\n    await boom()\nexcept Exception as e:\n    print('caught: ' + str(e))"))))
   (testing "`except BaseException` catches it too"
     (is (= "base: boom message"
-           (ran (boom-session)
-                "try:\n    await boom()\nexcept BaseException as e:\n    print('base: ' + str(e))"))))
+           (ran
+             (boom-session)
+             "try:\n    await boom()\nexcept BaseException as e:\n    print('base: ' + str(e))"))))
   (testing "catching lets the block CONTINUE and run more tools"
     (is (= "<ok>"
            (ran (boom-session)

@@ -33,12 +33,12 @@
   (:import [com.blockether.vispython VisPythonException]))
 
 (use-fixtures :each
-  (fn [run]
-    (try (run)
-         (finally
-           ;; A session is a module the interpreter holds until it is dropped,
-           ;; and a stashed exception pins the frames of the block it came from.
-           (harness/close-sessions!)))))
+              (fn [run]
+                (try (run)
+                     (finally
+                       ;; A session is a module the interpreter holds until it is dropped,
+                       ;; and a stashed exception pins the frames of the block it came from.
+                       (harness/close-sessions!)))))
 
 (defn- err
   "The error text a block answered, or nil when it did not raise."
@@ -64,7 +64,8 @@
   [source [line col end-col]]
   (subs (nth (str/split-lines source) (dec line)) col end-col))
 
-(harness/defbuilt-test block-error-is-the-model-s-own-test
+(harness/defbuilt-test
+  block-error-is-the-model-s-own-test
   (let [session (harness/block-session)]
     (testing "an uncaught error comes back as the block's own Python exception"
       (is (= "ValueError: probe-real" (err session "raise ValueError('probe-real')"))))
@@ -73,17 +74,15 @@
       ;; inside the guest `except` on a JIT-warmed interpreter, EVERY failing
       ;; block came back as the same internal host fault. Distinct errors in a
       ;; row from one session is what that looked like when it worked.
-      (is (= ["ZeroDivisionError: division by zero"
-              "KeyError: 'nope'"
+      (is (= ["ZeroDivisionError: division by zero" "KeyError: 'nope'"
               "TypeError: unsupported operand type(s) for +: 'int' and 'str'"]
-             [(err session "1 / 0")
-              (err session "{}['nope']")
-              (err session "1 + 'x'")])))
+             [(err session "1 / 0") (err session "{}['nope']") (err session "1 + 'x'")])))
     (testing "what the block printed before it failed comes back with the error"
       (is (= {:stdout "before\n" :error "RuntimeError: after"}
              (block session "print('before')\nraise RuntimeError('after')"))))))
 
-(harness/defbuilt-test error-position-walk-test
+(harness/defbuilt-test
+  error-position-walk-test
   (let [session (harness/block-session)]
     (testing "the position names the failing line and the columns of the failing expression"
       (let [source "x = 1\nprint('running')\ny = x + None\n"]
@@ -112,24 +111,25 @@
         (is (= "raise RuntimeError('deep')" (caret defining (position session))))))))
 
 (harness/defbuilt-test error-position-lifecycle-test
-  (let [session (harness/block-session)]
-    (testing "the walk releases the exception it walked"
-      ;; A traceback pins its frames, so the stash the guest side leaves behind
-      ;; would keep a whole failed block alive until the next failure replaced
-      ;; it. The host's read is what drops it.
-      (is (= "ValueError: pinned" (err session "raise ValueError('pinned')")))
-      (is (false? (harness/ev session "__vis_err_obj__ is None")))
-      (is (= [1 0 26] (position session)))
-      (is (true? (harness/ev session "__vis_err_obj__ is None"))))
-    (testing "asking a second time answers the same position, not nothing"
-      ;; The host may read it more than once (rendering, then logging); the
-      ;; computed position outlives the exception it came from.
-      (is (= [1 0 26] (position session))))
-    (testing "a block that did not fail has no position"
-      (is (nil? (err session "print('fine')")))
-      (is (nil? (position session))))))
+                       (let [session (harness/block-session)]
+                         (testing "the walk releases the exception it walked"
+                           ;; A traceback pins its frames, so the stash the guest side leaves behind
+                           ;; would keep a whole failed block alive until the next failure replaced
+                           ;; it. The host's read is what drops it.
+                           (is (= "ValueError: pinned" (err session "raise ValueError('pinned')")))
+                           (is (false? (harness/ev session "__vis_err_obj__ is None")))
+                           (is (= [1 0 26] (position session)))
+                           (is (true? (harness/ev session "__vis_err_obj__ is None"))))
+                         (testing "asking a second time answers the same position, not nothing"
+                           ;; The host may read it more than once (rendering, then logging); the
+                           ;; computed position outlives the exception it came from.
+                           (is (= [1 0 26] (position session))))
+                         (testing "a block that did not fail has no position"
+                           (is (nil? (err session "print('fine')")))
+                           (is (nil? (position session))))))
 
-(harness/defbuilt-test error-position-degradation-test
+(harness/defbuilt-test
+  error-position-degradation-test
   (testing "a broken walk costs the caret, never the model's error"
     ;; vis' `block-error-fidelity-test` degradation case, which is the runtime's
     ;; own: the walk is replaced by one that raises, and the failing block must
@@ -137,23 +137,23 @@
     ;; HOST call — where it is catchable — instead of replacing the error it was
     ;; describing.
     (let [session (harness/block-session)]
-      (try
-        (runtime/exec! session
-                       (str "__vis_saved_pos_now__ = __vis_err_pos_now__\n"
-                            "def __vis_broken_pos__():\n"
-                            "    raise RuntimeError('simulated fault')\n"
-                            "globals()['__vis_err_pos_now__'] = __vis_broken_pos__"))
-        (is (= "ValueError: probe-degraded" (err session "raise ValueError('probe-degraded')")))
-        (is (thrown-with-msg? VisPythonException #"RuntimeError: simulated fault"
-                              (position session)))
-        (finally
-          ;; The runtime mirrors every `__vis_` global onto `builtins` when a
-          ;; block starts, so the sabotage outlives this session unless both
-          ;; copies are put back — one interpreter serves the whole suite.
-          (runtime/exec! session
-                         (str "globals()['__vis_err_pos_now__'] = __vis_saved_pos_now__\n"
-                              "import builtins\n"
-                              "builtins.__vis_err_pos_now__ = __vis_saved_pos_now__"))))
+      (try (runtime/exec! session
+                          (str "__vis_saved_pos_now__ = __vis_err_pos_now__\n"
+                               "def __vis_broken_pos__():\n"
+                               "    raise RuntimeError('simulated fault')\n"
+                               "globals()['__vis_err_pos_now__'] = __vis_broken_pos__"))
+           (is (= "ValueError: probe-degraded" (err session "raise ValueError('probe-degraded')")))
+           (is (thrown-with-msg? VisPythonException
+                                 #"RuntimeError: simulated fault"
+                                 (position session)))
+           (finally
+             ;; The runtime mirrors every `__vis_` global onto `builtins` when a
+             ;; block starts, so the sabotage outlives this session unless both
+             ;; copies are put back — one interpreter serves the whole suite.
+             (runtime/exec! session
+                            (str "globals()['__vis_err_pos_now__'] = __vis_saved_pos_now__\n"
+                                 "import builtins\n"
+                                 "builtins.__vis_err_pos_now__ = __vis_saved_pos_now__"))))
       (testing "and the next failure positions normally again"
         (is (= "ValueError: after" (err session "raise ValueError('after')")))
         (is (= [1 0 25] (position session))))))
@@ -170,23 +170,22 @@
     (let [session (harness/block-session)]
       (is (nil? (harness/ev session "__vis_error_pos__(ValueError('never raised'))"))))))
 
-(harness/defbuilt-test tool-failure-host-data-test
+(harness/defbuilt-test
+  tool-failure-host-data-test
   ;; `__vis_err_host_data__` is the position walk's sibling read: whatever the
   ;; host attached to the tool failure the block died of. The host is bound here
   ;; directly rather than through `harness/bind-tools!` because that helper
   ;; answers a bare `error` string and this contract is about `error_data`.
-  (runtime/bind-host!
-   (fn [_session _name _payload]
-     (json/write-str {"error"      "tool refused: no such path"
-                      "error_data" {"kind" "not-found" "path" "/nope"}})))
+  (runtime/bind-host! (fn [_session _name _payload]
+                        (json/write-str {"error" "tool refused: no such path"
+                                         "error_data" {"kind" "not-found" "path" "/nope"}})))
   (let [session (harness/block-session)]
     (runtime/install-tool! session "cat")
     (testing "a host tool's failure kills the block with the host's own message"
       (is (= "VisToolError: tool refused: no such path"
              (err session "print('go')\ntext = await cat('/nope')"))))
     (testing "the data the host attached to the failure is readable beside the position"
-      (is (= {"kind" "not-found" "path" "/nope"}
-             (harness/ev session "__vis_err_host_data__()"))))
+      (is (= {"kind" "not-found" "path" "/nope"} (harness/ev session "__vis_err_host_data__()"))))
     (testing "the position points at the failing tool call in the block"
       (is (= [2 7 25] (position session))))
     (testing "the host data must be read BEFORE the position, which releases the failure"

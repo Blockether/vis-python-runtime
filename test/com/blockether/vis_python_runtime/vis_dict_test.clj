@@ -23,35 +23,38 @@
             [com.blockether.vis-python-runtime.harness :as harness :refer [block]]))
 
 (use-fixtures :each
-  (fn [run]
-    (try (run)
-         (finally (harness/close-sessions!)))))
+              (fn [run]
+                (try (run) (finally (harness/close-sessions!)))))
 
 (defn- ran
   "What a block PRINTED, trimmed — a block's one success channel."
   [session code]
   (str/trim (str (:stdout (block session code)))))
 
-(harness/defbuilt-test missing-key-names-the-shape-test
+(harness/defbuilt-test
+  missing-key-names-the-shape-test
   ;; A stub host tool stands in for a real one: the point is the runtime's side
   ;; of the seam — the map it rebuilds — not any particular tool.
-  (let [session (harness/tool-session
-                 {"tool_result" (fn [_] (array-map "op" "shell"
-                                                   "stdout" "hi"
-                                                   "exit" 0
-                                                   "nested" {"a" 1}))
-                  "bare_map"    (fn [_] {"alpha" 1})})
-        said    (->> (ran session
-                          (str "r = await tool_result()\n"
-                               "try:\n    r['output']\nexcept KeyError as e:\n    print('MISS', e)\n"
-                               "try:\n    r['stdou']\nexcept KeyError as e:\n    print('NEAR', e)\n"
-                               "try:\n    r['nested']['b']\nexcept KeyError as e:\n    print('NEST', e)\n"
-                               "print('GET', r.get('output'), isinstance(r, dict))"))
-                     str/split-lines
-                     ;; One line per reach, tagged, so each contract reads the
-                     ;; answer to ITS OWN miss instead of the whole stdout.
-                     (map #(str/split % #" " 2))
-                     (into {}))]
+  (let [session
+        (harness/tool-session {"tool_result"
+                               (fn [_]
+                                 (array-map "op" "shell" "stdout" "hi" "exit" 0 "nested" {"a" 1}))
+                               "bare_map" (fn [_]
+                                            {"alpha" 1})})
+
+        said
+        (->> (ran session
+                  (str "r = await tool_result()\n"
+                       "try:\n    r['output']\nexcept KeyError as e:\n    print('MISS', e)\n"
+                       "try:\n    r['stdou']\nexcept KeyError as e:\n    print('NEAR', e)\n"
+                       "try:\n    r['nested']['b']\nexcept KeyError as e:\n    print('NEST', e)\n"
+                       "print('GET', r.get('output'), isinstance(r, dict))"))
+             str/split-lines
+             ;; One line per reach, tagged, so each contract reads the
+             ;; answer to ITS OWN miss instead of the whole stdout.
+             (map #(str/split % #" " 2))
+             (into {}))]
+
     (testing "a missing key names the tool that answered and EVERY key it did return"
       (is (str/includes? (said "MISS") "'output' is not a key of 'shell' result"))
       (is (str/includes? (said "MISS") "Keys: 'op', 'stdout', 'exit', 'nested'")))
@@ -66,38 +69,46 @@
     (testing "`.get` stays silent on the same reach, and the value is still a real dict"
       (is (= "None True" (said "GET"))))
     (testing "a map with no 'op' cannot name a tool, so it names itself"
-      (is (str/includes?
-           (ran session (str "m = await bare_map()\n"
-                             "try:\n    m['beta']\nexcept KeyError as e:\n    print(e)"))
-           "'beta' is not a key of this result map. Keys: 'alpha'.")))
+      (is (str/includes? (ran session
+                              (str "m = await bare_map()\n"
+                                   "try:\n    m['beta']\nexcept KeyError as e:\n    print(e)"))
+                         "'beta' is not a key of this result map. Keys: 'alpha'.")))
     (testing "indexing a result positionally is answered as a lookup mistake, not a KeyError repr"
       ;; `r[0]` is the guess a model makes when it read the result as a list of
       ;; rows; the message says a dict is not positional AND lists the keys.
-      (let [sliced (ran session (str "r = await tool_result()\n"
-                                     "try:\n    r[0]\nexcept KeyError as e:\n    print(e)"))]
+      (let [sliced (ran session
+                        (str "r = await tool_result()\n"
+                             "try:\n    r[0]\nexcept KeyError as e:\n    print(e)"))]
         (is (str/includes? sliced "cannot index 'shell' result with 0"))
         (is (str/includes? sliced "Keys: 'op', 'stdout', 'exit', 'nested'"))))))
 
-(harness/defbuilt-test uniform-get-probe-test
+(harness/defbuilt-test
+  uniform-get-probe-test
   ;; A capability return can be a LIST (one row per hit) or a bare STRING, not
   ;; only a dict. The TOP-LEVEL settle normalizes each so a uniform
   ;; `res.get('op')` sweep never trips — while the value keeps its native
   ;; list/str behaviour (index / iterate / len / concat).
-  (let [session (harness/tool-session
-                 {"rows"   (fn [_] [{"path" "a" "op" "update"}])
-                  "text"   (fn [_] "plain text")
-                  "report" (fn [_] (array-map "op" "rg" "hit_count" 2))})
-        out     (ran session
-                     (str "lst = await rows()\n"
-                          "s = await text()\n"
-                          "d = await report()\n"
-                          "ops = [res.get('op') for res in (lst, s, d)]\n"
-                          "print(['lst_get', lst.get('op'), 'lst0', lst[0]['op'], 'lst_len', len(lst)])\n"
-                          "print(['str_get', s.get('op'), 'str_cat', s + '!'])\n"
-                          "print(['dct_get', d.get('op')])\n"
-                          "print(['sweep_ok', all(o is None or isinstance(o, str) for o in ops), "
-                          "'rg_in', 'rg' in ops])\n"
-                          "print(['native', isinstance(lst, list), isinstance(s, str), isinstance(d, dict)])"))]
+  (let [session
+        (harness/tool-session {"rows" (fn [_]
+                                        [{"path" "a" "op" "update"}])
+                               "text" (fn [_]
+                                        "plain text")
+                               "report" (fn [_]
+                                          (array-map "op" "rg" "hit_count" 2))})
+
+        out
+        (ran
+          session
+          (str
+            "lst = await rows()\n" "s = await text()\n"
+            "d = await report()\n" "ops = [res.get('op') for res in (lst, s, d)]\n"
+            "print(['lst_get', lst.get('op'), 'lst0', lst[0]['op'], 'lst_len', len(lst)])\n"
+            "print(['str_get', s.get('op'), 'str_cat', s + '!'])\n"
+            "print(['dct_get', d.get('op')])\n"
+            "print(['sweep_ok', all(o is None or isinstance(o, str) for o in ops), "
+            "'rg_in', 'rg' in ops])\n"
+            "print(['native', isinstance(lst, list), isinstance(s, str), isinstance(d, dict)])"))]
+
     (testing "a LIST result answers `.get` with the default while every row stays reachable"
       (is (str/includes? out "'lst_get', None"))
       (is (str/includes? out "'lst0', 'update'"))

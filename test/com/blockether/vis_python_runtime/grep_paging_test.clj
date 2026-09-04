@@ -20,9 +20,8 @@
             [com.blockether.vis-python-runtime.harness :as harness :refer [block]]))
 
 (use-fixtures :each
-  (fn [run]
-    (try (run)
-         (finally (harness/close-sessions!)))))
+              (fn [run]
+                (try (run) (finally (harness/close-sessions!)))))
 
 (defn- page-text
   "One canned page in the shape a search renderer really emits: a summary line
@@ -40,8 +39,12 @@
    carried the whole original options map and not just an offset."
   [calls]
   (fn [args]
-    (let [spec   (first args)
-          offset (long (or (get spec "offset") 0))]
+    (let [spec
+          (first args)
+
+          offset
+          (long (or (get spec "offset") 0))]
+
       (swap! calls conj spec)
       (if (= "done" (get spec "query"))
         "grep 'done'  2 hits · 1 file\nsrc/a.clj  (1)\n  1:aaa│ complete"
@@ -65,74 +68,81 @@
 ;; Regression: a capped page was a DEAD END. The result was a bare `str`, so the
 ;; only way on was to retype the whole call with `offset` — and a sweep that
 ;; stopped at 50 hits read exactly like a tree that holds 50.
-(harness/defbuilt-test grep-page-continues-itself-test
+(harness/defbuilt-test
+  grep-page-continues-itself-test
   (let [[session] (paging-session)]
     (testing "a capped page is still the text, and knows where the next one starts"
       (is (= "__VisGrep__ True True 50 True"
-             (ran session (str "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n"
-                               "print(type(g).__name__, isinstance(g, str),"
-                               " g.get(\"op\") is None, g.next_offset, g.is_capped)")))))))
+             (ran session
+                  (str "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n"
+                       "print(type(g).__name__, isinstance(g, str),"
+                       " g.get(\"op\") is None, g.next_offset, g.is_capped)")))))))
 
-(harness/defbuilt-test grep-next-carries-the-whole-spec-test
+(harness/defbuilt-test
+  grep-next-carries-the-whole-spec-test
   (let [[session calls] (paging-session)]
     (testing "next(g) walks to the end and carries the WHOLE options map, not just an offset"
       (is (= "100 None None"
-             (ran session (str "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n"
-                               "p2 = next(g)\n"
-                               "p3 = next(p2)\n"
-                               "print(p2.next_offset, p3.next_offset, next(p3, None))"))))
-      (is (= [{"query" "q" "paths" ["src"]}
-              {"query" "q" "paths" ["src"] "offset" 50}
+             (ran session
+                  (str "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n" "p2 = next(g)\n"
+                       "p3 = next(p2)\n" "print(p2.next_offset, p3.next_offset, next(p3, None))"))))
+      (is (= [{"query" "q" "paths" ["src"]} {"query" "q" "paths" ["src"] "offset" 50}
               {"query" "q" "paths" ["src"] "offset" 100}]
              @calls)))))
 
-(harness/defbuilt-test grep-pages-and-all-test
+(harness/defbuilt-test
+  grep-pages-and-all-test
   (let [[session] (paging-session)]
     (testing "pages() walks every page and all() joins them"
       (is (= "3 3"
-             (ran session (str "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n"
-                               "print(len(list(g.pages())), g.all().count(\"grep 'q'\"))")))))
+             (ran session
+                  (str "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n"
+                       "print(len(list(g.pages())), g.all().count(\"grep 'q'\"))")))))
     (testing "a bound that stops the walk early SAYS so and names the call that continues"
-      (let [out (ran session (str "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n"
-                                  "print(g.all(max_pages=2).splitlines()[-1])"))]
+      (let [out (ran session
+                     (str "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n"
+                          "print(g.all(max_pages=2).splitlines()[-1])"))]
         (is (str/starts-with? out "… stopped after 2 pages"))
         (is (str/includes? out "\"offset\": 100"))))))
 
-(harness/defbuilt-test grep-pages-are-lazy-test
+(harness/defbuilt-test
+  grep-pages-are-lazy-test
   (let [[session calls] (paging-session)]
     (testing "pages() is lazy: abandoning the walk never runs the searches behind it"
-      (let [out (ran session (str "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n"
-                                  "for page in g.pages():\n"
-                                  "    break\n"
-                                  "print(len(g))"))]
+      (let [out (ran session
+                     (str "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n"
+                          "for page in g.pages():\n"
+                          "    break\n" "print(len(g))"))]
         (is (pos? (Long/parseLong out)))
         (is (= 1 (count @calls)))))))
 
-(harness/defbuilt-test grep-uncapped-page-test
+(harness/defbuilt-test
+  grep-uncapped-page-test
   (let [[session calls] (paging-session)]
     (testing "an UNCAPPED page already is the whole answer"
       (is (= "None False None 1"
-             (ran session (str "g = grep({\"query\": \"done\", \"paths\": [\"src\"]})\n"
-                               "print(g.next_offset, g.is_capped, next(g, None),"
-                               " len(list(g.pages())))"))))
+             (ran session
+                  (str "g = grep({\"query\": \"done\", \"paths\": [\"src\"]})\n"
+                       "print(g.next_offset, g.is_capped, next(g, None),"
+                       " len(list(g.pages())))"))))
       (is (= 1 (count @calls))))
     ;; `next` without a default is the protocol: the walk ends in StopIteration,
     ;; not in a None every caller has to test for.
     (testing "the last page ends the walk the way Python ends every walk"
       (is (= "StopIteration"
-             (ran session (str "g = grep({\"query\": \"done\", \"paths\": [\"src\"]})\n"
-                               "try:\n"
-                               "    next(g)\n"
-                               "    print(\"no stop\")\n"
-                               "except StopIteration:\n"
-                               "    print(\"StopIteration\")")))))))
+             (ran session
+                  (str "g = grep({\"query\": \"done\", \"paths\": [\"src\"]})\n" "try:\n"
+                       "    next(g)\n" "    print(\"no stop\")\n"
+                       "except StopIteration:\n" "    print(\"StopIteration\")")))))))
 
 ;; Iterating a string means CHARACTERS everywhere else in Python. A page walk
 ;; that quietly stole `__iter__` would break `"".join(g)` and `list(g)` for every
 ;; caller who never asked for paging.
 (harness/defbuilt-test grep-page-iterates-as-text-test
-  (let [[session] (paging-session)]
-    (testing "iterating the page still yields characters"
-      (is (= "['g', 'r', 'e', 'p'] True grep"
-             (ran session (str "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n"
-                               "print(list(g)[:4], \"\".join(g) == str(g), g[:4])")))))))
+                       (let [[session] (paging-session)]
+                         (testing "iterating the page still yields characters"
+                           (is (= "['g', 'r', 'e', 'p'] True grep"
+                                  (ran session
+                                       (str
+                                         "g = grep({\"query\": \"q\", \"paths\": [\"src\"]})\n"
+                                         "print(list(g)[:4], \"\".join(g) == str(g), g[:4])")))))))

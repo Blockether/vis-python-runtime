@@ -21,20 +21,21 @@
             [com.blockether.vis-python-runtime :as runtime]))
 
 (use-fixtures :each
-  (fn [run]
-    (try (run)
-         (finally
-           ;; Leave the process on an EMPTY guest stdin, never on the real
-           ;; descriptor: a later case that reads it would park the suite.
-           (when harness/built? (runtime/stdin! ""))
-           (harness/close-sessions!)))))
+              (fn [run]
+                (try (run)
+                     (finally
+                       ;; Leave the process on an EMPTY guest stdin, never on the real
+                       ;; descriptor: a later case that reads it would park the suite.
+                       (when harness/built? (runtime/stdin! ""))
+                       (harness/close-sessions!)))))
 
 (defn- ran
   "What a block PRINTED, trimmed — a block's one success channel."
   [session code]
   (str/trim (str (:stdout (block session code)))))
 
-(harness/defbuilt-test stdin-reaches-the-guest-test
+(harness/defbuilt-test
+  stdin-reaches-the-guest-test
   (let [session (harness/block-session)]
     (testing "sys.stdin.read() answers the text the host stated"
       (is (true? (runtime/stdin! "piped-payload\n")))
@@ -50,9 +51,14 @@
       (is (= "b'za\\xc5\\xbc\\xc3\\xb3\\xc5\\x82\\xc4\\x87'"
              (ran session "import sys\nprint(sys.stdin.buffer.read().strip())"))))))
 
-(harness/defbuilt-test stdin-is-process-state-test
-  (let [one (harness/block-session)
-        two (harness/block-session)]
+(harness/defbuilt-test
+  stdin-is-process-state-test
+  (let [one
+        (harness/block-session)
+
+        two
+        (harness/block-session)]
+
     (testing "one stream serves every session: the first reader drains it"
       (runtime/stdin! "only-once\n")
       (is (= "only-once" (ran one "import sys\nprint(sys.stdin.read().strip())")))
@@ -62,7 +68,8 @@
       (runtime/stdin! "again\n")
       (is (= "again" (ran two "import sys\nprint(sys.stdin.read().strip())"))))))
 
-(harness/defbuilt-test stdin-empty-is-eof-test
+(harness/defbuilt-test
+  stdin-empty-is-eof-test
   (let [session (harness/block-session)]
     (testing "an empty stream reads as EOF rather than blocking"
       (runtime/stdin! "")
@@ -73,52 +80,70 @@
             (str "expected an EOFError, got " (pr-str answer)))))))
 
 (harness/defbuilt-test stdin-nil-restores-the-process-stream-test
-  (let [session (harness/block-session)]
-    (testing "nil hands the guest the process's own stdin back"
-      ;; Asserted by IDENTITY, never by reading it: reading the suite's real
-      ;; descriptor 0 is the hang this entry point exists to prevent.
-      (runtime/stdin! "something\n")
-      (is (false? (truthy session "import sys\nsys.stdin is sys.__stdin__")))
-      (is (true? (runtime/stdin! nil)))
-      (is (true? (truthy session "import sys\nsys.stdin is sys.__stdin__"))))))
+                       (let [session (harness/block-session)]
+                         (testing "nil hands the guest the process's own stdin back"
+                           ;; Asserted by IDENTITY, never by reading it: reading the suite's real
+                           ;; descriptor 0 is the hang this entry point exists to prevent.
+                           (runtime/stdin! "something\n")
+                           (is (false? (truthy session "import sys\nsys.stdin is sys.__stdin__")))
+                           (is (true? (runtime/stdin! nil)))
+                           (is (true? (truthy session "import sys\nsys.stdin is sys.__stdin__"))))))
 
 (harness/defbuilt-test block-stdout-reaches-the-host-while-it-runs-test
-  (let [writes (atom [])
-        _ (harness/bind-tools! {"__vis_capture_stdout__"
-                                (fn [args]
-                                  (swap! writes conj (first args))
-                                  nil)})
-        session (harness/block-session)]
-    (runtime/install-sync-tool! session "__vis_capture_stdout__")
-    (testing "each write reaches the host without changing the block result"
-      (is (= "before cancel" (ran session "print('before cancel')")))
-      (is (= "before cancel\n" (apply str @writes))))))
+                       (let [writes
+                             (atom [])
 
-(harness/defbuilt-test interrupt-unwinds-a-spinning-block-test
-  (let [spinning (promise)
-        session  (harness/tool-session {"ready" (fn [_] (deliver spinning true) "go")})
+                             _
+                             (harness/bind-tools! {"__vis_capture_stdout__" (fn [args]
+                                                                              (swap! writes conj
+                                                                                (first args))
+                                                                              nil)})
+
+                             session
+                             (harness/block-session)]
+
+                         (runtime/install-sync-tool! session "__vis_capture_stdout__")
+                         (testing "each write reaches the host without changing the block result"
+                           (is (= "before cancel" (ran session "print('before cancel')")))
+                           (is (= "before cancel\n" (apply str @writes))))))
+
+(harness/defbuilt-test
+  interrupt-unwinds-a-spinning-block-test
+  (let [spinning
+        (promise)
+
+        session
+        (harness/tool-session {"ready" (fn [_]
+                                         (deliver spinning true)
+                                         "go")})
+
         ;; The block runs on its own thread because `interrupt!` must be called
         ;; from anywhere BUT the thread it interrupts.
-        answer   (future (block session (str "try:\n"
-                                             "    await ready()\n"
-                                             "    while True:\n"
-                                             "        pass\n"
-                                             "finally:\n"
-                                             "    print('cleanup')")))]
+        answer
+        (future (block session
+                       (str "try:\n" "    await ready()\n"
+                            "    while True:\n" "        pass\n"
+                            "finally:\n" "    print('cleanup')")))]
+
     (testing "the block reaches its loop"
       (is (true? (deref spinning 30000 false)) "the tool never ran; nothing to interrupt"))
     (let [landed
           ;; Retried, because an interrupt aimed while the thread is still
           ;; inside the host call is not seen until that call returns.
-          (loop [landed false attempts 0]
+          (loop [landed
+                 false
+
+                 attempts
+                 0]
+
             (if (or (not= ::running (deref answer 100 ::running)) (>= attempts 200))
               landed
               (recur (or (runtime/interrupt!) landed) (inc attempts))))
 
           settled
           (deref answer 30000 ::hung)]
-      (testing "a thread state takes the KeyboardInterrupt"
-        (is (true? landed)))
+
+      (testing "a thread state takes the KeyboardInterrupt" (is (true? landed)))
       (testing "the spinning block unwinds instead of burning a core"
         (is (not= ::hung settled) "the block was still running 30s after the interrupt")
         (is (str/includes? (str (:error settled)) "KeyboardInterrupt")
@@ -129,8 +154,8 @@
       (is (= "2" (ran session "print(1 + 1)"))))))
 
 (harness/defbuilt-test interrupt-with-nothing-running-test
-  (testing "false when no thread is running guest code"
-    ;; The same answer a host gets when the interrupt could not reach the block
-    ;; — which is why `false` alone is never proof the environment is healthy.
-    (harness/block-session)
-    (is (false? (runtime/interrupt!)))))
+                       (testing "false when no thread is running guest code"
+                         ;; The same answer a host gets when the interrupt could not reach the block
+                         ;; — which is why `false` alone is never proof the environment is healthy.
+                         (harness/block-session)
+                         (is (false? (runtime/interrupt!)))))

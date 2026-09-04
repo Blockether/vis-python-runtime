@@ -17,8 +17,9 @@
            [java.lang.foreign FunctionDescriptor MemoryLayout]))
 
 (def ^:private metadata-file
-  (io/file "resources" "META-INF" "native-image" "com.blockether" "vis-python-runtime"
-           "reachability-metadata.json"))
+  (io/file "resources" "META-INF"
+           "native-image" "com.blockether"
+           "vis-python-runtime" "reachability-metadata.json"))
 
 (defn- metadata [] (json/read-str (slurp metadata-file)))
 
@@ -54,15 +55,18 @@
   (testing "the metadata ships and parses"
     (is (.isFile ^java.io.File metadata-file))
     (is (seq (declared "downcalls"))))
-
   (testing "every downcall shape in SIGNATURES is declared"
-    (let [shapes (into (sorted-set) (map (comp pr-str shape))
-                       (concat (vals (boundary Interpreter "SIGNATURES"))
-                               (vals (boundary Jail "SIGNATURES"))))
-          have (into (sorted-set) (map pr-str) (declared "downcalls"))]
+    (let [shapes
+          (into (sorted-set)
+                (map (comp pr-str shape))
+                (concat (vals (boundary Interpreter "SIGNATURES"))
+                        (vals (boundary Jail "SIGNATURES"))))
+
+          have
+          (into (sorted-set) (map pr-str) (declared "downcalls"))]
+
       (is (empty? (remove have shapes))
           (str "undeclared downcall shapes: " (pr-str (remove have shapes))))))
-
   (testing "the host upcall stub is declared"
     (is (contains? (declared "upcalls") (shape (boundary Interpreter "HOST_DESCRIPTOR"))))))
 
@@ -70,6 +74,6 @@
   (testing "the source manifest is a declared resource"
     (let [globs (set (map #(get % "glob") (get (metadata) "resources")))]
       (is (contains? globs Sources/MANIFEST)
-          (str "without " Sources/MANIFEST " the embedding binary cannot find any "
-               "of this library's Python"))
+          (str "without " Sources/MANIFEST
+               " the embedding binary cannot find any " "of this library's Python"))
       (is (some #(re-find #"vis-python/.*\.py$" %) globs)))))
