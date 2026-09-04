@@ -8,11 +8,14 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /** FFM boundary for the process-local {@code libvisjail} launcher. */
@@ -89,28 +92,98 @@ public final class Jail {
     return result;
   }
 
+  /** Set in a confined child's environment; Seatbelt is inherited across exec and refuses a second profile. */
+  public static final String MARKER = "VIS_SEATBELT_ACTIVE";
+
+  /** True inside a child this jail already confined: the policy is inherited, never applied twice. */
+  public static boolean inherited() {
+    return "1".equals(System.getenv(MARKER));
+  }
+
+  private static boolean wsl1() {
+    try {
+      String release = Files.readString(Path.of("/proc/sys/kernel/osrelease")).toLowerCase(Locale.ROOT);
+      return release.contains("microsoft") && !release.contains("wsl2");
+    } catch (IOException | RuntimeException e) {
+      return false;
+    }
+  }
+
+  /** Why this host cannot confine a child, or null when it can. */
+  public static String unsupportedReason() {
+    String platform;
+    try {
+      platform = Native.platform();
+    } catch (VisPythonException e) {
+      return "the OS process jail is not available on this operating system";
+    }
+    if (!platform.startsWith("darwin-") && !platform.startsWith("linux-")) {
+      return "the OS process jail is not available on this operating system";
+    }
+    if (platform.startsWith("linux-") && wsl1()) {
+      return "WSL1 has no real Linux kernel namespaces; the jail needs WSL2";
+    }
+    try {
+      if (Locations.jail(Native.library().path()) == null) {
+        return "the selected Python runtime has no matching libvisjail";
+      }
+    } catch (VisPythonException e) {
+      return "the selected Python runtime has no matching libvisjail";
+    }
+    return null;
+  }
+
+  public static boolean supported() {
+    return unsupportedReason() == null;
+  }
+
   /**
-   * Spawn a detached process, optionally under bubblewrap on Linux or the supplied
-   * Seatbelt profile on macOS. Linux policy arguments end in {@code --}; they never
-   * include an executable path. The environment is complete, not host additions.
+   * Spawn a detached process, confined under {@code policy} when one is given: a
+   * Seatbelt profile on macOS, embedded bubblewrap on Linux, compiled here from
+   * the one policy value. A null policy applies no jail but keeps the process
+   * group, PTY and stream handling. Inside a confined child the policy is
+   * already the kernel's, so the child is spawned as it is, still marked. The
+   * environment is complete, not host additions.
    */
   public static JailedProcess spawn(List<String> command, Map<String, String> environment,
-      String directory, String seatbeltProfile, List<String> linuxArguments,
-      int proxyPort, int inboundPort, boolean confined, boolean pty, boolean mergeError,
-      int rows, int columns) {
+      String directory, JailPolicy policy, boolean pty, boolean mergeError, int rows, int columns) {
     if (command == null || command.isEmpty()) {
       throw new IllegalArgumentException("command must not be empty");
     }
+    boolean confined = policy != null && !inherited();
+    if (confined) {
+      String reason = unsupportedReason();
+      if (reason != null) {
+        throw new VisPythonException("Process denied: " + reason,
+            Map.of("command", command.get(0), "reason", reason));
+      }
+    }
+    Map<String, String> env = new HashMap<>(environment == null ? Map.of() : environment);
+    if (policy != null) {
+      env.put(MARKER, "1");
+    }
+    boolean linux = confined && Native.platform().startsWith("linux-");
+    String profile = null;
     List<String> actual = new ArrayList<>();
-    if (confined && Native.platform().startsWith("linux-")) {
+    int proxyPort = 0;
+    int inboundPort = 0;
+    if (confined && linux) {
       actual.add("visjail");
-      actual.addAll(linuxArguments == null ? List.of() : linuxArguments);
+      actual.addAll(Bubblewrap.compile(policy));
+      proxyPort = Bubblewrap.proxyPort(policy);
+      inboundPort = Bubblewrap.inboundPort(policy);
+      String bus = policy.keychain() ? Bubblewrap.sessionBus() : null;
+      if (bus != null) {
+        env.put("DBUS_SESSION_BUS_ADDRESS", "unix:path=" + bus);
+      }
+    } else if (confined) {
+      profile = Seatbelt.compile(policy);
     }
     actual.addAll(command);
-    List<String> env = environment == null ? List.of() : environment.entrySet().stream()
+    List<String> pairs = env.entrySet().stream()
         .map(entry -> entry.getKey() + "=" + entry.getValue()).toList();
     byte[] argvBytes = blob(actual);
-    byte[] envBytes = blob(env);
+    byte[] envBytes = blob(pairs);
     int flags = (pty ? PTY : 0) | (mergeError ? MERGE_STDERR : 0) | (confined ? CONFINED : 0);
     MethodHandle handle = handles().get("visjail_spawn");
     try (Arena arena = Arena.ofConfined()) {
@@ -119,12 +192,11 @@ public final class Jail {
       MemorySegment result = arena.allocate((long) RESULT_COUNT * Integer.BYTES);
       MemorySegment error = arena.allocate(ERROR_CAPACITY);
       MemorySegment cwd = directory == null ? MemorySegment.NULL : arena.allocateFrom(directory);
-      MemorySegment profile = seatbeltProfile == null
-          ? MemorySegment.NULL : arena.allocateFrom(seatbeltProfile);
+      MemorySegment sbpl = profile == null ? MemorySegment.NULL : arena.allocateFrom(profile);
       MemorySegment.copy(argvBytes, 0, argv, ValueLayout.JAVA_BYTE, 0, argvBytes.length);
       MemorySegment.copy(envBytes, 0, envp, ValueLayout.JAVA_BYTE, 0, envBytes.length);
       int status = (int) handle.invokeExact(argv, argvBytes.length, envp, envBytes.length,
-          cwd, profile, flags, rows, columns, proxyPort, inboundPort, result, error, ERROR_CAPACITY);
+          cwd, sbpl, flags, rows, columns, proxyPort, inboundPort, result, error, ERROR_CAPACITY);
       if (status != 0) {
         throw new VisPythonException("Could not spawn confined process: " + error.getString(0),
             Map.of("status", status, "command", command.get(0)));

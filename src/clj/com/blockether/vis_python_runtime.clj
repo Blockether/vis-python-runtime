@@ -24,7 +24,7 @@
    unpacked one names it here. A failure anywhere below is a
    `VisPythonException` whose `.data`
    names the symbol, status, platform or path it is about."
-  (:import [com.blockether.vispython HostFunction Interpreter Jail Locations Native Pip]
+  (:import [com.blockether.vispython HostFunction Interpreter Jail JailPolicy JailPolicy$Egress Locations Native Pip]
            [java.util.function Consumer]))
 
 (def native-path-env
@@ -82,22 +82,47 @@
   ([] (resolve-jail (resolve-library)))
   ([{:keys [path]}] (Locations/jail path)))
 
+(defn- egress
+  [network]
+  (cond (map? network) (JailPolicy$Egress/proxy (int (:proxy network)))
+        (= :open network) JailPolicy$Egress/OPEN
+        :else JailPolicy$Egress/OFF))
+
+(defn jail-policy
+  "The confinement value `spawn-process!` compiles, from a map:
+   `:read-write`/`:read-only`/`:deny-read`/`:deny-write`/`:deny-exec` are path
+   lists (`~` allowed; a deny always wins; temp and the platform's own code are
+   the compiler's to add), `:network` is `:off` (default), `:open` or
+   `{:proxy <port>}` — the one loopback port sockets may reach — `:inbound` lists
+   ports additionally exposed on every interface (loopback listeners are always
+   allowed) and `:keychain?` opens the OS credential store."
+  [{:keys [read-write read-only deny-read deny-write deny-exec network inbound keychain?]}]
+  (JailPolicy. (vec read-write) (vec read-only) (vec deny-read) (vec deny-write) (vec deny-exec)
+               (egress network) (mapv int inbound) (boolean keychain?)))
+
+(defn jail-unsupported-reason
+  "Why this host cannot confine a child — no Seatbelt or namespaces, WSL1, no
+   `libvisjail` beside the runtime — or nil when it can."
+  []
+  (Jail/unsupportedReason))
+
+(defn jailed?
+  "True inside a child this jail already confined: `spawn-process!` then
+   passes the inherited kernel policy on instead of applying a second one."
+  []
+  (Jail/inherited))
+
 (defn spawn-process!
   "Spawn `command` as a detached process through `libvisjail`, returning a
-   `java.lang.Process`. Confinement defaults on: macOS then requires
-   `:seatbelt-profile`; Linux takes `:linux-arguments`, bubblewrap policy flags
-   ending in `--`. `:proxy-port` and `:inbound-port` give a confined Linux child
-   only those loopback crossings while libvisjail owns its private network namespace.
-   `:environment` is the COMPLETE child environment. Setting `:confined? false`
-   keeps process-group and stream handling but applies no jail."
+   `java.lang.Process`. `:policy` (a [[jail-policy]] map) confines it — Seatbelt
+   on macOS, embedded bubblewrap on Linux, compiled by the runtime — and a spawn
+   the host cannot enforce throws instead of running the child unconfined; no
+   policy keeps only the process group and stream handling. `:environment` is
+   the COMPLETE child environment; a confined child also carries `Jail/MARKER`."
   ([command] (spawn-process! command {}))
-  ([command {:keys [environment directory seatbelt-profile linux-arguments proxy-port inbound-port
-                    confined? pty? merge-stderr? rows columns]
-             :or {confined? true}}]
-   (Jail/spawn (vec command) (or environment {}) directory seatbelt-profile
-               (vec linux-arguments) (int (or proxy-port 0)) (int (or inbound-port 0))
-               (boolean confined?) (boolean pty?) (boolean merge-stderr?)
-               (int (or rows 0)) (int (or columns 0)))))
+  ([command {:keys [environment directory policy pty? merge-stderr? rows columns]}]
+   (Jail/spawn (vec command) (or environment {}) directory (some-> policy jail-policy)
+               (boolean pty?) (boolean merge-stderr?) (int (or rows 0)) (int (or columns 0)))))
 
 (defn initialize!
   "Start the embedded interpreter, once per process, and put `:source-paths`
