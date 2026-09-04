@@ -534,3 +534,40 @@ except ValueError as exc:
              (runtime/eval-str
               producer
               "len(__import__('vis_runtime')._EXTENSION_OBJECTS)"))))))
+
+;; Regression, issue #171: a dotted tool accepted only one separator, and its
+;; namespace printed CPython's internal class and memory address.
+(harness/defbuilt-test recursive-dotted-tool-namespace-test
+  (testing "nested tool namespaces are navigable, readable, and pruned leaf-first"
+    (let [session (harness/tool-session
+                   {"uberworkspace.vis.find_issue" (fn [[query]] (str "found:" query))
+                    "uberworkspace.vis.create_issue" (fn [[title]] (str "created:" title))})
+          answer (block session
+                        (str "print(repr(uberworkspace))
+"
+                             "print(repr(uberworkspace.vis))
+"
+                             "print(dir(uberworkspace), dir(uberworkspace.vis))
+"
+                             "print(await uberworkspace.vis.find_issue('needle'))"))]
+      (is (nil? (:error answer)))
+      (is (= (str "<vis namespace 'uberworkspace': vis>
+"
+                  "<vis namespace 'uberworkspace.vis': create_issue, find_issue>
+"
+                  "['vis'] ['create_issue', 'find_issue']
+"
+                  "found:needle")
+             (out answer)))
+      (runtime/exec! session "__vis_remove_dotted_tool__('uberworkspace.vis.find_issue')")
+      (is (= "['create_issue']"
+             (runtime/eval-str session "str(dir(uberworkspace.vis))")))
+      (runtime/exec! session "__vis_remove_dotted_tool__('uberworkspace.vis.create_issue')")
+      (is (= "False"
+             (runtime/eval-str session "str('uberworkspace' in globals())")))))
+  (testing "a leaf and a namespace cannot occupy the same public path"
+    (let [session (harness/tool-session {"tree.branch" (fn [_] true)})]
+      (is (thrown-with-msg?
+           Exception
+           #"extension tool path collides"
+           (runtime/install-tool! session "tree.branch.leaf"))))))

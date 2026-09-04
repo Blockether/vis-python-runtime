@@ -2204,10 +2204,11 @@ def __vis_resolve_tool__(nm):
 class __vis_ToolNamespace__:
     # A capability object, not the extension's raw object: only methods explicitly
     # published by the host can cross this boundary.
-    __slots__ = ("__vis_members__",)
+    __slots__ = ("__vis_members__", "__vis_name__")
 
-    def __init__(self):
+    def __init__(self, name):
         object.__setattr__(self, "__vis_members__", {})
+        object.__setattr__(self, "__vis_name__", str(name))
 
     def __getattribute__(self, name):
         if name.startswith("_"):
@@ -2221,31 +2222,71 @@ class __vis_ToolNamespace__:
     def __dir__(self):
         return sorted(object.__getattribute__(self, "__vis_members__"))
 
+    def __repr__(self):
+        name = object.__getattribute__(self, "__vis_name__")
+        members = ", ".join(sorted(object.__getattribute__(self, "__vis_members__")))
+        return "<vis namespace " + repr(name) + ": " + members + ">"
+
+
+def __vis_tool_path__(nm):
+    parts = str(nm).split(".")
+    if len(parts) < 2 or any(
+        not part.isidentifier() or part.startswith("_") for part in parts
+    ):
+        raise ValueError("invalid extension tool namespace: " + str(nm))
+    return parts
+
 
 def __vis_set_dotted_tool__(nm, realfn):
-    root, member = str(nm).split(".", 1)
-    if not root.isidentifier() or not member.isidentifier() or member.startswith("_"):
-        raise ValueError("invalid extension tool namespace: " + str(nm))
+    parts = __vis_tool_path__(nm)
+    root = parts[0]
     g = globals()
     namespace = g.get(root)
     if namespace is None:
-        namespace = __vis_ToolNamespace__()
+        namespace = __vis_ToolNamespace__(root)
         g[root] = namespace
     if not isinstance(namespace, __vis_ToolNamespace__):
         raise ValueError("extension tool namespace collides with global: " + root)
+    for index, part in enumerate(parts[1:-1], 1):
+        members = object.__getattribute__(namespace, "__vis_members__")
+        child = members.get(part)
+        path = ".".join(parts[: index + 1])
+        if child is None:
+            child = __vis_ToolNamespace__(path)
+            members[part] = child
+        elif not isinstance(child, __vis_ToolNamespace__):
+            raise ValueError("extension tool path collides with callable: " + path)
+        namespace = child
     members = object.__getattribute__(namespace, "__vis_members__")
-    members[member] = __vis_deferred__(realfn, str(nm))
+    leaf = parts[-1]
+    if isinstance(members.get(leaf), __vis_ToolNamespace__):
+        raise ValueError("extension tool path collides with namespace: " + str(nm))
+    members[leaf] = __vis_deferred__(realfn, str(nm))
 
 
 def __vis_remove_dotted_tool__(nm):
-    root, member = str(nm).split(".", 1)
-    namespace = globals().get(root)
+    parts = __vis_tool_path__(nm)
+    g = globals()
+    namespace = g.get(parts[0])
     if not isinstance(namespace, __vis_ToolNamespace__):
         return
+    lineage = []
+    for part in parts[1:-1]:
+        members = object.__getattribute__(namespace, "__vis_members__")
+        child = members.get(part)
+        if not isinstance(child, __vis_ToolNamespace__):
+            return
+        lineage.append((namespace, part))
+        namespace = child
     members = object.__getattribute__(namespace, "__vis_members__")
-    members.pop(member, None)
-    if not members:
-        globals().pop(root, None)
+    members.pop(parts[-1], None)
+    for parent, part in reversed(lineage):
+        if object.__getattribute__(namespace, "__vis_members__"):
+            break
+        object.__getattribute__(parent, "__vis_members__").pop(part, None)
+        namespace = parent
+    if not object.__getattribute__(namespace, "__vis_members__"):
+        g.pop(parts[0], None)
     names = globals().get("__vis_tool_names__") or []
     if nm in names:
         names.remove(nm)
