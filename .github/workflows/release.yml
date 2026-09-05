@@ -19,22 +19,14 @@ jobs:
           # archive carries none (build.clj `worker-platforms`).
           - { platform: linux-x64, os: ubuntu-24.04, worker: true, jdk-arch: x64, prefix: "" }
           - { platform: linux-arm64, os: ubuntu-24.04-arm, worker: true, jdk-arch: aarch64, prefix: "" }
-          - { platform: darwin-arm64, os: vis-macos-arm64, worker: true, jdk-arch: aarch64, prefix: "" }
-          - { platform: darwin-x64, os: vis-macos-arm64, worker: false, jdk-arch: x64, prefix: "/usr/bin/arch -x86_64" }
+          - { platform: darwin-arm64, os: macos-26, worker: true, jdk-arch: aarch64, prefix: "" }
+          - { platform: darwin-x64, os: macos-26, worker: false, jdk-arch: x64, prefix: "/usr/bin/arch -x86_64" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - name: Verify tag matches VIS_PYTHON_VERSION
         shell: bash
         run: test "v$(tr -d '\r\n' < VIS_PYTHON_VERSION)" = "$GITHUB_REF_NAME"
-      - name: Keep this build out of the runner's real home
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          home="$RUNNER_TEMP/ci-home"
-          rm -rf "$home"
-          mkdir -p "$home"
-          echo "HOME=$home" >> "$GITHUB_ENV"
       - name: Verify Rosetta for the x64 build
         if: matrix.platform == 'darwin-x64'
         run: /usr/bin/arch -x86_64 /usr/bin/uname -m | grep -qx x86_64

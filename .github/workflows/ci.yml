@@ -44,11 +44,9 @@ jobs:
 
   darwin:
     name: build + test ${{ matrix.platform }}
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: vis-macos-arm64
+    runs-on: macos-26
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           # No GraalVM CE for darwin-x64: that archive ships without a worker image
@@ -57,13 +55,6 @@ jobs:
           - { platform: darwin-x64, worker: false, jdk-arch: x64, prefix: "/usr/bin/arch -x86_64" }
     steps:
       - uses: actions/checkout@v6
-      - name: Keep this run out of the runner's real home
-        shell: bash
-        run: |
-          home="$RUNNER_TEMP/ci-home"
-          rm -rf "$home"
-          mkdir -p "$home"
-          echo "HOME=$home" >> "$GITHUB_ENV"
       - name: Verify Rosetta for the x64 build
         if: matrix.platform == 'darwin-x64'
         run: /usr/bin/arch -x86_64 /usr/bin/uname -m | grep -qx x86_64

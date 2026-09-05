@@ -187,3 +187,16 @@
   (testing "the release job names the versionless jar emitted by build/jar"
     (is (str/includes? (slurp ".github/workflows/release.yml")
                        "path: target/vis-python-runtime.jar"))))
+
+(deftest workflows-use-hosted-macos-test
+  (doseq [path
+          [".github/workflows/ci.yml" ".github/workflows/release.yml"]
+
+          :let [body
+                (slurp path)]]
+
+    (is (str/includes? body "macos-26") path)
+    (is (not (str/includes? body "vis-macos-arm64")) path)
+    (is (not (str/includes? body "self-hosted")) path)
+    (is (not (str/includes? body "inputs.runner")) path))
+  (is (not (str/includes? (slurp ".github/workflows/ci.yml") "head.repo.full_name"))))
