@@ -42,8 +42,7 @@ uses `PATH` or requires a separately installed enforcer.
 
 The embedded bridge, vendored interpreter, confinement, host calls, pip-backed
 packages and per-platform packaging are implemented. Linux packaging also ships
-the process-level enforcer required to contain native extension modules. The Vis
-consumer migration and native-image verdict remain tracked in `PLAN.md`.
+the process-level enforcer required to contain native extension modules.
 
 ## License
 
