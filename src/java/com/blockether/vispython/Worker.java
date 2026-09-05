@@ -60,18 +60,18 @@ public final class Worker {
 
   private Worker() {}
 
-  /** {@code vis-python-worker <control-socket>}, or {@code --version}. */
+  /** {@code vis-python-worker <control-socket> [source-directory ...]}, or {@code --version}. */
   public static void main(String[] args) {
     if (args.length == 1 && "--version".equals(args[0])) {
       System.out.println(Native.version());
       return;
     }
-    if (args.length != 1 || args[0].isBlank()) {
-      System.err.println("usage: " + EXECUTABLE + " <control-socket>");
+    if (args.length == 0 || args[0].isBlank()) {
+      System.err.println("usage: " + EXECUTABLE + " <control-socket> [source-directory ...]");
       System.exit(2);
     }
     try {
-      serve(Path.of(args[0]));
+      serve(Path.of(args[0]), List.of(args).subList(1, args.length));
       System.exit(0);
     } catch (Throwable t) {
       t.printStackTrace();
@@ -84,12 +84,13 @@ public final class Worker {
    * interpreter, and serve until the parent hangs up. The connection is made
    * FIRST, so a parent waiting on its accept learns at once that the process
    * came up; a start that then fails closes it, and the parent reads why in the
-   * log it gave this process.
+   * log it gave this process. Host-supplied source directories are installed at
+   * interpreter initialization, before any request or host-module import is served.
    */
-  public static void serve(Path socket) throws IOException {
+  public static void serve(Path socket, List<String> sourcePaths) throws IOException {
     try (SocketChannel channel = SocketChannel.open(UnixDomainSocketAddress.of(socket))) {
       Peer peer = new Peer(channel);
-      Interpreter.initialize(List.of(), Interpreter.DEFAULT, Interpreter.DEFAULT,
+      Interpreter.initialize(sourcePaths, Interpreter.DEFAULT, Interpreter.DEFAULT,
           Interpreter.DEFAULT);
       // The caller is the interpreter's answer, forwarded whole: the parent
       // authorizes against it, and a payload naming something else is the

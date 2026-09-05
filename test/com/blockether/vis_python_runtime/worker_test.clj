@@ -146,8 +146,16 @@
 (defn- exercise!
   "The whole drive, against whatever `argv` starts."
   [argv]
-  (let [worker
-        (start! argv)
+  (let [source-dir
+        (harness/temp-dir "vis-worker-source")
+
+        _
+        (spit (str source-dir "/worker_host_fixture.py") "value = 73
+")
+
+        worker
+        (start! (fn [socket]
+                  (conj (vec (argv socket)) source-dir)))
 
         session
         "worker-test"
@@ -155,67 +163,71 @@
         root
         (harness/temp-dir "vis-worker-root")]
 
-    (try (testing "the interpreter answers over the wire"
-           (value! worker "install-runtime" "session" session)
-           (is (= "2" (value! worker "run" "session" session "code" "1 + 1"))))
-         (testing "a block reaches a host tool through the parent, and its answer comes back"
-           (swap! (:tools worker) assoc
-             "echo"
-             (fn [args]
-               (str "<" (first args) ">")))
-           (value! worker "install-tool" "session" session "code" "echo")
-           (let [answer
-                 (json/read-str
-                   (value! worker "run-block" "session" session "code" "print(await echo('hi'))"))]
-             (is (nil? (get answer "error")) (str (get answer "error")))
-             (is (= "<hi>" (str/trim (str (get answer "stdout")))))))
-         (testing "a tool the parent refuses is a catchable failure in the block"
-           (let [answer (json/read-str (value! worker
-                                               "run-block"
-                                               "session" session
-                                               "code" (str "try:\n" "    await missing()\n"
-                                                           "except Exception as e:\n"
-                                                           "    print('caught:', e)")))]
-             (is (str/includes? (str (get answer "error") (get answer "stdout")) "missing"))))
-         (testing "an op the worker does not know is an error reply, not a dead worker"
-           (let [reply (request! worker "levitate" "session" session)]
-             (is (str/includes? (str (get reply "error")) "no worker op named levitate"))
-             (is (= "3" (value! worker "run" "session" session "code" "1 + 2")))))
-         (testing "confinement is the worker's own process state"
-           (value! worker
-                   "confine"
-                   "session" session
-                   "code" (json/write-str
-                            {"read" [root] "write" [root] "refusal" "not in this worker"}))
-           (spit (str root "/inside.txt") "ok")
-           (let [inside
-                 (json/read-str (value! worker
-                                        "run-block"
-                                        "session" session
-                                        "code" (str "print(open("
-                                                    (pr-str (str root "/inside.txt"))
-                                                    ").read())")))
+    (try
+      (testing "the interpreter answers over the wire"
+        (value! worker "install-runtime" "session" session)
+        (is (= "2" (value! worker "run" "session" session "code" "1 + 1"))))
+      (testing "host source directories are installed before serving interpreter requests"
+        (value! worker "exec" "session" session "code" "import worker_host_fixture")
+        (is (= "73"
+               (value! worker "eval" "session" session "code" "str(worker_host_fixture.value)"))))
+      (testing "a block reaches a host tool through the parent, and its answer comes back"
+        (swap! (:tools worker) assoc
+          "echo"
+          (fn [args]
+            (str "<" (first args) ">")))
+        (value! worker "install-tool" "session" session "code" "echo")
+        (let [answer
+              (json/read-str
+                (value! worker "run-block" "session" session "code" "print(await echo('hi'))"))]
+          (is (nil? (get answer "error")) (str (get answer "error")))
+          (is (= "<hi>" (str/trim (str (get answer "stdout")))))))
+      (testing "a tool the parent refuses is a catchable failure in the block"
+        (let [answer (json/read-str (value! worker
+                                            "run-block"
+                                            "session" session
+                                            "code" (str "try:\n" "    await missing()\n"
+                                                        "except Exception as e:\n"
+                                                        "    print('caught:', e)")))]
+          (is (str/includes? (str (get answer "error") (get answer "stdout")) "missing"))))
+      (testing "an op the worker does not know is an error reply, not a dead worker"
+        (let [reply (request! worker "levitate" "session" session)]
+          (is (str/includes? (str (get reply "error")) "no worker op named levitate"))
+          (is (= "3" (value! worker "run" "session" session "code" "1 + 2")))))
+      (testing "confinement is the worker's own process state"
+        (value! worker
+                "confine"
+                "session" session
+                "code" (json/write-str
+                         {"read" [root] "write" [root] "refusal" "not in this worker"}))
+        (spit (str root "/inside.txt") "ok")
+        (let [inside
+              (json/read-str
+                (value! worker
+                        "run-block"
+                        "session" session
+                        "code" (str "print(open(" (pr-str (str root "/inside.txt")) ").read())")))
 
-                 outside
-                 (json/read-str
-                   (value! worker "run-block" "session" session "code" "open('/etc/hosts').read()"))
+              outside
+              (json/read-str
+                (value! worker "run-block" "session" session "code" "open('/etc/hosts').read()"))
 
-                 process
-                 (json/read-str (value! worker
-                                        "run-block"
-                                        "session" session
-                                        "code" "__import__('subprocess').run(['true'])"))]
+              process
+              (json/read-str (value! worker
+                                     "run-block"
+                                     "session" session
+                                     "code" "__import__('subprocess').run(['true'])"))]
 
-             (is (= "ok" (str/trim (str (get inside "stdout")))))
-             (is (str/includes? (str (get outside "error")) "outside the readable roots"))
-             (is (str/includes? (str (get process "error")) "not in this worker"))))
-         (testing "closing the session and hanging up ends the process cleanly"
-           (value! worker "close" "session" session)
-           (.close ^SocketChannel (:channel worker))
-           (is (.waitFor ^Process (:process worker) 30 TimeUnit/SECONDS)
-               (str "the worker outlived its parent: " (slurp (:log worker))))
-           (is (zero? (.exitValue ^Process (:process worker))) (slurp (:log worker))))
-         (finally (.destroyForcibly ^Process (:process worker)) (.delete ^File (:log worker))))))
+          (is (= "ok" (str/trim (str (get inside "stdout")))))
+          (is (str/includes? (str (get outside "error")) "outside the readable roots"))
+          (is (str/includes? (str (get process "error")) "not in this worker"))))
+      (testing "closing the session and hanging up ends the process cleanly"
+        (value! worker "close" "session" session)
+        (.close ^SocketChannel (:channel worker))
+        (is (.waitFor ^Process (:process worker) 30 TimeUnit/SECONDS)
+            (str "the worker outlived its parent: " (slurp (:log worker))))
+        (is (zero? (.exitValue ^Process (:process worker))) (slurp (:log worker))))
+      (finally (.destroyForcibly ^Process (:process worker)) (.delete ^File (:log worker))))))
 
 (harness/defbuilt-test worker-class-on-a-jvm-test (exercise! jvm-argv))
 

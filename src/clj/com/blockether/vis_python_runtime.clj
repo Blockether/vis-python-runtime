@@ -25,7 +25,7 @@
    `VisPythonException` whose `.data`
    names the symbol, status, platform or path it is about."
   (:import [com.blockether.vispython HostFunction Interpreter Jail JailPolicy JailPolicy$Egress
-            Locations Native Pip]
+            Locations Native Pip Trust]
            [java.util.function Consumer]))
 
 (def native-path-env
@@ -376,12 +376,9 @@
   ([{:keys [path]}] (Locations/worker path)))
 
 (defn certificates-pem!
-  "Export the JVM's trust anchors to a PEM file for pip and answer its path,
-   `~/.vis/python/cacert.pem` by default. Pip would otherwise verify against the
-   CA bundle vendored inside it, so a corporate root added to the Java trust
-   store has to be exported or the machine trusts two different sets."
-  ([] (Pip/certificatesPem))
-  ([path] (Pip/certificatesPem path)))
+  "Export effective host trust (JVM roots plus the installed host PEM) for pip."
+  ([] (Trust/certificatesPem (Locations/certificatesFile)))
+  ([path] (Trust/certificatesPem path)))
 
 (defn pip-command
   "The argv `pip-install!` would run for `specs`."
@@ -389,13 +386,12 @@
   (vec (Pip/installCommand python target cert (boolean upgrade?) (vec specs))))
 
 (defn pip-install!
-  "Install `specs` for the sandbox, answering `{:exit … :out … :command …}`.
-
-   pip runs as a HOST process — the embedded interpreter is confined, and a
-   block never installs anything. Omitted keys take the runtime's own answers:
-   the vendored interpreter, `resolve-packages-dir`, the bytecode cache prefix
-   and the exported certificates. A non-zero `:exit` is data, not a throw,
-   because the caller is a CLI that has to print pip's own words."
+  "Install `specs` on the HOST, answering `{:exit … :out … :command …}`; failure is data.
+   Defaults: vendored Python, shared packages, bytecode cache and host trust.
+   Explicit :cert wins; otherwise preserve PIP_CERT or export effective host trust.
+   Preserves pip.conf/PIP_CONFIG_FILE, PIP_INDEX_URL/PIP_EXTRA_INDEX_URL,
+   PIP_PROXY, HTTP_PROXY/HTTPS_PROXY and NO_PROXY. Prefer one Artifactory virtual
+   index. Set credentials/proxy on the gateway before startup, never in session code."
   ([specs] (pip-install! {} specs))
   ([{:keys [python target cert pycache-prefix upgrade? timeout-ms]} specs]
    (let [result (Pip/install python

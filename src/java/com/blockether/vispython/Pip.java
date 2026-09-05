@@ -4,20 +4,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.security.GeneralSecurityException;
-import java.security.KeyStore;
-import java.security.cert.CertificateEncodingException;
-import java.security.cert.X509Certificate;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.TrustManagerFactory;
-import javax.net.ssl.X509TrustManager;
 
 /**
  * Installing packages: the only way the sandbox ever gets one.
@@ -35,12 +25,10 @@ import javax.net.ssl.X509TrustManager;
  * which is precisely what a sandbox is for refusing: a block that could install
  * could write its own next payload.
  *
- * <p>Trust comes from the JVM. pip would otherwise verify TLS against the CA
- * bundle vendored inside it, so a machine whose operator added a corporate root
- * to the Java trust store - the only store this product's own HTTP client reads
- * - would have a runtime that trusts two different sets of certificates and
- * fails on one of them. {@link #certificatesPem} exports what the JVM trusts and
- * pip is pointed at that file, so there is one trust decision on the machine.
+ * <p>Trust is owned by {@link Trust}. Index and HTTP proxy configuration belongs to pip:
+ * inherited PIP_INDEX_URL, PIP_EXTRA_INDEX_URL, PIP_PROXY, HTTP(S)_PROXY, NO_PROXY and
+ * pip.conf are preserved. No public index or proxy is hardcoded. An explicit cert wins
+ * over PIP_CERT; otherwise the shared host trust is exported as the default PIP_CERT.
  */
 public final class Pip {
 
@@ -51,70 +39,6 @@ public final class Pip {
 
   /** How long an install may take before it is killed, when the caller says 0. */
   public static final long DEFAULT_TIMEOUT_MS = 600_000L;
-
-  /**
-   * Every certificate the JVM trusts, from the DEFAULT trust manager - so a root
-   * an operator added to {@code cacerts}, or pointed at with
-   * {@code javax.net.ssl.trustStore}, is included exactly as it is for the rest
-   * of the process.
-   */
-  public static List<X509Certificate> trustAnchors() {
-    try {
-      TrustManagerFactory factory =
-          TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-      // A null KeyStore is what asks for the process's default trust store.
-      factory.init((KeyStore) null);
-      List<X509Certificate> anchors = new ArrayList<>();
-      for (TrustManager manager : factory.getTrustManagers()) {
-        if (manager instanceof X509TrustManager x509) {
-          anchors.addAll(List.of(x509.getAcceptedIssuers()));
-        }
-      }
-      return List.copyOf(anchors);
-    } catch (GeneralSecurityException e) {
-      throw new VisPythonException("could not read the JVM trust store", Map.of(), e);
-    }
-  }
-
-  private static String pem(X509Certificate certificate) {
-    try {
-      Base64.Encoder encoder = Base64.getMimeEncoder(64, new byte[] {'\n'});
-      return "-----BEGIN CERTIFICATE-----\n"
-          + encoder.encodeToString(certificate.getEncoded())
-          + "\n-----END CERTIFICATE-----\n";
-    } catch (CertificateEncodingException e) {
-      throw new VisPythonException("could not encode a trusted certificate", Map.of(), e);
-    }
-  }
-
-  /**
-   * Write the JVM's trust anchors to {@code path} in PEM and answer it.
-   *
-   * <p>Rewritten only when the anchors changed, because the path is handed to a
-   * subprocess and a file being rewritten under one is worth avoiding for
-   * nothing.
-   */
-  public static String certificatesPem(String path) {
-    StringBuilder bundle = new StringBuilder();
-    for (X509Certificate certificate : trustAnchors()) {
-      bundle.append(pem(certificate));
-    }
-    String wanted = bundle.toString();
-    Path file = Path.of(path).toAbsolutePath();
-    try {
-      if (!Files.isRegularFile(file) || !wanted.equals(Files.readString(file))) {
-        Files.createDirectories(file.getParent());
-        Files.writeString(file, wanted, StandardCharsets.UTF_8);
-      }
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
-    }
-    return file.toString();
-  }
-
-  public static String certificatesPem() {
-    return certificatesPem(Locations.certificatesFile());
-  }
 
   /**
    * The argv that installs {@code specs} into {@code target}.
@@ -150,7 +74,7 @@ public final class Pip {
       boolean upgrade, long timeoutMs, List<String> specs) {
     String interpreter = python != null ? python : Interpreter.pythonExecutable();
     String directory = target != null ? target : Locations.packagesDir();
-    String certificates = cert != null ? cert : certificatesPem();
+    String certificates = cert;
     String cache = pycachePrefix != null ? pycachePrefix : Locations.pycachePrefix();
     if (interpreter == null) {
       throw new VisPythonException("no interpreter to run pip with",
@@ -170,8 +94,10 @@ public final class Pip {
     environment.put("PYTHONNOUSERSITE", "1");
     if (certificates != null) {
       environment.put("PIP_CERT", certificates);
-      environment.put("SSL_CERT_FILE", certificates);
+    } else if (!environment.containsKey("PIP_CERT")) {
+      environment.put("PIP_CERT", Trust.certificatesPem(Locations.certificatesFile()));
     }
+    // Do not replace proxy/index settings, requests overrides or pip's configuration files.
     if (cache != null) {
       environment.put("PYTHONPYCACHEPREFIX", cache);
     }

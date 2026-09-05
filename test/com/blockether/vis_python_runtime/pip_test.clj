@@ -12,7 +12,7 @@
             [com.blockether.vis-python-runtime.harness :as harness :refer [block temp-dir]])
   (:import [java.net InetSocketAddress Socket]
            [java.security.cert CertificateFactory]
-           [com.blockether.vispython Locations Pip]))
+           [com.blockether.vispython Locations Trust]))
 
 (use-fixtures :each
               (fn [run]
@@ -72,7 +72,7 @@
 
 (deftest trust-comes-from-the-jvm-test
   (let [anchors
-        (Pip/trustAnchors)
+        (Trust/trustAnchors)
 
         path
         (str (io/file (temp-dir "vis-cert") "cacert.pem"))
