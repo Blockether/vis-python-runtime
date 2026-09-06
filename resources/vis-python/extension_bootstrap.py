@@ -1,6 +1,6 @@
-"""Injector — build the `vis` module for ONE extension context.
+"""Injector — build the `blockether.vis` module for ONE extension context.
 
-The module BODY is `packages/vis-agent/src/vis/__init__.py`, the same file PyPI
+The module BODY is `packages/vis-agent/src/blockether/vis/__init__.py`, the same file PyPI
 ships as `vis-agent`. `internal.python-extensions/bootstrap-python` slurps it off
 the classpath and prepends it here as `_vis_body`, so there is exactly one copy of
 the extension API in the repository and the sandbox runs the code an author can
@@ -9,13 +9,13 @@ the extension API in the repository and the sandbox runs the code an author can
 This fragment does only what the package cannot do for itself: seed `_host` with
 the host callables the engine installed into this session, exec the body into a
 module dict of its own (so the extension file's globals stay clean), and register
-it in `sys.modules` so `import vis` works.
+it in `sys.modules` so `from blockether import vis` works.
 
-`_host` is an OBJECT with one attribute per op — the shape `vis_contract.Host`
-declares, and the same shape `vis._outside` builds when nobody seeded one — so a
+`_host` is an OBJECT with one attribute per op — the shape `blockether.vis_contract.Host`
+declares, and the same shape `blockether.vis._outside` builds when nobody seeded one — so a
 host is a thing anyone can implement, not a dict literal only this file knows how
 to spell. Every attribute below is an op in
-`packages/vis-contract/resources/vis-contract/python-host.edn`, and
+`packages/vis-contract/resources/vis-contract/python-host.json`, and
 `python_host_test` fails when this object and that document disagree.
 """
 
@@ -27,6 +27,7 @@ to spell. Every attribute below is an op in
 # host invokes it later by that id. The seal is recursive because a spec nests
 # callables inside dicts and lists (a provider's `auth_fn`, a symbol's `fn`).
 
+import dataclasses as _vis_dataclasses
 import json as _vis_json
 import vis_runtime as _vis_runtime
 
@@ -45,7 +46,10 @@ def __vis_seal__(value, preserve_objects=False):
         return {str(k): __vis_seal__(v, preserve_objects) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [__vis_seal__(v, preserve_objects) for v in value]
-    attrs = getattr(value, "__dict__", None)
+    if _vis_dataclasses.is_dataclass(value) and not isinstance(value, type):
+        attrs = {f.name: getattr(value, f.name) for f in _vis_dataclasses.fields(value)}
+    else:
+        attrs = getattr(value, "__dict__", None)
     if isinstance(attrs, dict):
         sealed = {
             "__vis_object__": type(value).__name__,
@@ -63,7 +67,7 @@ def __vis_seal__(value, preserve_objects=False):
 
 def __vis_registration__():
     """The sealed registration spec, or None when the file registered nothing."""
-    reg = _vis_sys.modules["vis"].__dict__.get("_registration")
+    reg = _vis_mod.__dict__.get("_registration")
     return None if reg is None else __vis_seal__(reg["spec"])
 
 
@@ -114,7 +118,28 @@ def __vis_member__(op):
 # `_host.jailed_shell`. The list is NOT written out here on purpose — it lived in
 # this file once, so a door added in the host meant a release of this library
 # before the host could use it, for a name this file only ever passed through.
-_vis_mod = _vis_types.ModuleType("vis")
+# Preserve other Blockether packages, including an installed PEP 420 namespace.
+import importlib as _vis_importlib
+import importlib.machinery as _vis_machinery
+
+try:
+    _vis_parent = _vis_importlib.import_module("blockether")
+except ModuleNotFoundError as _vis_missing:
+    if _vis_missing.name != "blockether":
+        raise
+    _vis_parent = _vis_types.ModuleType("blockether")
+    _vis_parent.__path__ = []
+    _vis_parent.__package__ = "blockether"
+    _vis_parent.__spec__ = _vis_machinery.ModuleSpec(
+        "blockether", None, is_package=True
+    )
+    _vis_sys.modules["blockether"] = _vis_parent
+if not hasattr(_vis_parent, "__path__"):
+    raise ImportError("blockether must be a namespace package")
+_vis_mod = _vis_types.ModuleType("blockether.vis")
+_vis_mod.__package__ = "blockether.vis"
+_vis_mod.__path__ = []
+_vis_mod.__spec__ = _vis_machinery.ModuleSpec("blockether.vis", None, is_package=True)
 _vis_mod.__dict__["_host"] = _vis_types.SimpleNamespace(
     **{
         _vis_name[len("__vis_host_") : -len("__")]: __vis_member__(_vis_door)
@@ -124,5 +149,14 @@ _vis_mod.__dict__["_host"] = _vis_types.SimpleNamespace(
         and callable(_vis_door)
     }
 )
-exec(compile(_vis_body, "vis/__init__.py", "exec"), _vis_mod.__dict__)
-_vis_sys.modules["vis"] = _vis_mod
+_vis_previous = _vis_sys.modules.get("blockether.vis")
+_vis_sys.modules["blockether.vis"] = _vis_mod
+try:
+    exec(compile(_vis_body, "blockether/vis/__init__.py", "exec"), _vis_mod.__dict__)
+except BaseException:
+    if _vis_previous is None:
+        _vis_sys.modules.pop("blockether.vis", None)
+    else:
+        _vis_sys.modules["blockether.vis"] = _vis_previous
+    raise
+_vis_parent.vis = _vis_mod
