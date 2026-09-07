@@ -44,3 +44,34 @@
            (runtime/network! false "Refused: this session was granted no network.")
            (is (= "Refused: this session was granted no network." (attempt session resolves))))
          (finally (runtime/network! true "")))))
+
+(harness/defbuilt-test
+  local-async-without-network-test
+  ;; Regression: asyncio's internal wakeup must not require a socket capability.
+  (let [session (harness/block-session)]
+    (harness/tool! session "echo" "x" "    return '<' + x + '>'")
+    (runtime/exec!
+      session
+      "import asyncio as real_asyncio, threading, time
+async def library_call():
+    loop = real_asyncio.get_running_loop()
+    assert real_asyncio.current_task() is not None
+    timer = loop.create_future()
+    loop.call_later(0.01, timer.set_result, 'timer')
+    await timer
+    result = loop.create_future()
+    def complete():
+        time.sleep(0.01)
+        loop.call_soon_threadsafe(result.set_result, 'woken')
+    thread = threading.Thread(target=complete)
+    thread.start()
+    try:
+        return await result
+    finally:
+        thread.join()")
+    (try (runtime/network! false)
+         (let [answer (harness/block session "print(await gather(library_call(), echo('host')))")]
+           (is (nil? (:error answer)) (str (:error answer)))
+           (is (= "['woken', '<host>']\n" (:stdout answer))))
+         (is (= "refused" (attempt session makes-socket)))
+         (finally (runtime/network! true "") (harness/close-sessions!)))))

@@ -23,12 +23,12 @@
        (catch Exception _ false)))
 
 (def ^:private wheels
-  "One directory containing numpy, a real compiled extension that opens files."
+  "Real compiled and async libraries, installed outside the runtime artifact."
   (delay (let [target
                (temp-dir "vis-distribution")
 
                answer
-               (runtime/pip-install! {:target target} ["numpy"])]
+               (runtime/pip-install! {:target target} ["numpy" "httpx==0.28.1"])]
 
            (when-not (zero? (:exit answer))
              (throw (ex-info "pip could not install the wheel this case measures"
@@ -89,3 +89,29 @@
         (let [answer (block session "import numpy\nnumpy.loadtxt('/etc/hosts')")]
           (is (str/includes? (str (:error answer)) "PermissionError")
               (str "numpy read outside the roots: " (:stdout answer) (:error answer))))))))
+
+(harness/defbuilt-test
+  httpx-async-client-context-test
+  ;; Real AnyIO locks and timers, but a mock transport: no remote service decides
+  ;; whether the sandbox supplies the event loop and cancellation context.
+  (if-not (index-reachable?)
+    (println "SKIPPED httpx-async-client-context-test: pypi.org is not reachable")
+    (let [session (harness/block-session)]
+      (importable! session @wheels)
+      (harness/tool! session "echo" "x" "    return '<' + x + '>'")
+      (let
+        [answer
+         (block
+           session
+           "import httpx, anyio
+async def handler(request):
+    async with anyio.Lock():
+        await anyio.sleep(0.01)
+        return httpx.Response(200, json={'path': request.url.path})
+async def fetch():
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await client.get('https://gateway.example.com/test')
+        return response.json()['path']
+print(await gather(fetch(), echo('host')))")]
+        (is (nil? (:error answer)) (str (:error answer)))
+        (is (= "['/test', '<host>']" (str/trim (:stdout answer))))))))

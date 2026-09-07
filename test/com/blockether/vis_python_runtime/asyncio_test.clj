@@ -3,7 +3,8 @@
 
    The model reaches for `asyncio.run(...)`, `asyncio.gather(...)`, a Queue, a
    Lock — so the import is AST-rewritten onto the runtime's OWN trampoline and
-   its bounded pool instead of a real event loop. What the shim answers has to
+   its bounded pool. Library awaitables also have a real asyncio Task and event
+   loop. What the shim answers has to
    behave like the real thing: tasks and task groups, timeouts that bound the
    WAIT rather than notice the deadline afterwards, and synchronization
    primitives that actually rendezvous between children settling at the same
@@ -50,6 +51,68 @@
   (let [answer (block (tools) code)]
     (is (nil? (:error answer)) code)
     (out answer)))
+
+(harness/defbuilt-test
+  third-party-asyncio-context-test
+  ;; Regression: a real library coroutine needs an actual asyncio Task and loop,
+  ;; not merely Vis' await/gather trampoline. No network or optional wheel needed.
+  (let [session (tools)]
+    (runtime/exec!
+      session
+      "import asyncio as real_asyncio
+async def library_call():
+    loop = real_asyncio.get_running_loop()
+    assert real_asyncio.current_task() is not None
+    future = loop.create_future()
+    loop.call_later(0.01, future.set_result, 'library')
+    return await future")
+    (let
+      [answer
+       (block
+         session
+         "async def combined():
+    value = await library_call()
+    return await echo(value)
+print(await gather(combined(), echo('host')))")]
+      (is (nil? (:error answer)) (str (:error answer)))
+      (is (= "['<library>', '<host>']" (out answer))))))
+
+(harness/defbuilt-test
+  library-awaitable-cleanup-test
+  (is
+    (=
+      "42"
+      (ran
+        "class Ready:
+    def __await__(self): return self
+    def __iter__(self): return self
+    def __next__(self): raise StopIteration(42)
+    def send(self, value): return next(self)
+ready = Ready()
+print(ready)"))))
+
+(harness/defbuilt-test
+  library-future-failure-test
+  (let [session (tools)]
+    (runtime/exec!
+      session
+      "import asyncio as real_asyncio
+async def library_failure():
+    loop = real_asyncio.get_running_loop()
+    future = loop.create_future()
+    loop.call_later(0.01, future.set_exception, ValueError('library failure'))
+    await future")
+    (let
+      [answer
+       (block
+         session
+         "try:
+    await library_failure()
+except ValueError as error:
+    print(str(error))
+print(await echo('after'))")]
+      (is (nil? (:error answer)) (str (:error answer)))
+      (is (= "library failure\n<after>" (out answer))))))
 
 (def ^:private run-src
   "import asyncio

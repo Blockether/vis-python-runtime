@@ -1139,28 +1139,111 @@ def __vis_settle_binding__(name):
     return g[name]
 
 
-def __vis_drive__(coro):
+async def __vis_drive_async__(coro):
+    # Keep Vis' yielded host calls on its bounded pool, but hand library futures
+    # back to a real asyncio Task. Libraries (AnyIO, HTTPX) need both that Task's
+    # cancellation context and the selector loop, not a manually stepped coroutine.
+    import asyncio as std_asyncio
+
     it = coro.__await__() if hasattr(type(coro), "__await__") else coro
     send = None
-    while True:
-        try:
-            y = it.send(send)
-        except StopIteration as e:
-            return e.value
-        try:
-            # Settle runtime calls before sending their values back into the coroutine.
-            if isinstance(y, __vis_Call__):
-                send = __vis_settle_call__(y)
-            elif isinstance(y, __vis_Gather__):
-                send = __vis_settle_gather__(y)
-            else:
-                send = y
-        except BaseException as __vis_exc__:
-            # The tool/gather call RAISED. Hand the exception to the awaitable via
-            # the next send so it re-raises at the coroutine's OWN await point: an
-            # in-block `try/except` can then catch it, and if uncaught it simply
-            # propagates out of the driver just as it did before.
-            send = __vis_Raise__(__vis_wrap_tool_exc__(__vis_exc__))
+    pending_error = None
+    try:
+        while True:
+            try:
+                if pending_error is None:
+                    yielded = it.send(send)
+                else:
+                    error, pending_error = pending_error, None
+                    yielded = it.throw(error)
+            except StopIteration as done:
+                return done.value
+            try:
+                if isinstance(yielded, __vis_Call__):
+                    send = __vis_settle_call__(yielded)
+                elif isinstance(yielded, __vis_Gather__):
+                    send = __vis_settle_gather__(yielded)
+                elif yielded is None:
+                    await std_asyncio.sleep(0)
+                    send = None
+                else:
+                    if std_asyncio.isfuture(yielded):
+                        # Its original __await__ marked it as being awaited. This
+                        # adapter is now the Task awaiting it on the same loop.
+                        yielded._asyncio_future_blocking = False
+                    send = await yielded
+            except BaseException as error:
+                if isinstance(yielded, (__vis_Call__, __vis_Gather__)):
+                    send = __vis_Raise__(__vis_wrap_tool_exc__(error))
+                else:
+                    pending_error = error
+    finally:
+        close = getattr(it, "close", None)
+        if close is not None:
+            close()
+
+
+def __vis_loop_factory__():
+    # A POSIX pipe wakes the selector without creating any socket. Network-off
+    # sessions still need timers and thread-safe callbacks; the C network policy
+    # remains unchanged, including its refusal of anonymous Unix sockets.
+    import asyncio as std_asyncio
+    import os
+
+    class WakeupPipe:
+        def __init__(self, fd):
+            self.fd = fd
+
+        def fileno(self):
+            return self.fd
+
+        def recv(self, size):
+            return os.read(self.fd, size)
+
+        def send(self, data):
+            return os.write(self.fd, data)
+
+        def close(self):
+            fd, self.fd = self.fd, -1
+            if fd >= 0:
+                os.close(fd)
+
+    class Loop(std_asyncio.SelectorEventLoop):
+        def _make_self_pipe(self):
+            reader, writer = os.pipe()
+            try:
+                os.set_blocking(reader, False)
+                os.set_blocking(writer, False)
+            except BaseException:
+                os.close(reader)
+                os.close(writer)
+                raise
+            self._ssock = WakeupPipe(reader)
+            self._csock = WakeupPipe(writer)
+            self._internal_fds += 1
+            self._add_reader(reader, self._read_from_self)
+
+    return Loop()
+
+
+def __vis_drive__(coro):
+    import asyncio as std_asyncio
+
+    # A synchronous auto-settle or the sandbox's asyncio.run can be nested inside
+    # the synthetic block coroutine. Its work owns a separate, short-lived loop;
+    # restore the suspended caller's loop even on cancellation or failure.
+    previous = std_asyncio.events._get_running_loop()
+    previous_task = std_asyncio.current_task(previous) if previous is not None else None
+    if previous_task is not None:
+        std_asyncio.tasks._leave_task(previous, previous_task)
+    try:
+        std_asyncio.events._set_running_loop(None)
+        with std_asyncio.Runner(loop_factory=__vis_loop_factory__) as runner:
+            return runner.run(__vis_drive_async__(coro))
+    finally:
+        std_asyncio.events._set_running_loop(previous)
+        if previous_task is not None:
+            std_asyncio.tasks._enter_task(previous, previous_task)
 
 
 def __vis_is_user_file__(name):

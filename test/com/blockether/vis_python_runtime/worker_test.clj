@@ -42,8 +42,9 @@
 
 (defn- jvm-argv
   "Run the worker CLASS on this JVM, from this suite's own classpath."
-  [socket]
+  [socket home]
   [(str (System/getProperty "java.home") File/separator "bin" File/separator "java")
+   (str "-Duser.home=" home) (str "-XX:ErrorFile=" home "/hs_err_pid%p.log")
    "--enable-native-access=ALL-UNNAMED" "-cp" (System/getProperty "java.class.path")
    "com.blockether.vispython.Worker" socket])
 
@@ -51,8 +52,8 @@
   "Run the native image `worker-image` built, when there is one."
   []
   (when-let [executable (runtime/resolve-worker)]
-    (fn [socket]
-      [executable socket])))
+    (fn [socket home]
+      [executable (str "-Duser.home=" home) socket])))
 
 (defn- start!
   "Listen on a fresh unix socket, start the worker with `argv` and answer the
@@ -61,7 +62,10 @@
    `/tmp`, not the JDK's temp directory: a unix socket path is capped at 104
    bytes on macOS and the per-user temp directory alone spends half of that."
   [argv]
-  (let [path
+  (let [home
+        (harness/temp-dir "vis-worker-home")
+
+        path
         (str "/tmp/vis-worker-" (System/nanoTime) ".sock")
 
         server
@@ -72,7 +76,7 @@
         (File/createTempFile "vis-worker" ".log")
 
         builder
-        (doto (ProcessBuilder. ^java.util.List (argv path))
+        (doto (ProcessBuilder. ^java.util.List (argv path home))
           (.redirectErrorStream true)
           (.redirectOutput log))
 
@@ -90,7 +94,7 @@
 
     (when (= ::timeout channel)
       (.destroyForcibly process)
-      (throw (ex-info "the worker never connected" {:argv (argv path) :log (slurp log)})))
+      (throw (ex-info "the worker never connected" {:argv (argv path home) :log (slurp log)})))
     (.close server)
     (Files/deleteIfExists (Path/of path (make-array String 0)))
     {:process process
@@ -154,8 +158,8 @@
 ")
 
         worker
-        (start! (fn [socket]
-                  (conj (vec (argv socket)) source-dir)))
+        (start! (fn [socket home]
+                  (conj (vec (argv socket home)) source-dir)))
 
         session
         "worker-test"
@@ -167,6 +171,8 @@
       (testing "the interpreter answers over the wire"
         (value! worker "install-runtime" "session" session)
         (is (= "2" (value! worker "run" "session" session "code" "1 + 1"))))
+      (testing "local async and host calls need no network capability"
+        (value! worker "network" "session" session "code" "{\"enabled\":false}"))
       (testing "host source directories are installed before serving interpreter requests"
         (value! worker "exec" "session" session "code" "import worker_host_fixture")
         (is (= "73"
@@ -182,6 +188,26 @@
                 (value! worker "run-block" "session" session "code" "print(await echo('hi'))"))]
           (is (nil? (get answer "error")) (str (get answer "error")))
           (is (= "<hi>" (str/trim (str (get answer "stdout")))))))
+      (testing "a library Future runs on a real asyncio Task beside a host call"
+        (value!
+          worker
+          "exec"
+          "session" session
+          "code"
+          "import asyncio as real_asyncio
+async def library_call():
+    loop = real_asyncio.get_running_loop()
+    assert real_asyncio.current_task() is not None
+    future = loop.create_future()
+    loop.call_later(0.01, future.set_result, 'library')
+    return await future")
+        (let [answer (json/read-str (value! worker
+                                            "run-block"
+                                            "session" session
+                                            "code"
+                                            "print(await gather(library_call(), echo('host')))"))]
+          (is (nil? (get answer "error")) (str (get answer "error")))
+          (is (= "['library', '<host>']" (str/trim (str (get answer "stdout")))))))
       (testing "a tool the parent refuses is a catchable failure in the block"
         (let [answer (json/read-str (value! worker
                                             "run-block"
