@@ -23,28 +23,36 @@ real asyncio Futures, HTTPX/AnyIO and supported compiled wheels remain covered.
    - Data: `async_runtime.py`, asyncio/distribution/network tests and shared worker exercise.
    - Acceptance criteria: formatting/lint, full JVM suite and freshly built native
      worker pass; the platform archive passes the existing validation script.
-   - Unknowns: other release platforms; local JVM/native tests and archive validation pass.
+   - Unknowns: none; the local verdict and all four CI platforms pass.
 2. **Publish 0.5.1**
    - Rationale: consumers need immutable release assets matching the source pin.
    - Data: `VIS_PYTHON_VERSION`, GitHub release workflow and configured git identity.
    - Acceptance criteria: scoped commit on main, matching annotated tag, successful
      release workflow and JVM jar plus all four platform archives.
-   - Unknowns: CI and release asset verification.
+   - Unknowns: none; the release is public with five assets, and the downloaded
+     macOS arm64 worker passes its 66 boundary assertions.
 3. **Integrate into Vis**
    - Rationale: the runtime fix and host dead-worker recovery must work together.
    - Data: Vis `deps.edn`, `python/worker.clj`, `python/env.clj` and affected tests.
    - Acceptance criteria: release commit pinned; affected tests, lint and editing
      E2E pass; only scoped Vis changes committed and pushed.
-   - Unknowns: published-pin and E2E verdicts; all 662 local consumer tests pass.
-     No running gateway restart is authorized.
+   - Unknowns: repository-wide Vis CI is separate from the completed affected tests.
+     No running gateway was restarted.
 
 ## Plan state
 
-Reconciled with upstream 0.5.0 and selected 0.5.1. The full runtime suite passes
-162 tests / 768 assertions, including a rebuilt GraalVM CE 25.3.4.1 worker and
-network-off async callbacks. Formatting, lint and the local platform archive pass.
-Consumer tests exposed the event loop's socket-based wakeup; a POSIX pipe fixes
-that without changing C network policy. All 662 combined Vis consumer tests pass.
-Editing E2E and cross-platform CI are pending before tag publication. The task
-stash remains as a local backup; unrelated Vis changes are excluded. `vtracer`
-remains a known limitation.
+Completed. Runtime [0.5.1](https://github.com/Blockether/vis-python-runtime/releases/tag/v0.5.1)
+is published from `23d20035e334e499fd3ea7273d74f3e6bc1fac0c`, with the JVM jar
+and all four platform archives. Runtime CI run `34151000350` and release run
+`34151526822` passed every job. The full local suite passed 162 tests / 768
+assertions; formatting, lint and native archive validation also passed.
+
+The published macOS arm64 worker reports 0.5.1 and passes 3 tests / 66 assertions.
+Vis pins the release and includes dead-worker recovery in
+`aef9b60f7acd28f7f858d59d4ab6f6be0685b829`, pushed to main. All 662 affected tests
+and both editing E2E scenarios pass against the published pin, not a local/root
+override. The asyncio wakeup uses a POSIX pipe without changing C network policy.
+
+Unrelated Vis work was excluded. The local task stash is retained as a backup.
+No product Vis release or running gateway restart was performed. `vtracer` remains
+a known third-party limitation, explicitly documented in the release notes.
