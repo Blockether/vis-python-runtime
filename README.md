@@ -44,11 +44,11 @@ The embedded bridge, vendored interpreter, confinement, host calls, pip-backed
 packages and per-platform packaging are implemented. Linux packaging also ships
 the process-level enforcer required to contain native extension modules.
 
-Successful package installation does not guarantee compatibility with a confined
-worker. Confinement currently refuses native calls through `ctypes`; SciPy's
-low-level callback initialization depends on those calls and is not supported in
-that mode. Test a representative operation in the worker, not just an import in
-an unconfined interpreter.
+Confinement refuses native calls through `ctypes`. Trusted extensions that need
+those calls, including SciPy's callback initialization, must run in a separate
+unconfined worker. They must not share interpreter memory or host-call authority
+with model code. Object results cross as public data, not interpreter references.
+Test representative operations through the worker boundary, not just installation.
 
 ## License
 

@@ -35,38 +35,6 @@ SANDBOX_MODULE = os.environ.get("VIS_PYTHON_SANDBOX_MODULE", "async_runtime")
 #: executed, so importing it once per PROCESS equips every session.
 AUTO_IMPORTS_MODULE = "auto_imports"
 
-#: Live extension results that stay Python objects while one sandbox tool call
-#: makes its JSON round trip through the host. The extension and sandbox are
-#: namespaces in this same CPython process; only the control path leaves it.
-_EXTENSION_OBJECTS = {}
-_EXTENSION_OBJECT_SEQ = 0
-_EXTENSION_OBJECT_LIMIT = 4096
-
-
-def _hold_extension_object(value):
-    """Keep ``value`` until the receiving sandbox takes it by opaque reference."""
-    global _EXTENSION_OBJECT_SEQ
-    _EXTENSION_OBJECT_SEQ += 1
-    ref = str(_EXTENSION_OBJECT_SEQ)
-    _EXTENSION_OBJECTS[ref] = value
-    while len(_EXTENSION_OBJECTS) > _EXTENSION_OBJECT_LIMIT:
-        _EXTENSION_OBJECTS.pop(next(iter(_EXTENSION_OBJECTS)))
-    return ref
-
-
-def _resolve_extension_object(ref):
-    """Resolve a retained extension result to its exact CPython object."""
-    try:
-        return _EXTENSION_OBJECTS[str(ref)]
-    except KeyError as exc:
-        raise RuntimeError("extension result object is no longer available") from exc
-
-
-def _clear_extension_objects():
-    """Release result transfers after the sandbox block has received them."""
-    _EXTENSION_OBJECTS.clear()
-
-
 _MODULE_CODE = {}
 
 
@@ -451,8 +419,6 @@ def run_block(source, namespace):
             runner(source)
         except BaseException as exc:
             error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-        finally:
-            _clear_extension_objects()
     return {"stdout": stream.getvalue(), "error": error}
 
 

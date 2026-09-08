@@ -841,17 +841,26 @@ __vis_paged_tools__ = frozenset(("grep", "find_files", "find"))
 
 
 def __vis_typed_result__(__vis_d__):
-    # An extension tool can retain its result in this CPython process while the
-    # call's data envelope makes the round trip through the host. Take that exact
-    # object back here; no language-interop proxy exists in the CPython runtime.
+    # Trusted extension objects live in another process. Rebuild only their
+    # public data, never their methods, class imports or interpreter references.
     if isinstance(__vis_d__, __VisDict__):
         return __vis_d__
-    if "__vis_object_ref__" in __vis_d__:
-        import vis_runtime as __vis_runtime__
+    if isinstance(__vis_d__.get("__vis_object__"), str) and isinstance(
+        __vis_d__.get("__vis_attrs__"), dict
+    ):
+        import dataclasses as __vis_dataclasses__
 
-        return __vis_runtime__._resolve_extension_object(
-            __vis_d__["__vis_object_ref__"]
+        __vis_attrs__ = {
+            __k__: __vis_typed_value__(__v__)
+            for __k__, __v__ in __vis_d__["__vis_attrs__"].items()
+        }
+        __vis_cls__ = __vis_dataclasses__.make_dataclass(
+            __vis_d__["__vis_object__"],
+            [(name, object) for name in __vis_attrs__],
+            frozen=True,
+            slots=True,
         )
+        return __vis_cls__(**__vis_attrs__)
     __vis_t__ = {
         __k__: __vis_typed_value__(__v__) for __k__, __v__ in __vis_d__.items()
     }

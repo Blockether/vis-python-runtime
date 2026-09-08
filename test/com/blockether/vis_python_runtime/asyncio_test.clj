@@ -586,42 +586,39 @@ except ValueError as exc:
                 "\"<c>\", 42, [\"<x>\", \"<y>\"]]")
            (ran to-thread-src)))))
 
-;; Regression, issue #166: an extension's typed result crossed as a synthetic
-;; placeholder instead of remaining the exact CPython object.
+;; Regression, issue #166: object results retain their public field access, but
+;; trusted extension methods and object identity must not cross into the sandbox.
 (harness/defbuilt-test
   dotted-tool-namespace-test
-  (testing "a dotted host tool returns the exact object retained by another namespace"
-    (let [producer
-          (harness/block-session)
+  (testing "dotted tools return frozen data records without sharing extension objects"
+    (let
+      [session
+       (harness/tool-session {"ledger.echo" (fn [[x]]
+                                              (str "<" x ">"))
+                              "ledger.status" (fn [[state]]
+                                                {"__vis_object__" "BuildStatus"
+                                                 "__vis_attrs__" {"state" state
+                                                                  "child" {"__vis_object__" "Job"
+                                                                           "__vis_attrs__"
+                                                                           {"number" 42}}}})})
 
-          _
-          (runtime/exec!
-            producer
-            (str "class BuildStatus:\n" "    def __init__(self, state): self.state = state\n"
-                 "    def label(self): return self.state.upper()\n" "item = BuildStatus('ready')"))
+       answer
+       (block
+         session
+         (str
+           "import dataclasses\n" "item = await ledger.status('ready')\n"
+           "again = await ledger.status('again')\n" "print(await ledger.echo('entry'))\n"
+           "print(dir(ledger))\nprint(ledger.echo.__name__)\n"
+           "print(type(item).__name__, item.state, type(item.child).__name__, item.child.number)\n"
+           "print(dataclasses.is_dataclass(item), hasattr(item, 'label'), item is again)\n"
+           "try:\n    item.state = 'changed'\n"
+           "except dataclasses.FrozenInstanceError:\n    print('frozen')\n"
+           "print([value.state for value in await gather(ledger.status('one'), ledger.status('two'))])"))]
 
-          ref
-          (runtime/eval-str producer "__import__('vis_runtime')._hold_extension_object(item)")
-
-          session
-          (harness/tool-session {"ledger.echo" (fn [[x]]
-                                                 (str "<" x ">"))
-                                 "ledger.status" (fn [[_]]
-                                                   {"__vis_object_ref__" ref})})
-
-          answer
-          (block session
-                 (str "item = await ledger.status('ready')\n"
-                      "again = await ledger.status('again')\n"
-                      "print(await ledger.echo('entry'))\n" "print(dir(ledger))\n"
-                      "print(ledger.echo.__name__)\n"
-                      "print(type(item).__name__, item.state, item.label(), item is again)"))]
-
-      (is (nil? (:error answer)))
-      (is (= (str "<entry>\n['echo', 'status']\nledger.echo\n" "BuildStatus ready READY True")
-             (out answer)))
-      (is (= "0"
-             (runtime/eval-str producer "len(__import__('vis_runtime')._EXTENSION_OBJECTS)"))))))
+      (is (nil? (:error answer)) (pr-str answer))
+      (is (= (str "<entry>\n['echo', 'status']\nledger.echo\n"
+                  "BuildStatus ready Job 42\nTrue False False\nfrozen\n['one', 'two']")
+             (out answer))))))
 
 ;; Regression, issue #171: a dotted tool accepted only one separator, and its
 ;; namespace printed CPython's internal class and memory address.
