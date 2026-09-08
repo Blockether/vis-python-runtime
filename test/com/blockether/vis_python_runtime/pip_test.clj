@@ -70,6 +70,149 @@
                  session
                  (str "str(__import__('sys').path.count(" (pr-str packages) "))"))))))))
 
+(defn- with-editable-site
+  "Isolate package-site regressions from the user's installed distributions."
+  [f]
+  (let [root
+        (io/file (temp-dir "vis-editable"))
+
+        packages
+        (doto (io/file root "packages") .mkdirs)
+
+        source
+        (doto (io/file root "source with spaces") .mkdirs)
+
+        session
+        (str "editable-" (System/nanoTime))]
+
+    (try (runtime/initialize! {:packages (.getCanonicalPath packages)})
+         (runtime/confine! [(str root)] [(str root)] "fixture roots only")
+         (f session packages source)
+         (finally (runtime/confine! [] [] "")
+                  (doseq [file (reverse (file-seq root))]
+                    (io/delete-file file true))
+                  (runtime/exec! session
+                                 (str "import package_paths, sys\npackage_paths.refresh("
+                                      (pr-str (str packages))
+                                      ", reload=True)\nsys.path[:] = [p for p in sys.path if p != "
+                                      (pr-str (str packages))
+                                      "]\n" "sys.modules.pop('vis_editable_hook', None)\n"))
+                  (runtime/initialize!)
+                  (runtime/close-session! (str session "-next"))
+                  (runtime/close-session! session)))))
+
+(harness/defbuilt-test
+  editable-pth-is-importable-test
+  ;; Blockether/vis#175: a site path alone does not activate an editable install.
+  (with-editable-site
+    (fn [session packages source]
+      (let [module
+            (io/file source "vis_editable_fixture.py")
+
+            refresh
+            (str "import package_paths; package_paths.refresh("
+                 (pr-str (str packages))
+                 ", reload=True)")]
+
+        (spit module "VALUE = 175\n")
+        (spit (io/file packages "fixture.pth") (str "# editable source\n\n" source "\n"))
+        (runtime/install-runtime! session)
+        (runtime/exec!
+          session
+          "import vis_editable_fixture, json\noriginal_json = json\nimport py_compile\npy_compile.compile(vis_editable_fixture.__file__)\n")
+        (is (= "175" (runtime/eval-str session "str(vis_editable_fixture.VALUE)")))
+        (is (= (str module) (runtime/eval-str session "vis_editable_fixture.__file__")))
+        (let [mtime (.lastModified module)]
+          (spit module "VALUE = 176\n")
+          (.setLastModified module mtime))
+        (runtime/install-runtime! (str session "-next"))
+        (is (= "175" (runtime/eval-str session "str(__import__('vis_editable_fixture').VALUE)"))
+            "Another namespace bootstrap must not silently reload imported source")
+        (runtime/exec! session refresh)
+        (is (= "176" (runtime/eval-str session "str(__import__('vis_editable_fixture').VALUE)"))
+            "Reload bypasses same-size, same-timestamp bytecode")
+        (is (= "True" (runtime/eval-str session "str(original_json is __import__('json'))"))
+            "Ordinary dependencies retain module identity")))))
+
+(harness/defbuilt-test
+  editable-import-hook-test
+  (with-editable-site
+    (fn [session packages source]
+      (let [module
+            (io/file source "vis_editable_hooked.py")
+
+            metadata
+            (io/file packages "fixture-1.dist-info/direct_url.json")]
+
+        (spit module "VALUE = 41\n")
+        (io/make-parents metadata)
+        (spit metadata
+              (str "{\"dir_info\":{\"editable\":true},\"url\":" (pr-str (str (.toURI source))) "}"))
+        (spit (io/file packages "vis_editable_hook.py")
+              (str "import sys\nfrom importlib.util import spec_from_file_location\n"
+                   "calls = 0\nclass Finder:\n"
+                   "    @classmethod\n    def find_spec(cls, fullname, path=None, target=None):\n"
+                   "        if fullname == 'vis_editable_hooked':\n"
+                   "            return spec_from_file_location(fullname, "
+                   (pr-str (str module))
+                   ")\n"
+                   "def install():\n    global calls\n    calls += 1\n"
+                   "    if Finder not in sys.meta_path:\n        sys.meta_path.append(Finder)\n"))
+        (spit (io/file packages "fixture.pth")
+              "import vis_editable_hook; vis_editable_hook.install()\n")
+        (doseq [s [session (str session "-next")]]
+          (runtime/install-runtime! s))
+        (is (= "41" (runtime/eval-str session "str(__import__('vis_editable_hooked').VALUE)")))
+        (is (= "1" (runtime/eval-str session "str(__import__('vis_editable_hook').calls)"))
+            "Unchanged .pth hooks execute once per interpreter")
+        (let [mtime (.lastModified module)]
+          (spit module "VALUE = 42\n")
+          (.setLastModified module mtime))
+        (runtime/exec! session
+                       (str "import package_paths; package_paths.refresh("
+                            (pr-str (str packages))
+                            ", reload=True)"))
+        (is (= "42" (runtime/eval-str session "str(__import__('vis_editable_hooked').VALUE)")))
+        (io/delete-file (io/file packages "fixture.pth"))
+        (runtime/exec! session
+                       (str "package_paths.refresh(" (pr-str (str packages)) ", reload=True)"))
+        (is (= "False"
+               (runtime/eval-str
+                 session
+                 "str(__import__('vis_editable_hook').Finder in __import__('sys').meta_path)")))))))
+
+(harness/defbuilt-test
+  newly-installed-pth-is-discovered-test
+  (with-editable-site
+    (fn [session packages source]
+      (runtime/install-runtime! session)
+      (spit (io/file source "vis_editable_later.py") "VALUE = 7\n")
+      (spit (io/file packages "later.pth") (str source "\n"))
+      (runtime/install-runtime! (str session "-next"))
+      (is (= "7" (runtime/eval-str session "str(__import__('vis_editable_later').VALUE)")))
+      (io/delete-file (io/file packages "later.pth"))
+      (runtime/exec! session
+                     (str "import package_paths; package_paths.refresh("
+                          (pr-str (str packages))
+                          ", reload=True)"))
+      (is (= "False"
+             (runtime/eval-str
+               session
+               (str "str(" (pr-str (str source)) " in __import__('sys').path)")))))))
+
+(harness/defbuilt-test
+  editable-pth-keeps-filesystem-policy-test
+  (with-editable-site
+    (fn [session packages source]
+      (spit (io/file source "vis_editable_denied.py") "VALUE = 1\n")
+      (spit (io/file packages "denied.pth") (str source "\n"))
+      (runtime/confine! [(str packages)] [(str packages)] "fixture roots only")
+      (runtime/install-runtime! session)
+      (is (thrown-with-msg? com.blockether.vispython.VisPythonException
+                            #"PermissionError|ModuleNotFoundError"
+                            (runtime/eval-str session "__import__('vis_editable_denied')"))
+          "An editable path does not grant access outside the host's readable roots"))))
+
 (deftest trust-comes-from-the-jvm-test
   (let [anchors
         (Trust/trustAnchors)

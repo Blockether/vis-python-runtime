@@ -280,6 +280,81 @@ async def library_call():
         (is (zero? (.exitValue ^Process (:process worker))) (slurp (:log worker))))
       (finally (.destroyForcibly ^Process (:process worker)) (.delete ^File (:log worker))))))
 
+(defn- exercise-editable!
+  "The same source import and reload through JVM and native worker boundaries."
+  [argv & [jailed?]]
+  (let [fixture
+        (atom nil)
+
+        worker
+        (start! (fn [socket home]
+                  (let [packages
+                        (doto (io/file home ".vis/python/packages") .mkdirs)
+
+                        source
+                        (doto (io/file home "project/src") .mkdirs)
+
+                        module
+                        (io/file source "vis_editable_worker.py")]
+
+                    (spit module "VALUE = 41\n")
+                    (spit (io/file packages "fixture.pth") (str source "\n"))
+                    (reset! fixture {:home home :packages packages :module module})
+                    (argv socket home)))
+                (when jailed? {:read-write [] :read-only []}))
+
+        {:keys [home packages module]}
+        @fixture
+
+        session
+        "editable-worker"]
+
+    (try (value! worker
+                 "confine"
+                 "session" session
+                 "code" (json/write-str
+                          {"read" [home] "write" [home] "refusal" "fixture roots only"}))
+         (value! worker "install-runtime" "session" session)
+         (is (= "41"
+                (value! worker
+                        "eval"
+                        "session" session
+                        "code" "str(__import__('vis_editable_worker').VALUE)")))
+         (is (= (str module)
+                (value! worker
+                        "eval"
+                        "session" session
+                        "code" "__import__('vis_editable_worker').__file__")))
+         (let [mtime (.lastModified ^File module)]
+           (spit module "VALUE = 42\n")
+           (.setLastModified ^File module mtime))
+         (value! worker
+                 "exec"
+                 "session" session
+                 "code" (str "import package_paths; package_paths.refresh("
+                             (pr-str (str packages))
+                             ", reload=True)"))
+         (is (= "42"
+                (value! worker
+                        "eval"
+                        "session" session
+                        "code" "str(__import__('vis_editable_worker').VALUE)")))
+         (finally (.close ^SocketChannel (:channel worker))
+                  (when-not (.waitFor ^Process (:process worker) 5 TimeUnit/SECONDS)
+                    (.destroyForcibly ^Process (:process worker)))
+                  (.delete ^File (:log worker))
+                  (doseq [file (reverse (file-seq (io/file home)))]
+                    (io/delete-file file true))))))
+
+(harness/defbuilt-test editable-worker-class-test (exercise-editable! jvm-argv))
+
+(harness/defbuilt-test editable-worker-native-test
+                       (if-let [argv (image-argv)]
+                         (doseq [jailed? [false true]]
+                           (exercise-editable! argv jailed?))
+                         (println
+                           "SKIP editable-worker-native-test - run clojure -T:build worker-image")))
+
 (harness/defbuilt-test worker-class-on-a-jvm-test (exercise! jvm-argv))
 
 (harness/defbuilt-test worker-native-image-test

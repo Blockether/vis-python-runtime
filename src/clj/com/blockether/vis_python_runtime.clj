@@ -313,7 +313,9 @@
   ([session code] (Interpreter/runBlock session code)))
 
 (defn install-runtime!
-  "Equip `session` with the sandbox runtime, answering how many names it got."
+  "Equip `session` with the sandbox runtime and activate installed .pth files.
+   The host must apply its process policy first; editable source paths do not grant
+   additional filesystem access. Returns the number of installed runtime names."
   ([] (install-runtime! default-session))
   ([session] (Interpreter/installRuntime session)))
 

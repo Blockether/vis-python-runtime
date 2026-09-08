@@ -53,6 +53,7 @@ public final class Interpreter {
   /** The namespace a call runs in when the caller names none. */
   public static final String DEFAULT_SESSION = "__main__";
 
+  private static volatile String packageDirectory;
   /**
    * Ask {@link #initialize} to resolve a location itself. Absence and OFF are
    * different answers - null means "no python home", "no cache", "no packages" -
@@ -269,6 +270,7 @@ public final class Interpreter {
       }
       invoke("vispython_exec", DEFAULT_SESSION, wiring.toString());
     }
+    packageDirectory = target;
     return new Startup(library().path(), roots, home, cache, target);
   }
 
@@ -525,7 +527,9 @@ public final class Interpreter {
    * host call made from it carries that name and one host can serve many.
    */
   public static long installRuntime(String session) {
-    exec(session, "import vis_runtime");
+    // Host policy must precede .pth execution; initialize() only wires the site directory.
+    exec(session, "import package_paths; package_paths.refresh("
+        + (packageDirectory == null ? "None" : literal(packageDirectory)) + ")\nimport vis_runtime");
     return Long.parseLong(
         eval(session, "vis_runtime.install(globals(), " + literal(session) + ")"));
   }
