@@ -101,6 +101,19 @@
                   (runtime/close-session! (str session "-next"))
                   (runtime/close-session! session)))))
 
+(harness/defbuilt-test absent-package-site-remains-idempotent-test
+                       ;; Blockether/vis#175: site.addsitedir must not duplicate a not-yet-created target.
+                       (with-editable-site
+                         (fn [session packages _source]
+                           (io/delete-file packages)
+                           (runtime/install-runtime! session)
+                           (runtime/initialize! {:packages (.getCanonicalPath packages)})
+                           (is (= "1"
+                                  (runtime/eval-str session
+                                                    (str "str(__import__('sys').path.count("
+                                                         (pr-str (.getCanonicalPath packages))
+                                                         "))")))))))
+
 (harness/defbuilt-test
   editable-pth-is-importable-test
   ;; Blockether/vis#175: a site path alone does not activate an editable install.

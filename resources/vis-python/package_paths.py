@@ -74,7 +74,11 @@ def refresh(packages, *, reload=False):
             ):
                 sequence[:] = [item for item in sequence if item not in added]
         before = [list(sys.path), list(sys.meta_path), list(sys.path_hooks)]
-        site.addsitedir(str(packages))
+        # site ignores nonexistent sys.path entries when constructing its own set.
+        known_paths = {
+            os.path.normcase(os.path.abspath(p)) for p in sys.path if isinstance(p, str)
+        }
+        site.addsitedir(str(packages), known_paths)
         added = [
             [item for item in sequence if item not in original]
             for sequence, original in zip(
