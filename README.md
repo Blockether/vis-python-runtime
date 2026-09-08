@@ -6,7 +6,7 @@ the JDK Foreign Function & Memory API.
 ## Why
 
 A vendored CPython behind a small C ABI gives Vis real reference counting, the
-full C extension ecosystem and CPython's own speed without exposing the raw
+C extension support and CPython's own speed without exposing the raw
 CPython API to the JVM.
 
 ## Shape
@@ -43,6 +43,12 @@ uses `PATH` or requires a separately installed enforcer.
 The embedded bridge, vendored interpreter, confinement, host calls, pip-backed
 packages and per-platform packaging are implemented. Linux packaging also ships
 the process-level enforcer required to contain native extension modules.
+
+Successful package installation does not guarantee compatibility with a confined
+worker. Confinement currently refuses native calls through `ctypes`; SciPy's
+low-level callback initialization depends on those calls and is not supported in
+that mode. Test a representative operation in the worker, not just an import in
+an unconfined interpreter.
 
 ## License
 

@@ -5,7 +5,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [com.blockether.vis-python-runtime :as runtime])
-  (:import [com.blockether.vispython Bubblewrap JailPolicy$Egress Seatbelt]
+  (:import [com.blockether.vispython Bubblewrap JailPolicy JailPolicy$Egress Seatbelt]
            [java.net InetAddress ServerSocket]
            [java.nio.file Files Path]
            [java.nio.file.attribute FileAttribute]
@@ -27,7 +27,7 @@
 
 (defn- run-process
   [command opts]
-  (let [p
+  (let [^Process p
         (runtime/spawn-process! command opts)
 
         out
@@ -50,9 +50,10 @@
 
 (deftest policy-value-test
   (testing "lists are distinct, blank-free and never nil"
-    (let [p (runtime/jail-policy {:read-write ["/a" "" "/a" nil]
-                                  :unix-connect ["/tmp/control.sock" "" "/tmp/control.sock"]
-                                  :inbound [80 80 443]})]
+    (let [^JailPolicy p (runtime/jail-policy {:read-write ["/a" "" "/a" nil]
+                                              :unix-connect ["/tmp/control.sock" ""
+                                                             "/tmp/control.sock"]
+                                              :inbound [80 80 443]})]
       (is (= ["/a"] (.readWrite p)))
       (is (= [] (.readOnly p)))
       (is (= ["/tmp/control.sock"] (.unixConnect p)))
@@ -66,6 +67,25 @@
     (is (thrown? IllegalArgumentException (runtime/jail-policy {:inbound [70000]})))
     (is (thrown? IllegalArgumentException (runtime/jail-policy {:network {:proxy 0}})))))
 
+(deftest native-worker-entropy-test
+  (if-let [worker (runtime/resolve-worker)]
+    (let [root (temp-dir)
+          library (io/file (:path (runtime/resolve-library)))]
+
+      (try
+        ;; Opening a Unix socket initializes the JDK entropy provider before connect.
+        ;; A nonexistent socket must fail at connect, not during provider startup.
+        (let [result (run-process [worker (str (.resolve root "missing.sock"))]
+                                  (options root
+                                           {:policy {:read-write [(str root)]
+                                                     :read-only [(str (.getParentFile
+                                                                        library))]}}))]
+          (is (= 1 (:exit result)) (pr-str result))
+          (is (str/includes? (:err result) "No such file or directory") (pr-str result))
+          (is (not (str/includes? (:err result) "NativePRNG")) (pr-str result)))
+        (finally (delete-tree root))))
+    (println "SKIP native-worker-entropy-test - build the native worker first")))
+
 (deftest seatbelt-compiler-test
   (let [root
         (temp-dir)
@@ -77,7 +97,9 @@
            (let [p (compile {})]
              (is (str/starts-with? p "(version 1)(import \"system.sb\")(deny default)"))
              (is (str/includes? p "(allow ipc-posix-sem)"))
-             (is (str/includes? p (str "(allow file-read* file-write*")))
+             (is (str/includes? p "(literal \"/dev\")"))
+             (is (not (str/includes? p "(subpath \"/dev\")")))
+             (is (str/includes? p "(allow file-read* file-write*"))
              (is (str/includes? p (str "(subpath \"" root "\")")))))
          (testing "the deny lists come after the allows so they win"
            (let [sub
@@ -288,8 +310,8 @@
     (let [root (temp-dir)]
       (try (let [port (with-open [s (loopback-server)]
                         (.getLocalPort s))
-                 p (runtime/spawn-process! ["/usr/bin/nc" "-l" "127.0.0.1" (str port)]
-                                           (options root))
+                 ^Process p (runtime/spawn-process! ["/usr/bin/nc" "-l" "127.0.0.1" (str port)]
+                                                    (options root))
                  connected (loop [n 50]
                              (let [ok (try (with-open [s (java.net.Socket. "127.0.0.1" (int port))]
                                              (.isConnected s))
@@ -305,9 +327,10 @@
 
 (deftest pty-round-trip-test
   (let [root (temp-dir)]
-    (try (let [p (runtime/spawn-process!
-                   ["/bin/sh" "-c" "stty size; IFS= read -r value; printf 'got:%s\n' \"$value\""]
-                   (options root {:pty? true :merge-stderr? true :rows 31 :columns 97}))]
+    (try (let [^Process p (runtime/spawn-process!
+                            ["/bin/sh" "-c"
+                             "stty size; IFS= read -r value; printf 'got:%s\n' \"$value\""]
+                            (options root {:pty? true :merge-stderr? true :rows 31 :columns 97}))]
            (.write (.getOutputStream p) (.getBytes "hello\n" "UTF-8"))
            (.flush (.getOutputStream p))
            (is (= 0 (.waitFor p)))

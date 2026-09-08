@@ -20,8 +20,9 @@ public final class Seatbelt {
   static final List<String> KEYCHAIN_SERVICES = List.of("com.apple.SecurityServer",
       "com.apple.ocspd", "com.apple.trustd.agent");
   static final List<String> KEYCHAIN_READ_ROOTS = List.of("~/Library/Keychains", "/Library/Keychains");
+  // The JDK canonicalizes entropy-device paths before opening the allowed device files.
   private static final List<String> METADATA_DIRS = List.of("/", "/Users", "/Volumes", "/private",
-      "/opt", "/etc", "/var", "/tmp", "/home");
+      "/opt", "/etc", "/var", "/tmp", "/home", "/dev");
 
   private Seatbelt() {}
 

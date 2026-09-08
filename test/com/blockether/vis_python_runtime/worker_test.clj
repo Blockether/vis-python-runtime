@@ -5,10 +5,11 @@
    worker must get right is the WIRE — one JSON line per message, requests from
    the parent, `host` requests back — and its life: connect first, serve until
    the parent hangs up, then leave. The cases drive a real worker over a real
-   unix socket, the way vis does, and the same drive runs twice: against the
-   class on this JVM, and against the native image when `worker-image` has
-   built one beside the cdylib."
-  (:require [clojure.data.json :as json]
+   unix socket, the way vis does. The same drive runs against the JVM class and,
+   when `worker-image` has built one beside the cdylib, the native image both
+   with and without the OS jail."
+  (:require [clojure.java.io :as io]
+            [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [com.blockether.vis-python-runtime :as runtime]
@@ -61,7 +62,7 @@
 
    `/tmp`, not the JDK's temp directory: a unix socket path is capped at 104
    bytes on macOS and the per-user temp directory alone spends half of that."
-  [argv]
+  [argv & [policy]]
   (let [home
         (harness/temp-dir "vis-worker-home")
 
@@ -84,7 +85,30 @@
         (.put (.environment builder) Native/NATIVE_PATH_ENV (:path (runtime/resolve-library)))
 
         process
-        (.start builder)
+        (if policy
+          (let [library
+                (io/file (:path (runtime/resolve-library)))
+
+                child
+                (runtime/spawn-process!
+                  (argv path home)
+                  {:directory home
+                   :environment {Native/NATIVE_PATH_ENV (str library) "HOME" home "TMPDIR" home}
+                   :policy (-> policy
+                               (update :read-write conj home)
+                               (update :read-only conj (str (.getParentFile library)))
+                               (assoc :unix-connect [path]))
+                   :merge-stderr? true})]
+
+            (future (with-open [input
+                                (.getInputStream child)
+
+                                output
+                                (io/output-stream log)]
+
+                      (io/copy input output)))
+            child)
+          (.start builder))
 
         accept
         (future (.accept server))
@@ -149,7 +173,7 @@
 
 (defn- exercise!
   "The whole drive, against whatever `argv` starts."
-  [argv]
+  [argv & [jailed?]]
   (let [source-dir
         (harness/temp-dir "vis-worker-source")
 
@@ -157,15 +181,16 @@
         (spit (str source-dir "/worker_host_fixture.py") "value = 73
 ")
 
+        root
+        (harness/temp-dir "vis-worker-root")
+
         worker
         (start! (fn [socket home]
-                  (conj (vec (argv socket home)) source-dir)))
+                  (conj (vec (argv socket home)) source-dir))
+                (when jailed? {:read-write [root] :read-only [source-dir]}))
 
         session
-        "worker-test"
-
-        root
-        (harness/temp-dir "vis-worker-root")]
+        "worker-test"]
 
     (try
       (testing "the interpreter answers over the wire"
@@ -259,7 +284,9 @@ async def library_call():
 
 (harness/defbuilt-test worker-native-image-test
                        (if-let [argv (image-argv)]
-                         (exercise! argv)
+                         (doseq [jailed? [false true]]
+                           (testing (if jailed? "OS-jailed native worker" "native worker")
+                             (exercise! argv jailed?)))
                          (println "SKIP worker-native-image-test - no"
                                   Worker/EXECUTABLE
                                   "beside the cdylib, run `clojure -T:build worker-image`")))
