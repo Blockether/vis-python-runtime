@@ -184,6 +184,7 @@ visjail_spawn(const char *argv_blob, int argv_len,
   int input[2] = {-1, -1};
   int output[2] = {-1, -1};
   int errors[2] = {-1, -1};
+  int ready[2] = {-1, -1};
   int master = -1;
   int slave = -1;
   pid_t pid;
@@ -228,13 +229,23 @@ visjail_spawn(const char *argv_blob, int argv_len,
            (!merge_error && make_pipe(errors) != 0))
     goto system_error;
 
+  if (make_pipe(ready) != 0)
+    goto system_error;
   pid = fork();
   if (pid < 0)
     goto system_error;
   if (pid == 0)
     {
+      close(ready[0]);
       if (setsid() < 0)
         child_fail("setsid");
+      /* The parent must not expose a pid before group-directed signals work. */
+      char ready_byte = 1;
+      ssize_t written;
+      do written = write(ready[1], &ready_byte, 1); while (written < 0 && errno == EINTR);
+      if (written != 1)
+        child_fail("process group ready");
+      close(ready[1]);
       if (use_pty)
         {
           if (ioctl(slave, TIOCSCTTY, 0) < 0)
@@ -285,6 +296,20 @@ visjail_spawn(const char *argv_blob, int argv_len,
 #endif
     }
 
+  close(ready[1]); ready[1] = -1;
+  char ready_byte;
+  ssize_t received;
+  do received = read(ready[0], &ready_byte, 1); while (received < 0 && errno == EINTR);
+  if (received < 0)
+    {
+      int saved = errno;
+      kill(-pid, SIGKILL);
+      kill(pid, SIGKILL);
+      while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+      errno = saved;
+      goto system_error;
+    }
+  close_pair(ready);
   if (use_pty)
     {
       close(slave); slave = -1;
@@ -315,6 +340,7 @@ system_error:
     close_pair(input);
     close_pair(output);
     close_pair(errors);
+    close_pair(ready);
     if (master >= 0) close(master);
     if (slave >= 0) close(slave);
     free_items(argv);

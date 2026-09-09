@@ -325,6 +325,25 @@
              (.waitFor p 5 TimeUnit/SECONDS))
            (finally (delete-tree root))))))
 
+(deftest immediate-process-termination-test
+  ;; The consumer's PTY teardown hung when destroy raced the child's setsid.
+  (let [root (temp-dir)]
+    (try (doseq [pty? [false true]
+                 attempt (range 1000)]
+
+           (let [^Process process (runtime/spawn-process!
+                                    ["/bin/cat"]
+                                    (options root {:policy nil :pty? pty? :merge-stderr? true}))]
+             (try (.destroyForcibly process)
+                  (is (.waitFor process 500 TimeUnit/MILLISECONDS)
+                      (str "Immediate termination lost: pty=" pty? ", attempt=" attempt))
+                  (finally (.destroyForcibly process)
+                           (.waitFor process 5 TimeUnit/SECONDS)
+                           (.close (.getOutputStream process))
+                           (.close (.getInputStream process))
+                           (.close (.getErrorStream process))))))
+         (finally (delete-tree root)))))
+
 (deftest pty-round-trip-test
   (let [root (temp-dir)]
     (try (let [^Process p (runtime/spawn-process!
