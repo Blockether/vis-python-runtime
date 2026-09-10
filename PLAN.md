@@ -20,14 +20,14 @@ bundled shared-library ABI and build against the supported baseline instead.
      every archive ELF, including bundled uv, passes the glibc 2.35 gate. Extracted
      uv creates a project environment offline and runs the extracted interpreter;
      extracted workers pass worker tests.
-   - Unknowns: release-tag builds must repeat these checks on all four platforms.
+   - Unknowns: none; release-tag checks passed on all four platforms.
 2. **Vis consumers**
    - Rationale: engine, TUI and downloaded Python sidecar must be compatible together.
    - Data: Vis native-release workflow, Dockerfile, `bin/verify-linux-abi`, release tests.
    - Acceptance criteria: baseline builders, ABI gates, native/SDK/PTY tests before
      publication. Preserve concurrent pipeline-order changes from another session.
-   - Unknowns: current released runtime assets are unchanged; a verified new runtime
-     release and subsequent Vis dependency pin are needed to deliver the correction.
+   - Unknowns: Vis product publication remains a separate release. Its Linux
+     native/SDK/PTY checks must pass before publishing the consuming binaries.
 3. **Verify and deliver**
    - Rationale: source tests alone do not prove native Linux compatibility.
    - Data: affected tests, shellcheck, actionlint, formatting/lint and native artifacts.
@@ -37,12 +37,21 @@ bundled shared-library ABI and build against the supported baseline instead.
 
 ## Plan state
 
-The bundled-uv and Ubuntu 22.04 changes are committed and pushed. CI run
-34475322579 passed complete builds, JVM tests, archive ABI checks and extracted
-worker tests on Linux x64/arm64 and macOS x64/arm64. The local macOS archive also
-passed offline uv sync/check/run with an empty tool PATH and the extracted Python.
-Vis JVM, native uv parity and native package-worker checks pass locally; its
-packager now rejects a sidecar without executable uv or its licenses.
+Runtime v0.5.7 is published at commit `8cad3753d73488a507b4e7ed9cb1e5fb25a30284`.
+Release run 34476856235 passed all four platform builds, tests, ABI/archive checks
+and publication. Both Linux architectures used Ubuntu 22.04 and passed the
+complete ELF glibc 2.35 gate, including uv. Extracted uv passed offline
+sync/check/run without host tools; extracted workers passed their runtime tests.
+Local verification passed 174 JVM tests and 5 extracted-worker tests.
 
-Runtime v0.5.7 release preparation is in progress. Release-tag verification and
-publication, the consuming Vis dependency pin and final consumer checks remain.
+Vis commit `aed0189bbd0a70ecd0f6fa6bed48a1e7d342b048` is pushed and pins that exact
+release commit. Its 218 affected JVM tests, real editable sync/reload test and
+71 release-bundle cases pass. A fresh macOS native build using the published
+runtime, with no local dependency override, passed all 4 native uv tests and the
+native/JVM package-worker compatibility test. The staged wrapper reports
+uv 0.12.12 and the staged worker reports 0.5.7. The packager rejects sidecars
+without executable uv or its licenses. Formatting, lint/reflection, shell and
+workflow checks pass. No live gateway was restarted.
+
+Runtime release and consuming pin are complete. Vis product publication is
+tracked by its own release workflow.
