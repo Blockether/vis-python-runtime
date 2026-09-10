@@ -91,12 +91,23 @@ a top-level alias. Existing configuration and default Python behavior stay intac
 
 ## Plan state
 
-Phases 1–2 complete. Default/true/false pass through sandbox and trusted extension
+Phases 1–3 complete. Default/true/false pass through sandbox and trusted extension
 workers. Synthetic handshakes accept a legacy CA only with false; valid CA passes;
 unknown CA, wrong hostname, expiry and invalid signatures fail. Vis tests fail with
 the old runtime and pass with the local implementation. Runtime full suite passed
 179 tests/2919 assertions; after adding unknown-bit preservation, all 7 worker
 tests/153 assertions passed against JVM and freshly built GraalVM CE native workers.
-Formatting and lint/reflection pass. The Vis native consumer test also passes for
-both worker roles using an isolated test HOME. Phase 3: publish runtime, pin it in
-Vis and verify the published distribution before the coordinated Vis release.
+Formatting and lint/reflection pass. Runtime v0.5.9 is published at commit
+`2242fa0e3ce3340dbb9712d5313b03bbba935a1b`; release run 34495872050 passed all four
+platforms. Vis pins that published commit; 347 affected tests and the packaged
+native TLS consumer test passed against it.
+
+The full Vis v0.1.60 native suite exposed a cached guest-module directory removed
+by an earlier test. Vis commit `02092aaba` now stages the cached source contents
+in the current home before each worker launch. The regression failed before the
+fix; 222 affected JVM tests, packaged native TLS and 72 release-bundle tests pass.
+Vis v0.1.61 is tagged at `920fb468b349377941bceadb7fe4ab4cdba31611`; release run
+34509051945 passed all source, JVM, SDK, native, desktop and mobile checks and
+published the stable release with 15 assets. A macOS runner queue timeout passed
+on retry without source changes or skipped checks. GitHub confirms v0.1.61 is
+non-draft and latest. No release tags were moved; no live gateway was restarted.
