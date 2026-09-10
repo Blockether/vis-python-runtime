@@ -17,9 +17,10 @@ bundled shared-library ABI and build against the supported baseline instead.
    - Data: `.github/workflows/{ci,release}.yml`, `scripts/check-linux-abi.sh`,
      `scripts/verify-platform-archive.sh` and release/source tests.
    - Acceptance criteria: both Linux architectures build/test on Ubuntu 22.04;
-     every archive ELF passes the ABI gate; extracted workers pass worker tests.
-   - Unknowns: Linux native execution is unavailable on this macOS host because
-     its container VM is stopped. Workflow execution remains required.
+     every archive ELF, including bundled uv, passes the glibc 2.35 gate. Extracted
+     uv creates a project environment offline and runs the extracted interpreter;
+     extracted workers pass worker tests.
+   - Unknowns: release-tag builds must repeat these checks on all four platforms.
 2. **Vis consumers**
    - Rationale: engine, TUI and downloaded Python sidecar must be compatible together.
    - Data: Vis native-release workflow, Dockerfile, `bin/verify-linux-abi`, release tests.
@@ -31,17 +32,17 @@ bundled shared-library ABI and build against the supported baseline instead.
    - Rationale: source tests alone do not prove native Linux compatibility.
    - Data: affected tests, shellcheck, actionlint, formatting/lint and native artifacts.
    - Acceptance criteria: local checks pass; Linux builds and runtime tests pass;
-     release/pin only with explicit authorization, without moving existing tags.
-   - Unknowns: no runtime release or external workflow dispatch was requested.
+     publish a new immutable runtime tag and pin its commit in Vis.
+   - Unknowns: none about authorization; the user requested the runtime release.
 
 ## Plan state
 
-Source changes implemented in both checkouts. Regression tests first failed on the
-old runner baseline and now pass. Vis release tests pass (68 cases); runtime source,
-ABI and worker tests pass (16 tests, 173 assertions) on macOS. The existing native
-macOS TUI passes its real PTY resize/highlighting test. Formatting, Clojure lint
-(including reflection), shellcheck, actionlint and diff checks pass.
+The bundled-uv and Ubuntu 22.04 changes are committed and pushed. CI run
+34475322579 passed complete builds, JVM tests, archive ABI checks and extracted
+worker tests on Linux x64/arm64 and macOS x64/arm64. The local macOS archive also
+passed offline uv sync/check/run with an empty tool PATH and the extracted Python.
+Vis JVM, native uv parity and native package-worker checks pass locally; its
+packager now rejects a sidecar without executable uv or its licenses.
 
-Linux native verification, new runtime artifacts and the consuming Vis pin remain
-pending. The local container engine cannot connect to its stopped VM; no Linux build
-or new native artifact is claimed. No runtime release, commit or push performed.
+Runtime v0.5.7 release preparation is in progress. Release-tag verification and
+publication, the consuming Vis dependency pin and final consumer checks remain.

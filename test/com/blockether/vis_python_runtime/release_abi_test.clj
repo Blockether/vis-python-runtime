@@ -51,6 +51,8 @@
           [[{"vis" ["GLIBC_2.2.5" "GLIBC_2.9" "GLIBC_2.35"]
              "python/lib/libpython.so" ["GLIBC_2.17"]} 0 "2 ELF files"]
            [{"vis-python-worker" []} 0 "1 ELF files"]
+           [{"python/bin/uv" ["GLIBC_2.17"]} 0 "1 ELF files"]
+           [{"python/bin/uv" ["GLIBC_2.36"]} 1 "python/bin/uv requires GLIBC_2.36"]
            [{"libvispython.so" ["GLIBC_2.38"]} 1 "libvispython.so requires GLIBC_2.38"]
            [{"vis" ["GLIBC_2.35"] "vis-python-worker" ["GLIBC_2.36"]} 1
             "vis-python-worker requires"] [{"vis-tui" ["GLIBC_2.38"]} 1 "vis-tui requires"]

@@ -35,6 +35,18 @@ uv_version="$(PATH=/nonexistent "$unpacked/python/bin/uv" --version)"
 test "${uv_version%% (*}" = "uv $UV_VERSION"
 test -f "$unpacked/licenses/uv-LICENSE-APACHE"
 test -f "$unpacked/licenses/uv-LICENSE-MIT"
+# Exercise the extracted uv and interpreter together, offline and without host tools.
+uv_check="$(mktemp -d "$repo/target/uv-archive-check.XXXXXX")"
+trap 'rm -rf "$uv_check"' EXIT
+printf '[project]\nname = "archive-check"\nversion = "0.0.0"\nrequires-python = ">=3.10"\n' > "$uv_check/pyproject.toml"
+uv=(env -i PATH=/nonexistent HOME="$uv_check" "$unpacked/python/bin/uv"
+    --offline --no-cache --no-config --directory "$uv_check")
+"${uv[@]}" sync --python "$unpacked/python/bin/python3" --no-python-downloads
+"${uv[@]}" sync --check
+"${uv[@]}" run --no-sync python -I -c \
+  'import pathlib, ssl, sqlite3, sys; assert sys.prefix != sys.base_prefix; assert pathlib.Path(sys.base_prefix).samefile(sys.argv[1]); print("bundled uv + Python: ok")' \
+  "$unpacked/python"
+
 if [[ "$platform" == linux-* ]]; then
   "$repo/scripts/check-linux-abi.sh" "$unpacked"
   test -f "$unpacked/licenses/bubblewrap-LGPL-2.1-or-later.txt"
