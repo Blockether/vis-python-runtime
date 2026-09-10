@@ -24,6 +24,15 @@ are built with LTO by a newer LLVM than Apple's linker reads), so a static
 `libpython3.14.a` does NOT link with the system toolchain. The vendored shared
 library is the supported path, and it is self-contained all the same.
 
+Linux archives target Ubuntu 22.04 (glibc 2.35) on x64 and arm64. Both native
+libraries and the worker are built and tested on that baseline. Archive verification
+checks every ELF file, including vendored CPython and its extension modules, and
+rejects newer glibc requirements. Building on a newer distribution can introduce
+new symbol versions even when the C source uses no new APIs.
+
+CPython remains a bundled shared library. Statically linking libpython would not
+remove glibc requirements from the bridge, worker or third-party extension modules;
+statically linking glibc is not a replacement for testing this dynamic-loading ABI.
 `visjail/build.sh` produces the second cdylib in every platform tree. On Linux
 it hash-pins bubblewrap and libcap, compiles the upstream bubblewrap sources into
 `libvisjail.so`, and statically links libcap; libc is the only host ABI and there

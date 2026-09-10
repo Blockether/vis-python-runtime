@@ -250,6 +250,12 @@
         (throw (ex-info (str "worker image not found (run `clojure -T:build worker-image` first): "
                              worker)
                         {:platform platform :path (str worker)})))
+      (when-not (.canExecute (io/file dir "python/bin/uv"))
+        (throw (ex-info "Bundled uv not found (run native/vispython/build.sh first)"
+                        {:platform platform})))
+      (doseq [license ["uv-LICENSE-APACHE" "uv-LICENSE-MIT"]]
+        (when-not (.isFile (io/file dir "licenses" license))
+          (throw (ex-info "Bundled uv license not found" {:platform platform :license license}))))
       (b/delete {:path (str out)})
       (io/make-parents out)
       ;; SOURCE only, as in the jar: `__pycache__` is bytecode compiled against

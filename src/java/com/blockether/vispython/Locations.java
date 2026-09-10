@@ -171,6 +171,15 @@ public final class Locations {
     return null;
   }
 
+  /** The bundled uv executable, or null for an incomplete/system Python tree. Never searches PATH. */
+  public static String uvExecutable(String pythonHome) {
+    if (pythonHome == null) {
+      return null;
+    }
+    Path path = Path.of(pythonHome).resolve("bin/uv");
+    return Files.isRegularFile(path) && Files.isExecutable(path)
+        ? path.toAbsolutePath().toString() : null;
+  }
   /**
    * Directories CPython may import from, in order: what the caller passed, then
    * whatever this ARTIFACT carries ({@link Sources}).

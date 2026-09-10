@@ -200,3 +200,19 @@
     (is (not (str/includes? body "self-hosted")) path)
     (is (not (str/includes? body "inputs.runner")) path))
   (is (not (str/includes? (slurp ".github/workflows/ci.yml") "head.repo.full_name"))))
+
+(deftest linux-builds-target-ubuntu-22-test
+  ;; Ubuntu 22.04 users could not load libvispython built against glibc 2.38+.
+  (doseq [path
+          [".github/workflows/ci.yml" ".github/workflows/release.yml"]
+
+          :let [body
+                (slurp path)]]
+
+    (is (str/includes? body "platform: linux-x64, os: ubuntu-22.04") path)
+    (is (str/includes? body "platform: linux-arm64, os: ubuntu-22.04-arm") path)
+    (is (str/includes? body "VIS_PYTHON_NATIVE_PATH=\"$PWD/target/archive-check-") path)
+    (is (str/includes? body "clojure -M:test -n com.blockether.vis-python-runtime.worker-test")
+        path))
+  (is (str/includes? (slurp "scripts/verify-platform-archive.sh")
+                     "scripts/check-linux-abi.sh\" \"$unpacked")))

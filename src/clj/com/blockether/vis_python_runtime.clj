@@ -79,6 +79,11 @@
   ([] (Interpreter/pythonHome))
   ([{:keys [path]}] (Locations/pythonHome path)))
 
+(defn uv-executable
+  "The pinned uv bundled with the selected Python tree, or nil. Never searches PATH."
+  []
+  (Locations/uvExecutable (Interpreter/pythonHome)))
+
 (defn resolve-jail
   "The `libvisjail` cdylib beside the selected CPython cdylib, or nil."
   ([] (resolve-jail (resolve-library)))

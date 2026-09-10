@@ -12,8 +12,8 @@ import java.util.concurrent.TimeUnit;
 /**
  * Installing packages: the only way the sandbox ever gets one.
  *
- * <p>The artifact BUNDLES NOTHING. It is an interpreter, its standard library
- * and pip; every real distribution arrives here, into one directory beside the
+ * <p>The artifact carries CPython, its standard library, pip and uv. User-selected
+ * distributions arrive here, into one directory beside the
  * bytecode cache, and every session imports from it. So a shipped tree is the
  * same bytes on every machine, a package the user chose survives the next
  * release, and there is no requirements file anybody has to re-decide.
