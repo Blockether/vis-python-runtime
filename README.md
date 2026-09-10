@@ -50,6 +50,21 @@ unconfined worker. They must not share interpreter memory or host-call authority
 with model code. Object results cross as public data, not interpreter references.
 Test representative operations through the worker boundary, not just installation.
 
+## TLS policy
+
+The host can set `VIS_PYTHON_TLS_STRICT=false` before interpreter initialization
+for compatibility with trusted legacy CAs. The default is `true` (unmodified
+Python behavior); other values are rejected. Initialization imports `tls_policy`
+before guest code or package hooks run. Repeated initialization is idempotent.
+
+Compatibility mode removes only `ssl.VERIFY_X509_STRICT` from assignments to
+`ssl.SSLContext.verify_flags`, including stdlib and library context factories.
+All other flags, certificate trust, signatures, expiry and hostname checking
+remain unchanged. It neither installs CAs nor retries failed handshakes. It is
+not an enforcement boundary against guest code configuring its own contexts.
+It does not affect other TLS implementations or subprocesses. A new worker is
+required to change policy; the host must configure sandbox and trusted workers.
+
 ## License
 
 MIT.

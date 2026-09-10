@@ -268,6 +268,7 @@ public final class Interpreter {
         wiring.append("if ").append(literal(target)).append(" not in sys.path:\n");
         wiring.append("    sys.path.append(").append(literal(target)).append(")\n");
       }
+      wiring.append("import tls_policy\n");
       invoke("vispython_exec", DEFAULT_SESSION, wiring.toString());
     }
     packageDirectory = target;

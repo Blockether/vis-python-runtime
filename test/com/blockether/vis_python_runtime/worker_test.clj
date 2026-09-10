@@ -62,7 +62,7 @@
 
    `/tmp`, not the JDK's temp directory: a unix socket path is capped at 104
    bytes on macOS and the per-user temp directory alone spends half of that."
-  [argv & [policy]]
+  [argv & [policy environment]]
   (let [home
         (harness/temp-dir "vis-worker-home")
 
@@ -82,7 +82,8 @@
           (.redirectOutput log))
 
         _
-        (.put (.environment builder) Native/NATIVE_PATH_ENV (:path (runtime/resolve-library)))
+        (do (.put (.environment builder) Native/NATIVE_PATH_ENV (:path (runtime/resolve-library)))
+            (.putAll (.environment builder) (or environment {})))
 
         process
         (if policy
@@ -93,7 +94,9 @@
                 (runtime/spawn-process!
                   (argv path home)
                   {:directory home
-                   :environment {Native/NATIVE_PATH_ENV (str library) "HOME" home "TMPDIR" home}
+                   :environment (merge
+                                  {Native/NATIVE_PATH_ENV (str library) "HOME" home "TMPDIR" home}
+                                  environment)
                    :policy (-> policy
                                (update :read-write conj home)
                                (update :read-only conj (str (.getParentFile library)))
@@ -365,3 +368,54 @@ async def library_call():
                          (println "SKIP worker-native-image-test - no"
                                   Worker/EXECUTABLE
                                   "beside the cdylib, run `clojure -T:build worker-image`")))
+
+(defn- exercise-tls!
+  [argv]
+  ;; Vis #185: compatibility changes only STRICT, for every ssl context factory.
+  (doseq [strict [nil "true" "false"]]
+    (let [worker (start! argv nil (if strict {"VIS_PYTHON_TLS_STRICT" strict} {}))]
+      (try
+        (value!
+          worker
+          "exec"
+          "session" "tls"
+          "code"
+          (str
+            "import ssl
+"
+            "contexts = [ssl.create_default_context(), ssl._create_default_https_context()]
+"
+            "custom = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+"
+            "custom.verify_flags |= ssl.VERIFY_X509_STRICT | ssl.VERIFY_CRL_CHECK_LEAF | (1 << 30)
+"
+            "contexts.append(custom)
+"
+            "assert all(c.verify_mode == ssl.CERT_REQUIRED and c.check_hostname for c in contexts)
+"
+            "assert custom.verify_flags & (1 << 30)
+assert custom.verify_flags & ssl.VERIFY_CRL_CHECK_LEAF
+"))
+        (is (= (if (= "false" strict) "[False, False, False]" "[True, True, True]")
+               (value! worker
+                       "eval"
+                       "session" "tls"
+                       "code"
+                       "str([bool(c.verify_flags & ssl.VERIFY_X509_STRICT) for c in contexts])")))
+        (is (= "True"
+               (value! worker
+                       "eval"
+                       "session" "tls"
+                       "code" "str(all(isinstance(c, ssl.SSLContext) for c in contexts))")))
+        (finally (.close ^SocketChannel (:channel worker))
+                 (when-not (.waitFor ^Process (:process worker) 5 TimeUnit/SECONDS)
+                   (.destroyForcibly ^Process (:process worker)))
+                 (.delete ^File (:log worker)))))))
+
+(harness/defbuilt-test tls-worker-class-test (exercise-tls! jvm-argv))
+
+(harness/defbuilt-test tls-worker-native-test
+                       (if-let [argv (image-argv)]
+                         (exercise-tls! argv)
+                         (println
+                           "SKIP tls-worker-native-test - run clojure -T:build worker-image")))

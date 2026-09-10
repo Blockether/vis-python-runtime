@@ -55,3 +55,48 @@ workflow checks pass. No live gateway was restarted.
 
 Runtime release and consuming pin are complete. Vis product publication is
 tracked by its own release workflow.
+
+# Python TLS strictness — Vis issue #185
+
+Expose one explicit compatibility policy without disabling certificate verification.
+
+## Context
+
+Vis merges `python.tls_strict` from user and project YAML and supplies the effective
+boolean to both sandbox and trusted extension workers. The runtime owns SSL behavior.
+A legacy corporate CA has noncritical Basic Constraints and fails Python's strict
+validation. Do not change CA bundles, disable verification, retry insecurely or add
+a top-level alias. Existing configuration and default Python behavior stay intact.
+
+## 1. Reproduce and implement
+- Rationale: strictness is independent of which certificates are trusted.
+- Data: runtime worker tests, Vis configuration and real-worker boundary tests.
+- Acceptance criteria: default/true preserves behavior; false clears only STRICT;
+  nested YAML validates and merges; both execution paths receive the same policy.
+- Unknowns: client context construction differences, resolved with tests.
+
+## 2. Cross-validate and document
+- Rationale: flags alone do not establish TLS behavior.
+- Data: synthetic TLS chains, stdlib/client checks, JVM and native worker tests.
+- Acceptance criteria: legacy CA passes only on opt-in; correct CA passes; unknown CA,
+  wrong hostname and expired certificates fail; docs describe scope and reload.
+- Unknowns: native toolchain availability and external release checks.
+
+## 3. Publish runtime and Vis
+- Rationale: consumers must pin a published runtime artifact, not local source.
+- Data: new immutable runtime tag, consumer pin, version sync and product CI.
+- Acceptance criteria: checks pass, runtime assets publish, consuming Vis release
+  finishes; preserve concurrent #186/#187 work and never restart a live gateway.
+- Unknowns: coordinate Vis version files with the concurrent #186 release.
+
+## Plan state
+
+Phases 1–2 complete. Default/true/false pass through sandbox and trusted extension
+workers. Synthetic handshakes accept a legacy CA only with false; valid CA passes;
+unknown CA, wrong hostname, expiry and invalid signatures fail. Vis tests fail with
+the old runtime and pass with the local implementation. Runtime full suite passed
+179 tests/2919 assertions; after adding unknown-bit preservation, all 7 worker
+tests/153 assertions passed against JVM and freshly built GraalVM CE native workers.
+Formatting and lint/reflection pass. The Vis native consumer test also passes for
+both worker roles using an isolated test HOME. Phase 3: publish runtime, pin it in
+Vis and verify the published distribution before the coordinated Vis release.
