@@ -1148,6 +1148,84 @@ def __vis_settle_binding__(name):
     return g[name]
 
 
+def __vis_library_awaitable__(aw):
+    # Sandbox coroutines and synchronization primitives use the bounded worker
+    # pool. Imported awaitables instead belong to their caller's selector loop;
+    # moving them to a worker closes shared HTTP transports before client exit.
+    if isinstance(aw, __vis_Task__):
+        return __vis_library_awaitable__(aw._aw)
+    if isinstance(aw, __vis_Gather__):
+        return any(__vis_library_awaitable__(child) for child in aw.aws)
+    if not __vis_is_awaitable__(aw):
+        return False
+    code = getattr(aw, "cr_code", None)
+    if code is None:
+        code = getattr(getattr(type(aw), "__await__", None), "__code__", None)
+    return code is None or (
+        not __vis_is_user_file__(code.co_filename)
+        and code.co_filename != __vis_drive__.__code__.co_filename
+    )
+
+
+async def __vis_gather_async__(v):
+    import asyncio as std_asyncio
+
+    library = {i for i, aw in enumerate(v.aws) if __vis_library_awaitable__(aw)}
+    if not library:
+        return __vis_settle_gather__(v)
+
+    async def library_slot(index, aw):
+        try:
+            if isinstance(aw, __vis_Gather__):
+                return await __vis_gather_async__(aw)
+            return await __vis_drive_async__(aw)
+        except BaseException as exc:
+            if not v.return_exceptions:
+                __vis_mark_slot__(exc, index)
+            raise
+
+    async def pool_slots():
+        # Keep original slot numbers and the host pool's failure/cancellation
+        # contract. Library slots are values here, never dispatched to workers.
+        return __vis_settle_gather__(
+            __vis_Gather__(
+                [None if i in library else aw for i, aw in enumerate(v.aws)],
+                v.return_exceptions,
+            )
+        )
+
+    slots = sorted(library)
+    tasks = []
+    try:
+        for i in slots:
+            tasks.append(std_asyncio.create_task(library_slot(i, v.aws[i])))
+        tasks.append(std_asyncio.create_task(pool_slots()))
+        completed = await std_asyncio.gather(
+            *tasks, return_exceptions=v.return_exceptions
+        )
+        results = completed[-1]
+        if isinstance(results, BaseException):
+            raise results
+        for i, result in zip(slots, completed[:-1]):
+            results[i] = (
+                __vis_clean_exception__(result)
+                if isinstance(result, BaseException)
+                else __vis_pyify__(result)
+            )
+        return results
+    finally:
+        # Unlike asyncio.gather's default, Vis settles or cancels every sibling
+        # before propagating a failure. Drain before closing coroutine frames.
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await std_asyncio.gather(*tasks, return_exceptions=True)
+        for aw in v.aws:
+            __vis_dispose_awaitable__(aw)
+        v.aws.clear()
+
+
 async def __vis_drive_async__(coro):
     # Keep Vis' yielded host calls on its bounded pool, but hand library futures
     # back to a real asyncio Task. Libraries (AnyIO, HTTPX) need both that Task's
@@ -1171,7 +1249,7 @@ async def __vis_drive_async__(coro):
                 if isinstance(yielded, __vis_Call__):
                     send = __vis_settle_call__(yielded)
                 elif isinstance(yielded, __vis_Gather__):
-                    send = __vis_settle_gather__(yielded)
+                    send = await __vis_gather_async__(yielded)
                 elif yielded is None:
                     await std_asyncio.sleep(0)
                     send = None

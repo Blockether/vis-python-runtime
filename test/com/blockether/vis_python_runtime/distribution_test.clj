@@ -11,7 +11,8 @@
             [clojure.test :refer [is testing use-fixtures]]
             [com.blockether.vis-python-runtime :as runtime]
             [com.blockether.vis-python-runtime.harness :as harness :refer [block temp-dir]])
-  (:import [java.net InetSocketAddress Socket]))
+  (:import [java.net InetSocketAddress Socket]
+           [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]))
 
 (defn- index-reachable?
   "Whether PyPI answers, so a case that needs it can skip instead of failing for
@@ -89,6 +90,56 @@
         (let [answer (block session "import numpy\nnumpy.loadtxt('/etc/hosts')")]
           (is (str/includes? (str (:error answer)) "PermissionError")
               (str "numpy read outside the roots: " (:stdout answer) (:error answer))))))))
+
+(harness/defbuilt-test
+  httpx-shared-client-gather-test
+  ;; Real keep-alive transports reproduce the closed-loop failure that a mock
+  ;; transport cannot: one client spans multiple gathered request batches.
+  (if-not (index-reachable?)
+    (println "SKIPPED httpx-shared-client-gather-test: pypi.org is not reachable")
+    (let [session
+          (harness/block-session)
+
+          connections
+          (atom #{})
+
+          server
+          (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+
+      (importable! session @wheels)
+      (.createContext server
+                      "/"
+                      (reify
+                        HttpHandler
+                          (handle [_ exchange]
+                            (let [^HttpExchange exchange
+                                  exchange
+
+                                  body
+                                  (.getBytes (str (.getRequestURI exchange)) "UTF-8")]
+
+                              (swap! connections conj (.getRemoteAddress exchange))
+                              (.sendResponseHeaders exchange 200 (alength body))
+                              (with-open [output (.getResponseBody exchange)]
+                                (.write output body))))))
+      (.start server)
+      (try
+        (runtime/exec! session
+                       (str "base_url = 'http://127.0.0.1:" (.getPort (.getAddress server)) "'"))
+        (let
+          [answer
+           (block
+             session
+             "import httpx
+async with httpx.AsyncClient(base_url=base_url, timeout=5, trust_env=False) as client:
+    for batch in range(3):
+        responses = await gather(client.get('/a'), client.get('/b'))
+        assert [response.text for response in responses] == ['/a', '/b']
+print(client.is_closed)")]
+          (is (nil? (:error answer)) (str (:error answer)))
+          (is (= "True" (str/trim (:stdout answer)))))
+        (is (= 2 (count @connections)) "requests reuse the two keep-alive connections")
+        (finally (.stop server 0))))))
 
 (harness/defbuilt-test
   httpx-async-client-context-test

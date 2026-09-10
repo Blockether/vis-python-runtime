@@ -114,6 +114,88 @@ print(await echo('after'))")]
       (is (nil? (:error answer)) (str (:error answer)))
       (is (= "library failure\n<after>" (out answer))))))
 
+(harness/defbuilt-test
+  gathered-library-client-loop-test
+  ;; Regression: gather closed each request's loop before the shared client's
+  ;; async context could close its transports (RuntimeError: Event loop is closed).
+  (let [session (tools)]
+    (runtime/exec!
+      session
+      "import asyncio as real_asyncio
+class LibraryClient:
+    def __init__(self):
+        self.loops = []
+        self.active = 0
+        self.peak = 0
+    async def __aenter__(self):
+        self.loop = real_asyncio.get_running_loop()
+        return self
+    async def get(self, value):
+        loop = real_asyncio.get_running_loop()
+        self.loops.append(loop)
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        try:
+            future = loop.create_future()
+            loop.call_later(0.01, future.set_result, value)
+            return await future
+        finally:
+            self.active -= 1
+    async def __aexit__(self, *exc):
+        for loop in self.loops:
+            loop.call_soon(lambda: None)
+            assert loop is self.loop, 'request changed the client event loop'")
+    (let
+      [answer
+       (block
+         session
+         "import asyncio
+async with LibraryClient() as client:
+    first = await gather(client.get('a'), client.get('b'), echo('host'))
+    second = await gather(asyncio.create_task(client.get('c')),
+                          gather(client.get('d'), echo('nested')))
+print(first, second, client.peak)")]
+      (is (nil? (:error answer)) (str (:error answer)))
+      (is (= "['a', 'b', '<host>'] ['c', ['d', '<nested>']] 2" (out answer))))))
+
+(harness/defbuilt-test
+  gathered-library-failure-cleanup-test
+  (let [session (tools)]
+    (runtime/exec!
+      session
+      "import asyncio as real_asyncio
+closed = []
+async def library_failure():
+    await real_asyncio.sleep(0.01)
+    raise ValueError('library failure')
+async def library_pending():
+    try:
+        await real_asyncio.sleep(5)
+    finally:
+        closed.append(True)")
+    (testing "failure keeps its slot and drains cancelled library siblings"
+      (let
+        [answer
+         (block
+           session
+           "try:
+    await gather(echo('host'), library_failure(), library_pending())
+except ValueError as error:
+    print(str(error))
+print(closed, await echo('after'))")]
+        (is (nil? (:error answer)) (str (:error answer)))
+        (is (= "[1] library failure\n[True] <after>" (out answer)))))
+    (testing "returned exceptions retain their type without retaining frames"
+      (let
+        [answer
+         (block
+           session
+           "results = await gather(library_failure(), echo('host'), return_exceptions=True)
+error = results[0]
+print(type(error).__name__, str(error), error.__traceback__ is None, results[1])")]
+        (is (nil? (:error answer)) (str (:error answer)))
+        (is (= "ValueError library failure True <host>" (out answer)))))))
+
 (def ^:private run-src
   "import asyncio
 
