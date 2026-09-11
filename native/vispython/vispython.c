@@ -2125,6 +2125,8 @@ int vispython_drain_log(char *out, int cap)
    to have, so a laptop with no Python, or with the wrong one, decides whether
    the sandbox runs at all. NULL or empty keeps CPython's own search, which is
    what a source checkout built against a system interpreter wants.
+   `executable` names that interpreter's own launcher, not the embedding JVM or
+   native image. NULL or empty keeps CPython's default executable discovery.
    `pycache_prefix` is where compiled bytecode goes: NULL or empty leaves
    CPython's default, which writes a `__pycache__` beside every source file it
    imports - wrong for a shipped tree that is read-only and shared, and the
@@ -2133,7 +2135,8 @@ int vispython_drain_log(char *out, int cap)
    Idempotent, so a caller that cannot cheaply know whether a sibling already
    started it does not have to. Returns 0, or VIS_PY_ERR_INIT with the reason in
    `out`. */
-int vispython_initialize(const char *home, const char *pycache_prefix, char *out, int cap)
+int vispython_initialize(const char *home, const char *executable, const char *pycache_prefix,
+                         char *out, int cap)
 {
     PyConfig config;
     PyStatus status;
@@ -2168,7 +2171,8 @@ int vispython_initialize(const char *home, const char *pycache_prefix, char *out
     }
     snprintf(vis_py_pycache_prefix, sizeof vis_py_pycache_prefix, "%s",
              pycache_prefix != NULL ? pycache_prefix : "");
-    if ((home == NULL || home[0] == '\0') && vis_py_pycache_prefix[0] == '\0') {
+    if ((home == NULL || home[0] == '\0') && (executable == NULL || executable[0] == '\0') &&
+        vis_py_pycache_prefix[0] == '\0') {
         Py_InitializeEx(0);
     } else {
         PyConfig_InitPythonConfig(&config);
@@ -2178,6 +2182,12 @@ int vispython_initialize(const char *home, const char *pycache_prefix, char *out
         status = PyStatus_Ok();
         if (home != NULL && home[0] != '\0') {
             status = PyConfig_SetBytesString(&config, &config.home, home);
+        }
+        if (!PyStatus_Exception(status) && executable != NULL && executable[0] != '\0') {
+            status = PyConfig_SetBytesString(&config, &config.executable, executable);
+            if (!PyStatus_Exception(status)) {
+                status = PyConfig_SetBytesString(&config, &config.base_executable, executable);
+            }
         }
         if (!PyStatus_Exception(status) && vis_py_pycache_prefix[0] != '\0') {
             status = PyConfig_SetBytesString(&config, &config.pycache_prefix,

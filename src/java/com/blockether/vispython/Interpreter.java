@@ -78,7 +78,7 @@ public final class Interpreter {
    * small and explicit.
    */
   private static final Map<String, FunctionDescriptor> SIGNATURES = Map.ofEntries(
-      Map.entry("vispython_initialize", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_initialize", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_version", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_eval", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_exec", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
@@ -248,8 +248,9 @@ public final class Interpreter {
     String home = DEFAULT.equals(pythonHome) ? Locations.pythonHome(library().path()) : pythonHome;
     String cache = DEFAULT.equals(pycachePrefix) ? Locations.pycachePrefix() : pycachePrefix;
     String target = DEFAULT.equals(packages) ? Locations.packagesDir() : packages;
+    String executable = Locations.pythonExecutable(home);
     onRuntimeThread(() -> invoke("vispython_initialize", home == null ? "" : home,
-        cache == null ? "" : cache));
+        executable == null ? "" : executable, cache == null ? "" : cache));
     List<String> roots = Locations.sourceRoots(sourcePaths);
     if (!roots.isEmpty() || target != null) {
       // Starting is idempotent, so wiring sys.path has to be: a host that calls

@@ -201,6 +201,33 @@
         (is (= runtime/version
                (value! worker "eval" "session" session "code" "VIS_PYTHON_RUNTIME_VERSION")))
         (is (= "2" (value! worker "run" "session" session "code" "1 + 1"))))
+      ;; Vis #199: native and JVM workers must expose CPython, not their host launcher.
+      (testing "executable identity names the bundled interpreter"
+        (let [executable
+              (value! worker "eval" "session" session "code" "__import__('sys').executable")]
+          (is (str/ends-with? executable "/python/bin/python3"))
+          (is (= executable
+                 (value! worker
+                         "eval"
+                         "session" session
+                         "code" "__import__('sys')._base_executable")))))
+      (when-not jailed?
+        (testing "a trusted worker re-executes CPython with -c and -m"
+          (value! worker "trust" "session" session "code" "1")
+          (try (doseq [args ["['-c', 'print(123)']" "['-m', 'json.tool']"]]
+                 (is (= [0 "123\n" ""]
+                        (json/read-str
+                          (value! worker
+                                  "run"
+                                  "session" session
+                                  "code"
+                                  (str "import os, subprocess, sys\n"
+                                       "child = subprocess.run([sys.executable] + "
+                                       args
+                                       ", input='123', capture_output=True, text=True, timeout=15, "
+                                       "env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))\n"
+                                       "[child.returncode, child.stdout, child.stderr]"))))))
+               (finally (value! worker "trust" "session" session "code" "0")))))
       (testing "local async and host calls need no network capability"
         (value! worker "network" "session" session "code" "{\"enabled\":false}"))
       (testing "host source directories are installed before serving interpreter requests"
