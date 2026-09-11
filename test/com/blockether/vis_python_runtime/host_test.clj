@@ -31,9 +31,7 @@
   host-tool-arguments-test
   (let [session (harness/tool-session {"describe" (fn [args]
                                                     {"args" args})})]
-    (testing "arguments arrive at the host as data, keywords folded into a trailing map"
-      ;; The fold is the sandbox's own (`__vis_Call__`), and it is why a vis tool
-      ;; reads `find("x", paths=[…])` as one options map rather than as kwargs.
+    (testing "the fixture host adapts keywords to its options-map convention"
       (is (= {"args" ["hi" 2 {"deep" true}]}
              (harness/printed (block session
                                      "print(json.dumps(await describe('hi', 2, deep=True)))")))))
@@ -236,3 +234,21 @@
            (testing "every call the host saw named the session that actually made it"
              (is (= #{privileged attacker} (set (map first @callers))))))
          (finally (runtime/bind-host! nil)))))
+
+(harness/defbuilt-test
+  keyword-transport-test
+  ;; Vis #197: kwargs are a separate wire field, never guessed from a dict argument.
+  (let [session (harness/tool-session {"probe.echo" identity})]
+    (runtime/bind-host! (fn [_ _ payload]
+                          (json/write-str {"value" (select-keys (json/read-str payload)
+                                                                ["args" "kwargs"])})))
+    (doseq [[code expected]
+            [["probe.echo(value='hello')" {"args" [] "kwargs" {"value" "hello"}}]
+             ["probe.echo('hello', suffix='!')" {"args" ["hello"] "kwargs" {"suffix" "!"}}]
+             ["probe.echo({'value': 'hello'})" {"args" [{"value" "hello"}] "kwargs" {}}]
+             ["probe.echo()" {"args" [] "kwargs" {}}]]]
+      (is (= expected (harness/printed (block session (str "print(json.dumps(await " code "))"))))))
+    (is (= "hello!"
+           (ran session
+                (str "def local(value, *, suffix='!'):\n    return value + suffix\n"
+                     "print(await asyncio.to_thread(local, value='hello', suffix='!'))"))))))

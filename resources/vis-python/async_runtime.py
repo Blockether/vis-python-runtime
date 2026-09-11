@@ -327,17 +327,12 @@ def __vis_exec_call__(c):
             )
         return c.res
     try:
-        # Fold Python **kwargs into a TRAILING DICT positional. The host tool
-        # callables are foreign ProxyExecutables that accept ONLY positional args, so
-        # `c.fn(*a, **k)` would raise `__call__() got an unexpected keyword argument`.
-        # vis tools already take a trailing opts dict — `find("x", paths=[...])`,
-        # `rg(query="x")`, `run_tests(language="python")` — so folding
-        # kwargs to one dict matches their contract (all-kwargs collapses to a spec map).
+        # Preserve Python argument binding; only the host adapts options-map tools.
         # Flush what the block wrote through a handle it still holds: a tool that
         # reads a just-written file (`git commit -F /tmp/msg`) must not see the
         # buffer instead of the bytes.
         __vis_flush_writes__()
-        c.res = c.fn(*c.a, dict(c.k)) if c.k else c.fn(*c.a)
+        c.res = c.fn(*c.a, **c.k)
         # COLLAPSE a call that answered with ANOTHER deferred call. Handing a TOOL
         # ITSELF to the pool — `asyncio.to_thread(grep, q)`,
         # `loop.run_in_executor(None, grep, q)`, `create_task(to_thread(grep, q))` —
@@ -4043,15 +4038,9 @@ def __vis_defer_tools__():
 
 
 def __vis_direct_kwargs__(realfn, nm="verb"):
-    # KWARGS for the DIRECT (never-deferred) host verbs — today `fold_session`.
-    # Those stay raw foreign ProxyExecutables, which accept POSITIONAL args ONLY,
-    # so `fold_session(key, gist='…')` used to die with `__call__() got an
-    # unexpected keyword argument` BEFORE any fold validation ran. Fold **kwargs
-    # into ONE trailing dict positional — exactly what `__vis_exec_call__` does
-    # for the deferred tools — and the Clojure verb unwraps it (`compaction-verbs`),
-    # so keyword and positional calls bind identically.
+    # Direct host verbs preserve keywords just like deferred calls.
     def __vis_verb__(*a, **k):
-        return realfn(*a, dict(k)) if k else realfn(*a)
+        return realfn(*a, **k)
 
     return __vis_publish_tool__(__vis_verb__, nm)
 

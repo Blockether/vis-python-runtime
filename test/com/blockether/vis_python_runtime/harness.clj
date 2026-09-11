@@ -130,18 +130,24 @@
    that throws comes back as the failure envelope, which is how the guest gets a
    catchable exception rather than a dead block."
   [tools]
-  (runtime/bind-host! (fn [_session nm payload]
-                        (let [args
-                              (get (json/read-str payload) "args")
+  (runtime/bind-host!
+    (fn [_session nm payload]
+      (let [request
+            (json/read-str payload)
 
-                              tool
-                              (get tools nm)]
+            ;; These fixture tools use the host options-map convention.
+            args
+            (cond-> (get request "args")
+              (seq (get request "kwargs"))
+              (conj (get request "kwargs")))
 
-                          (json/write-str (if (nil? tool)
-                                            {"error" (str "no tool named " nm)}
-                                            (try {"value" (tool args)}
-                                                 (catch Throwable t
-                                                   {"error" (str (.getMessage t))})))))))
+            tool
+            (get tools nm)]
+
+        (json/write-str (if (nil? tool)
+                          {"error" (str "no tool named " nm)}
+                          (try {"value" (tool args)}
+                               (catch Throwable t {"error" (str (.getMessage t))})))))))
   tools)
 
 (defn tool-session

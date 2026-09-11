@@ -209,13 +209,9 @@ def _tool_arg(value):
 def _host_tool(name, session=None):
     """The guest half of the host tool `name`: JSON out, JSON back.
 
-    Arguments travel as `{"args": [...]}` and the reply is `{"value": ...}` or
-    `{"error": "..."}`. Keyword arguments fold into a TRAILING DICT the way the
-    sandbox's own call path folds them (`__vis_Call__`), because a vis tool takes
-    a trailing options map — `find("x", paths=[...])` is one convention on both
-    sides of the boundary, not two. A value JSON cannot carry reaches the host as
-    its `str`, which is the honest limit of a text boundary: a tool takes data,
-    and an open socket was never data.
+    Arguments travel separately as `{"args": [...], "kwargs": {...}}`; the reply
+    is `{"value": ...}` or `{"error": "..."}`. The host owns any options-map
+    adaptation. A value JSON cannot carry reaches the host as its `str`.
 
     The envelope also carries `session`, because the host binds a tool per
     session — the same name in two sessions is two functions, and the boundary
@@ -223,8 +219,10 @@ def _host_tool(name, session=None):
     """
 
     def call(*args, **kwargs):
-        params = list(args) + ([dict(kwargs)] if kwargs else [])
-        payload = json.dumps({"session": session, "args": params}, default=_tool_arg)
+        payload = json.dumps(
+            {"session": session, "args": list(args), "kwargs": kwargs},
+            default=_tool_arg,
+        )
         reply = json.loads(host_call(name, payload))
         if "error" in reply:
             raise VisToolError(reply["error"], reply.get("error_data"))
