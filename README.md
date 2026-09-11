@@ -21,6 +21,10 @@ CPython API to the JVM.
     resources/prebuilds/    build output per platform (git-ignored)
     test/                   clojure -T:build javac && clojure -M:test
 
+`install-runtime!` binds `VIS_PYTHON_RUNTIME_VERSION` in each Python session from the
+embedded library's version resource. This is the runtime library version, not CPython's
+version or a pip package version. Vis supplies its own build and SDK metadata separately.
+
 Nothing is published to Clojars. Consumers take the JVM API directly from a
 release commit as a tools.deps git dependency; each tagged GitHub Release also
 carries the convenience jar and the complete

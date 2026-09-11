@@ -530,7 +530,8 @@ public final class Interpreter {
   public static long installRuntime(String session) {
     // Host policy must precede .pth execution; initialize() only wires the site directory.
     exec(session, "import package_paths; package_paths.refresh("
-        + (packageDirectory == null ? "None" : literal(packageDirectory)) + ")\nimport vis_runtime");
+        + (packageDirectory == null ? "None" : literal(packageDirectory)) + ")\nimport vis_runtime"
+        + "\nVIS_PYTHON_RUNTIME_VERSION = " + literal(Native.version()));
     return Long.parseLong(
         eval(session, "vis_runtime.install(globals(), " + literal(session) + ")"));
   }

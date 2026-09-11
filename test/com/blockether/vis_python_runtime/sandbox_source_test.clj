@@ -27,6 +27,11 @@
             installed
             (runtime/install-runtime! session)]
 
+        (is (= runtime/version (runtime/eval-str session "VIS_PYTHON_RUNTIME_VERSION"))
+            "the runtime global reports the embedded library, not an installed Python package")
+        (is (= "True"
+               (runtime/eval-str session
+                                 "'VIS_PYTHON_RUNTIME_VERSION' in __vis_protected_names__")))
         (is (< 150 installed) "the whole public surface of the runtime landed in the session")
         (is (str/includes? (runtime/eval-str session "__vis_run_async__.__code__.co_filename")
                            "vis-python-runtime")

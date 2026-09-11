@@ -198,6 +198,8 @@
     (try
       (testing "the interpreter answers over the wire"
         (value! worker "install-runtime" "session" session)
+        (is (= runtime/version
+               (value! worker "eval" "session" session "code" "VIS_PYTHON_RUNTIME_VERSION")))
         (is (= "2" (value! worker "run" "session" session "code" "1 + 1"))))
       (testing "local async and host calls need no network capability"
         (value! worker "network" "session" session "code" "{\"enabled\":false}"))
