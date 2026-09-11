@@ -89,7 +89,7 @@
         (runtime/install-runtime! "big-session")
         (testing "a value on either side of the buffer crosses whole"
           (doseq [n [8000 8190 8191 8192 12000 1000000]]
-            (is (= (+ n 2) (count (runtime/run "big-session" (str "'x' * " n))))
+            (is (= (+ (long n) 2) (count (runtime/run "big-session" (str "'x' * " n))))
                 (str n " characters answer as a JSON string of the same length"))))
         (testing "a block's printed output is not capped either"
           (let [printed (runtime/run-block "big-session" "print('y' * 300000)")]

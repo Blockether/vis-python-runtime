@@ -62,7 +62,7 @@
    is what a caret renderer does — and asserting on the SLICE says what the
    position means instead of freezing three integers."
   [source [line col end-col]]
-  (subs (nth (str/split-lines source) (dec line)) col end-col))
+  (subs (nth (str/split-lines source) (dec (long line))) col end-col))
 
 (harness/defbuilt-test
   block-error-is-the-model-s-own-test

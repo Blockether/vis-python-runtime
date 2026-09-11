@@ -37,7 +37,7 @@ CASES = [
 ]
 
 RSS_PATTERNS = (
-    re.compile(r"(\d+)\s+maximum resident set size"),          # BSD /usr/bin/time -l
+    re.compile(r"(\d+)\s+maximum resident set size"),  # BSD /usr/bin/time -l
     re.compile(r"Maximum resident set size \(kbytes\): (\d+)"),  # GNU /usr/bin/time -v
 )
 
@@ -83,8 +83,11 @@ def measure(engine, runs):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--engine", default="vis-agent python",
-                        help="command that runs `-c CODE` (default: vis-agent python)")
+    parser.add_argument(
+        "--engine",
+        default="vis-agent python",
+        help="command that runs `-c CODE` (default: vis-agent python)",
+    )
     parser.add_argument("-n", "--runs", type=int, default=5)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -93,8 +96,11 @@ def main():
     results = measure(engine, args.runs)
 
     if args.json:
-        json.dump({"engine": args.engine, "machine": platform.platform(),
-                   "results": results}, sys.stdout, indent=2)
+        json.dump(
+            {"engine": args.engine, "machine": platform.platform(), "results": results},
+            sys.stdout,
+            indent=2,
+        )
         print()
         return
 
@@ -103,7 +109,9 @@ def main():
     print("|---|---|---|---|")
     for r in results:
         mark = "" if not r["failures"] else f"  ({r['failures']} FAILED)"
-        print(f"| {r['case']}{mark} | {r['cold_seconds']} | {r['warm_seconds']} | {r['peak_rss_mb']} |")
+        print(
+            f"| {r['case']}{mark} | {r['cold_seconds']} | {r['warm_seconds']} | {r['peak_rss_mb']} |"
+        )
 
 
 if __name__ == "__main__":
