@@ -110,8 +110,12 @@ def refresh(packages, *, reload=False):
         sys.meta_path.insert(0, _finder)
     if reload:
         for name, module in list(sys.modules.items()):
+            # Host-injected SDKs and session namespaces are not import caches.
+            spec = getattr(module, "__spec__", None)
+            if spec is None:
+                continue
             paths = [
-                getattr(module, "__file__", None),
+                spec.origin if spec.has_location else None,
                 *getattr(module, "__path__", ()),
             ]
             if any(_under(path, old_roots | _roots) for path in paths):

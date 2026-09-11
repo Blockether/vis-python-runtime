@@ -3,7 +3,7 @@
 
    The runtime resolves its sources the way it resolves the cdylib: a checkout
    uses the files where they lie, anything packaged is extracted once per
-   version. Both shapes are built here out of a temporary directory and a
+    source digest. Both shapes are built here out of a temporary directory and a
    temporary jar, so neither needs a published artifact to be proven."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
@@ -64,22 +64,23 @@
 
 (defn- jarred
   "A classpath JAR holding the manifest and every file it names."
-  []
-  (let [root
-        (temp-dir "vis-sources-jar")
+  ([] (jarred ""))
+  ([suffix]
+   (let [root
+         (temp-dir "vis-sources-jar")
 
-        file
-        (io/file (str root) "sources.jar")]
+         file
+         (io/file (str root) "sources.jar")]
 
-    (with-open [out (JarOutputStream. (io/output-stream file))]
-      (doseq [[entry text] (cons [Sources/MANIFEST (manifest)]
-                                 (map (fn [e]
-                                        [e (str "# " e)])
-                                      listed))]
-        (.putNextEntry out (JarEntry. entry))
-        (.write out (.getBytes ^String text "UTF-8"))
-        (.closeEntry out)))
-    file))
+     (with-open [out (JarOutputStream. (io/output-stream file))]
+       (doseq [[entry text] (cons [Sources/MANIFEST (manifest)]
+                                  (map (fn [e]
+                                         [e (str "# " e suffix)])
+                                       listed))]
+         (.putNextEntry out (JarEntry. entry))
+         (.write out (.getBytes ^String text "UTF-8"))
+         (.closeEntry out)))
+     file)))
 
 (defn- loader
   "A classloader over one classpath entry, isolated from this JVM's own."
@@ -113,13 +114,28 @@
           roots
           (Sources/roots (loader jar) cache)]
 
-      (is (= [(str cache "/vis-python")] roots))
-      (is (= "# vis-python/auto_imports.py"
-             (slurp (io/file (str cache) "vis-python/auto_imports.py"))))
-      (testing "the marker, not a re-read, is what makes the second call free"
-        (spit (io/file (str cache) "vis-python/auto_imports.py") "# edited")
+      (is (str/starts-with? (first roots) (str cache java.io.File/separator)))
+      (is (str/ends-with? (first roots) "/vis-python"))
+      (is (= "# vis-python/auto_imports.py" (slurp (io/file (first roots) "auto_imports.py"))))
+      (testing "the marker prevents rewriting an already extracted source tree"
+        (spit (io/file (first roots) "auto_imports.py") "# edited")
         (is (= roots (Sources/roots (loader jar) cache)))
-        (is (= "# edited" (slurp (io/file (str cache) "vis-python/auto_imports.py"))))))))
+        (is (= "# edited" (slurp (io/file (first roots) "auto_imports.py"))))))))
+
+(deftest changed-sources-do-not-reuse-a-version-cache-test
+  ;; Blockether/vis#194: a guest-only dependency update keeps the native ABI version.
+  (let [cache (temp-dir "vis-sources-revision")]
+    (with-open [old-loader (loader (jarred))
+                new-loader (loader (jarred "\n# updated"))]
+
+      (let [old-roots (Sources/roots old-loader cache)
+            new-roots (Sources/roots new-loader cache)]
+
+        (is (not= old-roots new-roots))
+        (is (= "# vis-python/auto_imports.py\n# updated"
+               (slurp (io/file (first new-roots) "auto_imports.py")))))
+      (is (= "# vis-python/auto_imports.py"
+             (slurp (io/file (first (Sources/roots old-loader cache)) "auto_imports.py")))))))
 
 (deftest no-manifest-answers-nothing-test
   (testing "an artifact that ships no Python contributes no import directory"
@@ -176,12 +192,14 @@
           cache
           (temp-dir "vis-cache")]
 
-      (let [urls (into-array URL
-                             [(.toURL (.toURI (io/file (str host "/"))))
-                              (.toURL (.toURI (io/file (str jar))))])]
-        (Sources/roots (URLClassLoader. urls (ClassLoader/getPlatformClassLoader)) cache))
-      (is (= "# vis-python/auto_imports.py"
-             (slurp (io/file (str cache) "vis-python/auto_imports.py")))))))
+      (with-open [classloader (URLClassLoader. (into-array URL
+                                                           [(.toURL (.toURI (io/file (str host
+                                                                                          "/"))))
+                                                            (.toURL (.toURI (io/file (str jar))))])
+                                               (ClassLoader/getPlatformClassLoader))]
+        (let [roots (Sources/roots classloader cache)]
+          (is (= "# vis-python/auto_imports.py"
+                 (slurp (io/file (first roots) "auto_imports.py")))))))))
 
 (deftest release-workflow-uploads-the-built-jar-test
   (testing "the release job names the versionless jar emitted by build/jar"

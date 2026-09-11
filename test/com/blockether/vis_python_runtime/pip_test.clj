@@ -115,6 +115,37 @@
                                                          "))")))))))
 
 (harness/defbuilt-test
+  editable-reload-preserves-injected-modules-test
+  ;; Blockether/vis#194: __file__ is not proof that a host module is import-backed.
+  (with-editable-site
+    (fn [session packages source]
+      (spit (io/file packages "fixture.pth") (str source "\n"))
+      (runtime/install-runtime! session)
+      (runtime/exec!
+        session
+        (str
+          "import sys, types, importlib.machinery, package_paths\n"
+          "__file__ = "
+          (pr-str (str (io/file source "extension.py")))
+          "\n"
+          "sdk = types.ModuleType('vis_injected_sdk')\n"
+          "sdk.__file__ = "
+          (pr-str (str (io/file source "sdk.py")))
+          "\n"
+          "sdk.__spec__ = importlib.machinery.ModuleSpec('vis_injected_sdk', None)\n"
+          "sdk.host = object()\n"
+          "sys.modules[sdk.__name__] = sdk\n"
+          "original_session = sys.modules[__name__]\n"
+          "package_paths.refresh("
+          (pr-str (str packages))
+          ", reload=True)\n"
+          "assert sys.modules.get(sdk.__name__) is sdk, 'injected SDK was evicted'\n"
+          "assert sys.modules.get(__name__) is original_session, 'active session was evicted'\n"))
+      (is (= "True"
+             (runtime/eval-str session "str(sys.modules['vis_injected_sdk'].host is sdk.host)")))
+      (runtime/exec! session "sys.modules.pop('vis_injected_sdk', None)"))))
+
+(harness/defbuilt-test
   editable-pth-is-importable-test
   ;; Blockether/vis#175: a site path alone does not activate an editable install.
   (with-editable-site

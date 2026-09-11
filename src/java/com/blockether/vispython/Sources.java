@@ -5,7 +5,9 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,8 +25,8 @@ import java.util.Map;
  * <p>Two shapes, one rule: when a listed resource already IS a file on disk -
  * a checkout, a {@code :local/root} dependency, an exploded classpath - its own
  * directory is used and nothing is copied. Otherwise every listed file is
- * extracted once per version under {@code ~/.vis/python/sources}, the same way
- * the cdylib is extracted, and a marker file makes the second start free.
+ * extracted once per source digest under {@code ~/.vis/python/sources}. A marker
+ * file makes repeated starts reuse the same tree without rewriting it.
  *
  * <p>A native image must be told to embed these resources; the manifest is the
  * list to register, and it is the reason the list exists as data rather than as
@@ -135,18 +137,18 @@ public final class Sources {
     }
   }
 
-  /** Copy one root's files out of the artifact, once per version. */
+  /** Copy one root's files out of the artifact, once per source digest. */
   private static String extract(URL anchor, Path cache, String root, List<String> entries) {
     if (cache == null) {
       throw new VisPythonException("vis-python: no home directory to extract Python sources into",
           Map.of("root", root));
     }
     Path directory = cache.resolve(root);
-    Path marker = cache.resolve(root + ".complete");
-    if (Files.isRegularFile(marker)) {
-      return directory.toAbsolutePath().toString();
-    }
     try {
+      // Guest source can change without changing the native ABI version. Never reuse
+      // an older artifact's sources or overwrite a tree another process is using.
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      Map<String, byte[]> sources = new LinkedHashMap<>();
       for (String entry : entries) {
         URL source = beside(anchor, entry);
         try (InputStream in = source == null ? null : source.openStream()) {
@@ -154,10 +156,24 @@ public final class Sources {
             throw new VisPythonException("vis-python: the artifact does not carry a listed source",
                 Map.of("resource", entry, "resource-manifest", MANIFEST));
           }
-          Path out = cache.resolve(entry);
-          Files.createDirectories(out.getParent());
-          Files.write(out, in.readAllBytes());
+          byte[] body = in.readAllBytes();
+          sources.put(entry, body);
+          digest.update(entry.getBytes(StandardCharsets.UTF_8));
+          digest.update((byte) 0);
+          digest.update(body);
+          digest.update((byte) 0);
         }
+      }
+      Path revision = cache.resolve(HexFormat.of().formatHex(digest.digest()));
+      directory = revision.resolve(root);
+      Path marker = revision.resolve(root + ".complete");
+      if (Files.isRegularFile(marker)) {
+        return directory.toAbsolutePath().toString();
+      }
+      for (Map.Entry<String, byte[]> source : sources.entrySet()) {
+        Path out = revision.resolve(source.getKey());
+        Files.createDirectories(out.getParent());
+        Files.write(out, source.getValue());
       }
       // Written last: a start interrupted halfway must extract again rather
       // than import a tree missing whatever had not been copied yet.
