@@ -32,6 +32,12 @@ def __vis_run_module__(name):
                 return done(entry(_sys.argv[1:]))
             except SystemExit as _e:
                 return done(_e.code)
+    original_argv = _sys.argv
+    if name == "pytest":
+        # The embedded host owns fatal-signal handlers. pytest's faulthandler
+        # can turn recoverable JVM signals into fatal Python faults.
+        # Disable only that diagnostic plugin, never any tests.
+        _sys.argv = [original_argv[0], "-p", "no:faulthandler", *original_argv[1:]]
     try:
         runpy.run_module(name, run_name="__main__", alter_sys=True)
         return done(0)
@@ -40,3 +46,5 @@ def __vis_run_module__(name):
     except ImportError:
         _sys.stdout.write("vis-agent python: No module named " + str(name) + chr(10))
         return done(1)
+    finally:
+        _sys.argv = original_argv
