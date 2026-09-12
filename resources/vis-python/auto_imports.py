@@ -2,11 +2,17 @@ def __vis_auto_imports__():
     import builtins as _b
     import importlib as _il
     import os as _os, sys as _sys, time as _time
+    from collections import Counter as _Counter
+    from pathlib import Path as _Path
 
     _b.os = _os
     _b.sys = _sys
     _b.time = _time
     _b.builtins = _b
+    # Classes must retain identity for isinstance, issubclass and inheritance
+    # on their first use; a callable module proxy is not a class.
+    _b.Counter = _Counter
+    _b.Path = _Path
 
     class _LazyStd:
         def __init__(self, bind, mod, attr):
@@ -37,9 +43,7 @@ def __vis_auto_imports__():
         ("hashlib", "hashlib", None),
         ("glob", "glob", None),
         ("collections", "collections", None),
-        ("Counter", "collections", "Counter"),
         ("pathlib", "pathlib", None),
-        ("Path", "pathlib", "Path"),
         ("textwrap", "textwrap", None),
         ("base64", "base64", None),
         ("math", "math", None),

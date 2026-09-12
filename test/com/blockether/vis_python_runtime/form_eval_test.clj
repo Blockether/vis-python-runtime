@@ -18,8 +18,10 @@
    half: prose-leading SyntaxError classification, the error enrichment that
    turns a NameError into a hint, and every binding built from a Clojure
    callable."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
+            [com.blockether.vis-python-runtime :as runtime]
             [com.blockether.vis-python-runtime.harness :as harness :refer [block]]))
 
 (use-fixtures :each
@@ -65,6 +67,27 @@
       (is (= "4.555806" (ran s "print(round(math.sqrt(2) + math.pi, 6))")))
       (is (= "True" (ran s "print(hasattr(glob, 'glob') and callable(glob.glob))")))
       (is (= "True" (ran s "print(hasattr(builtins, 'len') and builtins.len([1, 2]) == 2)"))))))
+
+(harness/defbuilt-test
+  sandbox-auto-import-class-identity-test
+  ;; Reset the process-wide bindings: another test may already have resolved a
+  ;; lazy class. The first isinstance must work, not just a subsequent block.
+  (let [s (harness/block-session)]
+    (runtime/exec! s (slurp (io/resource "vis-python/auto_imports.py")))
+    (is (= "True True True True True True"
+           (ran s
+                (str "import pathlib as real_paths, collections as real_collections
+"
+                     "project_root_path = real_paths.Path('.')
+"
+                     "library_path = real_paths.Path('library')
+"
+                     "counts = real_collections.Counter('aab')
+"
+                     "print(isinstance(project_root_path, Path), "
+                     "isinstance(library_path, Path), " "isinstance(counts, Counter), "
+                     "Path is real_paths.Path, Counter is real_collections.Counter, "
+                     "issubclass(real_paths.PosixPath, Path))"))))))
 
 (harness/defbuilt-test
   per-form-eval-test
