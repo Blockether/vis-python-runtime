@@ -281,6 +281,45 @@ static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
         check(!spawned, "job breakaway denied");
         if (spawned) TerminateProcess(process.hProcess, 99);
     } else {
+        if (!spawned) {
+            /* CI 34878855420: preserve the failure while distinguishing launch prerequisites. */
+            DWORD original_error = GetLastError();
+            const DWORD access[] = {PROCESS_CREATE_PROCESS, PROCESS_DUP_HANDLE};
+            for (int i = 0; i < 2; i++) {
+                HANDLE self;
+                SetLastError(ERROR_SUCCESS);
+                self = OpenProcess(access[i], FALSE, GetCurrentProcessId());
+                printf("DESCENDANT_SELF_ACCESS=%lu OPEN=%d ERROR=%lu\n", access[i], self != NULL, GetLastError());
+                if (self) CloseHandle(self);
+            }
+            for (int i = 0; i < 3; i++) {
+                STARTUPINFOW diagnostic_startup = {0};
+                PROCESS_INFORMATION diagnostic_process = {0};
+                DWORD diagnostic_flags = flags | (i == 1 ? 0 : CREATE_NO_WINDOW);
+                BOOL inherit = i == 0;
+                DWORD error, result = STILL_ACTIVE, waited = WAIT_FAILED;
+                BOOL started;
+                diagnostic_startup.cb = sizeof(diagnostic_startup);
+                swprintf_s(command, 32768, L"\"%ls\" token", executable);
+                SetLastError(ERROR_SUCCESS);
+                started = CreateProcessW(executable, command, NULL, NULL, inherit, diagnostic_flags,
+                                        NULL, NULL, &diagnostic_startup, &diagnostic_process);
+                error = GetLastError();
+                if (started) {
+                    waited = WaitForSingleObject(diagnostic_process.hProcess, 10000);
+                    if (waited != WAIT_OBJECT_0) {
+                        TerminateProcess(diagnostic_process.hProcess, 99);
+                        WaitForSingleObject(diagnostic_process.hProcess, 1000);
+                    }
+                    GetExitCodeProcess(diagnostic_process.hProcess, &result);
+                    CloseHandle(diagnostic_process.hThread);
+                    CloseHandle(diagnostic_process.hProcess);
+                }
+                printf("DESCENDANT_CREATE_FLAGS=%lu INHERIT=%d STARTED=%d ERROR=%lu WAIT=%lu EXIT=%lu\n",
+                       diagnostic_flags, inherit, started, error, waited, result);
+            }
+            SetLastError(original_error);
+        }
         check(spawned, "confined descendant starts");
         if (spawned && wcscmp(mode, L"sleep") == 0) {
             printf("CHILD=%lu\n", process.dwProcessId);

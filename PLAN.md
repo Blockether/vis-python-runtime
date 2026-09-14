@@ -259,20 +259,20 @@ the documentation checks. Local formatting, lint and PowerShell analysis pass;
 read-only review findings on source pinning and process/ConPTY lifetimes have
 been addressed.
 
-Windows CI run 34876244765 verifies minimal process launch and the effective
-LPAC access mask (`2`). Validation, staging stress, unique owned profiles,
-sibling-profile denial, staged read-only inputs, host/sibling file denial and
-private work-file writes execute successfully. The fail-fast probe reproduces
-Windows error 3 and identifies its cause: Windows expands `LOCALAPPDATA` to
-`tmp\Packages\<profile>\AC`, and `TEMP`/`TMP` to its missing `Temp` subdirectory.
-The backend now creates and pins that private subtree before launch; run
-34877636997 passes the new pre-launch directory check. It then stops at a
-host-side expected-path assertion before exercising temporary-file writes.
-The probes now treat `GetAppContainerFolderPath` as a local application-data
-folder, not a profile root, and validate its parent profile name. Crash-fixture
-cleanup retains the generated-name and exact-SID checks. The corrected path
-checks, temporary/application-data writes and sibling temporary-file denial
-still need Windows verification.
+Windows CI run 34878855420 verifies minimal process launch, the effective LPAC
+access mask (`2`), validation and staging stress. The private profile subtree
+exists before launch; the corrected profile-path checks, temporary-file
+create/write/delete, staged read-only inputs and host/sibling/profile/temporary
+file denials pass. The next failure is ordinary descendant creation:
+`CreateProcessW` returns Windows error 5. A failure-only comparison now checks
+self-process creation/duplication rights, handle inheritance and console
+creation flags while retaining the original failure. No process, token, pipe,
+network or host-file permissions have been loosened.
+
+`GetAppContainerFolderPath` returns local application data beneath the profile,
+not its root. Test cleanup validates the generated parent name and exact SID;
+explicit profile-removal assertions still follow the failing descendant test.
+Application-data writes in the environment stage also remain unverified.
 
 Diagnostic run 34870999620 was cancelled without a downloadable Windows job log.
 Separate CI/release steps expose native-library, Java, worker, native-image and
