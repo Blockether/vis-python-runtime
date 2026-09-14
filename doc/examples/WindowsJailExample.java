@@ -22,8 +22,8 @@ public final class WindowsJailExample {
       Process process = jail.spawn(List.of(python.toString(), "-I", "-c",
           "from pathlib import Path; Path('result.txt').write_text('6'); print(6)"),
           Map.of("SystemRoot", System.getenv("SystemRoot")), null, false, true, 0, 0);
-      try (var input = process.getOutputStream(); var output = process.getInputStream()) {
-        input.close();
+      process.getOutputStream().close();
+      try (var output = process.getInputStream()) {
         // This command has tiny output; large-output programs need concurrent readers.
         if (!process.waitFor(30, TimeUnit.SECONDS)) {
           process.destroyForcibly();

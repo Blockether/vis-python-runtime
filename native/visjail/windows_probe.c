@@ -7,6 +7,8 @@
 #include <windows.h>
 #include <aclapi.h>
 #include <sddl.h>
+#include <userenv.h>
+#include <objbase.h>
 #include <stdint.h>
 #include <winioctl.h>
 #include <stdio.h>
@@ -457,6 +459,48 @@ static void handle_check(int argc, wchar_t **argv, int host) {
     if (process) CloseHandle(process);
 }
 
+/* Query only the token's exact profile; cleanup never enumerates other profiles. */
+static void profile_check(const wchar_t *sid_text, int remove_profile) {
+    HANDLE token = NULL;
+    DWORD value = 1, size = 0;
+    PWSTR path = NULL;
+    PSID sid = NULL, derived = NULL;
+    const wchar_t *name;
+    HRESULT hr;
+    check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "profile fixture host token");
+    if (!token) return;
+    check(GetTokenInformation(token, TokenIsAppContainer, &value, sizeof(value), &size)
+          && value == 0, "profile fixture is host-only");
+    CloseHandle(token);
+    if (failures) return;
+    hr = GetAppContainerFolderPath(sid_text, &path);
+    check(SUCCEEDED(hr) && path != NULL, "query exact AppContainer profile path");
+    if (!path) return;
+    printf("PROFILE_PATH=");
+    for (const wchar_t *at = path; *at; at++) printf("%04X", (unsigned int)*at);
+    printf("\n");
+    if (remove_profile) {
+        name = wcsrchr(path, L'\\');
+        name = name ? name + 1 : path;
+        check(wcslen(name) == 40 && wcsncmp(name, L"visjail.", 8) == 0,
+              "cleanup names one generated Vis profile");
+        if (!failures) {
+            for (size_t i = 8; i < 40; i++)
+                check(wcschr(L"0123456789abcdef", name[i]) != NULL, "generated profile identifier");
+        }
+        if (!failures) {
+            check(ConvertStringSidToSidW(sid_text, &sid), "parse recorded profile SID");
+            hr = DeriveAppContainerSidFromAppContainerName(name, &derived);
+            check(SUCCEEDED(hr) && derived != NULL, "derive recorded profile identity");
+            if (sid && derived) check(EqualSid(sid, derived), "cleanup profile matches recorded token SID");
+        }
+        if (!failures) check(SUCCEEDED(DeleteAppContainerProfile(name)), "delete exact crash fixture profile");
+    }
+    if (derived) FreeSid(derived);
+    if (sid) LocalFree(sid);
+    CoTaskMemFree(path);
+}
+
 int wmain(int argc, wchar_t **argv) {
     int i;
     if (argc < 2) return 2;
@@ -467,8 +511,14 @@ int wmain(int argc, wchar_t **argv) {
     else if (wcscmp(argv[1], L"standard-token") == 0) standard_check();
     else if (wcscmp(argv[1], L"host-handle") == 0) handle_check(argc, argv, 1);
     else if (wcscmp(argv[1], L"secret-handle") == 0) handle_check(argc, argv, 0);
+    else if (wcscmp(argv[1], L"profile-path") == 0 && argc == 3) profile_check(argv[2], 0);
+    else if (wcscmp(argv[1], L"profile-delete") == 0 && argc == 3) profile_check(argv[2], 1);
     else if (wcscmp(argv[1], L"token") == 0) token_check();
     else if (wcscmp(argv[1], L"security") == 0) security_check(argc, argv);
+    else if (wcscmp(argv[1], L"denied-file") == 0 && argc == 3) {
+        denied(argv[2], GENERIC_READ, "sibling profile read denied");
+        denied(argv[2], GENERIC_WRITE, "sibling profile write denied");
+    }
     else if (wcscmp(argv[1], L"network") == 0) network_check(argc, argv);
     else if (wcscmp(argv[1], L"descendant") == 0) {
         child_check(L"token", 0, 0);

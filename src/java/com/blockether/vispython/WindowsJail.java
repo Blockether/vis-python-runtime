@@ -32,15 +32,17 @@ import java.util.TreeMap;
  * <p>Create a context, {@link #stage stage} programs and read-only inputs, then
  * {@link #spawn spawn} processes. The first spawn seals the application tree;
  * later staging is rejected. Processes in one context share its identity and
- * writable directories. Use separate contexts for mutually untrusted tasks.
+ * writable directories. The context also has private Windows-managed profile
+ * folders and registry storage, separate from the retained workspace. Use
+ * separate contexts for mutually untrusted tasks.
  * Network access, arbitrary host-path grants, proxy ports, credential-store
  * access and Unix sockets are not options in this API.
  *
  * <p>Requires the matching Windows x64 archive and Windows 11 or Windows Server
  * 2022. It installs no service or driver and needs no administrator setup. Keep
  * this host outside the sandbox. Close the context to terminate all remaining
- * descendants and release native resources; its directory and outputs remain
- * for you to inspect or delete. A host crash kills the jobs but may leave the
+ * descendants, release native resources and remove its Windows profile; the workspace
+ * and outputs remain for you. A host crash kills the jobs but may leave the
  * private directory and AppContainer profile behind.
  */
 public final class WindowsJail implements AutoCloseable {
@@ -108,6 +110,8 @@ public final class WindowsJail implements AutoCloseable {
    * Create a new private directory below an existing local {@code parent}.
    * Nothing in an existing project is granted permissions or replaced. The
    * native backend rejects reparse points, network volumes and unsafe paths.
+   * Failed creation attempts profile cleanup; a cleanup error names the profile
+   * that may need removal.
    *
    * @param parent existing directory in which you can create the workspace
    * @return an open context; use try-with-resources
@@ -297,7 +301,10 @@ public final class WindowsJail implements AutoCloseable {
         Map.of("operation", operation), exception);
   }
 
-  /** Kill and wait for all remaining descendants, release the context, and retain its files. Idempotent. */
+  /**
+   * Kill and wait for all descendants, remove the Windows profile, and retain the workspace.
+   * Idempotent after success. If cleanup throws, close can be called again to retry it.
+   */
   @Override public synchronized void close() {
     if (closed) return;
     MethodHandle destroy = handles().get("visjail_windows_destroy");

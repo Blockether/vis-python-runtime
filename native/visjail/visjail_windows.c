@@ -29,6 +29,7 @@ typedef struct Pin { HANDLE handle; struct Pin *next; } Pin;
 typedef struct Context {
     int id, sealed, poisoned;
     wchar_t *path;
+    wchar_t profile[80];
     PSID sid;
     HANDLE job;
     Pin *pins;
@@ -279,12 +280,26 @@ static int private_directory(Context *c, const wchar_t *path, DWORD rights) {
     return pin_handle(&c->pins, handle);
 }
 
+static int delete_profile(const wchar_t *name, char *error, int error_cap) {
+    HRESULT hr = DeleteAppContainerProfile(name);
+    char operation[160];
+    /* A failed deletion can be partial; the documented recovery is another call. */
+    if (FAILED(hr)) hr = DeleteAppContainerProfile(name);
+    if (SUCCEEDED(hr)) return 0;
+    _snprintf_s(operation, sizeof(operation), _TRUNCATE,
+        "Remove Windows profile %ls (HRESULT 0x%08lx)", name, (unsigned long)hr);
+    SetLastError((DWORD)(HRESULT_FACILITY(hr) == FACILITY_WIN32 ? HRESULT_CODE(hr) : ERROR_GEN_FAILURE));
+    return failure(error, error_cap, operation);
+}
+
 int visjail_windows_create(const char *directory, char *error, int error_cap) {
     Context *c = calloc(1, sizeof(*c));
     wchar_t name[80], *app = NULL, *work = NULL, *tmp = NULL;
     unsigned char random[16];
     HANDLE handle = INVALID_HANDLE_VALUE;
     HRESULT hr;
+    char profile_operation[160];
+    const char *operation = "Create private Windows jail";
     int result;
     AcquireSRWLockExclusive(&lock);
     if (!c) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto fail; }
@@ -302,8 +317,16 @@ int visjail_windows_create(const char *directory, char *error, int error_cap) {
         L"visjail.%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
         random[0], random[1], random[2], random[3], random[4], random[5], random[6], random[7],
         random[8], random[9], random[10], random[11], random[12], random[13], random[14], random[15]);
-    hr = DeriveAppContainerSidFromAppContainerName(name, &c->sid);
-    if (FAILED(hr)) { SetLastError((DWORD)hr); goto fail; }
+    hr = CreateAppContainerProfile(name, L"Vis private process", L"Private workspace for confined processes",
+        NULL, 0, &c->sid);
+    if (FAILED(hr)) {
+        _snprintf_s(profile_operation, sizeof(profile_operation), _TRUNCATE,
+            "Create Windows profile %ls (HRESULT 0x%08lx)", name, (unsigned long)hr);
+        operation = profile_operation;
+        SetLastError((DWORD)(HRESULT_FACILITY(hr) == FACILITY_WIN32 ? HRESULT_CODE(hr) : ERROR_GEN_FAILURE));
+        goto fail;
+    }
+    memcpy(c->profile, name, (wcslen(name) + 1) * sizeof(wchar_t));
     if (!permissions(handle, c->sid, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, 1)) goto fail;
     if (!pin_handle(&c->pins, handle)) { handle = INVALID_HANDLE_VALUE; goto fail; }
     handle = INVALID_HANDLE_VALUE;
@@ -316,10 +339,14 @@ int visjail_windows_create(const char *directory, char *error, int error_cap) {
     c->next = contexts; contexts = c; result = c->id;
     goto done;
 fail:
-    result = failure(error, error_cap, "Create private Windows jail");
+    result = failure(error, error_cap, operation);
     if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
     if (c) {
         unpin(c->pins); if (c->job) CloseHandle(c->job);
+        if (c->profile[0]) {
+            int cleanup = delete_profile(c->profile, error, error_cap);
+            if (cleanup) result = cleanup;
+        }
         if (c->sid) FreeSid(c->sid); free(c->path); free(c);
     }
 done:
@@ -742,7 +769,7 @@ int visjail_windows_destroy(int id) {
     for (slot = &contexts; *slot && (*slot)->id != id; slot = &(*slot)->next) {}
     c = *slot;
     if (!c) { ReleaseSRWLockExclusive(&lock); return result; }
-    if (!finish_job(c->job)) {
+    if (c->job && !finish_job(c->job)) {
         result = -(int)GetLastError(); ReleaseSRWLockExclusive(&lock); return result;
     }
     *slot = c->next;
@@ -772,7 +799,16 @@ int visjail_windows_destroy(int id) {
         AcquireSRWLockExclusive(&lock);
     }
     ReleaseSRWLockExclusive(&lock);
-    unpin(c->pins); CloseHandle(c->job); FreeSid(c->sid); free(c->path); free(c);
+    unpin(c->pins); c->pins = NULL;
+    if (c->job) { CloseHandle(c->job); c->job = NULL; }
+    result = delete_profile(c->profile, NULL, 0);
+    if (result) {
+        /* Retain only cleanup state so close can retry without permitting launches. */
+        c->poisoned = 1;
+        AcquireSRWLockExclusive(&lock); c->next = contexts; contexts = c;
+        ReleaseSRWLockExclusive(&lock); return result;
+    }
+    FreeSid(c->sid); free(c->path); free(c);
     return 0;
 }
 

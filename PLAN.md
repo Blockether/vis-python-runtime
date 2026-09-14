@@ -253,13 +253,16 @@ Outputs remain available to the host after closing the context.
 ## Plan state
 
 The native backend, Java/Clojure interface, guide and Windows CI probes are
-implemented. Read-only review findings on source pinning and process/ConPTY
-lifetimes have been addressed; Windows execution is still required to validate
-them. A clean task-only source export passes 29 local JVM tests and 2158 assertions
-on macOS, plus the documentation test and link checks across 38 generated pages.
-The macOS jail library builds with the repository compiler settings, and all four
-Windows PowerShell scripts pass PSScriptAnalyzer.
+implemented. MSVC builds the Windows DLL and test guest, and both the native
+worker and native-image launcher compile. CI passes all four Unix platforms and
+the documentation checks. Local formatting, lint and PowerShell analysis pass;
+read-only review findings on source pinning and process/ConPTY lifetimes have
+been addressed.
 
-Windows MSVC, LPAC/ACL enforcement, network denial, ConPTY, native-image launcher
+Windows CI run 34863155067 reaches `CreateProcessW` but fails the first confined
+launch with error 2. Unique profile registration and owned-profile cleanup now
+replace the unverified SID-only setup, with regression checks for profile
+separation, cleanup and retained workspace outputs. This fix still needs Windows
+execution. LPAC/ACL enforcement, network denial, ConPTY, native-image launcher
 downcalls and extracted-archive checks remain unverified. No Windows confinement
 support or release completion is claimed until those checks pass.

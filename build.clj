@@ -254,11 +254,11 @@
         (io/file "target/windows-jail-guest.exe")]
 
     (b/delete {:path (.getPath guest)})
-    (let [{:keys [exit]} (b/process {:command-args ["cl.exe" "/nologo" "/std:c11" "/W4" "/WX" "/O2"
-                                                    "/MT" "/Fotarget/windows-jail-guest.obj"
-                                                    (str "/Fe" (.getPath guest))
-                                                    "native/visjail/windows_probe.c" "/link"
-                                                    "advapi32.lib" "ws2_32.lib"]})]
+    (let [{:keys [exit]}
+          (b/process {:command-args ["cl.exe" "/nologo" "/std:c11" "/W4" "/WX" "/O2" "/MT"
+                                     "/Fotarget/windows-jail-guest.obj" (str "/Fe" (.getPath guest))
+                                     "native/visjail/windows_probe.c" "/link" "advapi32.lib"
+                                     "ws2_32.lib" "userenv.lib" "ole32.lib"]})]
       (when-not (zero? exit)
         (throw (ex-info "Windows jail guest probe compilation failed" {:exit exit}))))
     (when-not (.isFile guest)

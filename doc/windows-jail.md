@@ -114,20 +114,24 @@ Both `destroy()` and `destroyForcibly()` terminate the Windows job and its
 descendants; there is no POSIX signal delivery or graceful-termination promise.
 `supportsNormalTermination()` returns false. When the main process exits, its
 remaining descendants are terminated. Closing a context terminates every
-remaining launch before releasing its native resources.
+remaining launch, releases native resources and deletes its Windows profile.
+If cleanup fails, `close()` throws; you can call it again to retry.
 
 Closing **retains** the private directory and outputs for the host. Inspect them
 as untrusted task data; do not follow guest-created links into other directories
 when exporting or deleting results. A host crash also closes the kill-on-close
 jobs, but may leave the private directory and AppContainer profile behind.
+Failed creation also attempts profile cleanup; if that fails, the error names
+the profile that may need removal.
 
 ## Security contract and limits
 
 The boundary is the Windows token, ACL checks and jobs, not a Python wrapper.
 The launcher creates the process suspended, supplies only its intended standard
 handles, assigns its jobs, and resumes it only after setup succeeds. Each context
-has a separate AppContainer identity. Files in another context and private host
-files without LPAC access are not granted to it.
+has a separate AppContainer identity with private Windows-managed profile folders
+and registry storage, in addition to the retained workspace. Files in another
+context and private host files without LPAC access are not granted to it.
 
 Windows' existing LPAC-accessible system and public resources remain subject to
 their OS ACLs. This API does not provide a filtered drive namespace or replace

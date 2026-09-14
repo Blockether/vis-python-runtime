@@ -101,6 +101,18 @@ public final class WindowsJailProbe {
     return text.append('\n').toString();
   }
 
+  private static Path profilePath(Path guest, String sid) throws Exception {
+    Result result = finish(new ProcessBuilder(guest.toString(), "profile-path", sid).start(), new byte[0]);
+    passed(result, "host queries exact token profile");
+    String hex = field(result.out(), "PROFILE_PATH");
+    check(!hex.isEmpty() && hex.length() % 4 == 0, "profile path preserves UTF-16 code units");
+    StringBuilder path = new StringBuilder();
+    for (int index = 0; index < hex.length(); index += 4) {
+      path.append((char) Integer.parseInt(hex.substring(index, index + 4), 16));
+    }
+    return Path.of(path.toString());
+  }
+
   private static void validation(Path parent, Path guest) throws Exception {
     Path source = Files.writeString(parent.resolve("input.txt"), "source-data");
     var sourceAcl = Files.getFileAttributeView(source, AclFileAttributeView.class).getAcl();
@@ -156,6 +168,12 @@ public final class WindowsJailProbe {
       passed(token1, "first token");
       passed(token2, "second token");
       check(!field(token1.out(), "SID").equals(field(token2.out(), "SID")), "siblings have unique AppContainer SIDs");
+      Path profile1 = profilePath(guest, field(token1.out(), "SID"));
+      Path profile2 = profilePath(guest, field(token2.out(), "SID"));
+      check(Files.isDirectory(profile1) && Files.isDirectory(profile2), "owned profile storage exists");
+      check(!profile1.equals(profile2), "contexts have separate profile storage");
+      Path profileSecret = Files.writeString(profile2.resolve("sibling-private.txt"), "profile-private");
+      passed(run(first, "denied-file", profileSecret.toString()), "sibling profile read and write denied");
       Path junction = Files.createDirectory(first.workDirectory().resolve("outside-junction"));
       try {
         passed(finish(new ProcessBuilder(guest.toString(), "junction", junction.toString(), parent.toString()).start(), new byte[0]),
@@ -172,8 +190,13 @@ public final class WindowsJailProbe {
       Path output = first.workDirectory().resolve("retained.txt");
       first.close();
       check(Files.readString(output).equals("retained"), "outputs retained on close");
+      check(Files.notExists(profile1), "close removes owned profile storage");
+      check(Files.isDirectory(profile2) && Files.readString(profileSecret).equals("profile-private"),
+          "closing a context preserves its sibling profile");
       denied(() -> first.spawn(command, Map.of(), null, false, false, 0, 0), "closed context launched a process");
       passed(run(second, "token"), "closing one context does not kill another");
+      second.close();
+      check(Files.notExists(profile2), "second context removes its own profile storage");
     }
     check(Files.readString(secret).equals("host-private"), "host secret unchanged");
     check(Files.readString(input).equals("read-only"), "host staged source unchanged");
@@ -413,14 +436,18 @@ public final class WindowsJailProbe {
   }
 
   private static void crashChild(Path parent, Path guest) throws Exception {
-    WindowsJail jail = prepare(parent, guest);
-    Process process = jail.spawn(List.of(jail.applicationDirectory().resolve("guest.exe").toString(), "tree"),
-        Map.of(), null, false, false, 0, 0);
-    long descendant = childPid(process);
-    System.out.println("PRIMARY=" + process.pid());
-    System.out.println("DESCENDANT=" + descendant);
-    System.out.flush();
-    Runtime.getRuntime().halt(0);
+    try (WindowsJail jail = prepare(parent, guest)) {
+      Result token = run(jail, "token");
+      passed(token, "crash fixture token");
+      Process process = jail.spawn(List.of(jail.applicationDirectory().resolve("guest.exe").toString(), "tree"),
+          Map.of(), null, false, false, 0, 0);
+      long descendant = childPid(process);
+      Files.writeString(parent.resolve("crash-profile-sid"), field(token.out(), "SID"));
+      System.out.println("PRIMARY=" + process.pid());
+      System.out.println("DESCENDANT=" + descendant);
+      System.out.flush();
+      Runtime.getRuntime().halt(0);
+    }
   }
 
   private static List<String> self(String mode, Path parent, Path guest) {
@@ -466,11 +493,24 @@ public final class WindowsJailProbe {
   }
 
   private static void parentCrash(Path parent, Path guest) throws Exception {
-    List<String> command = self("--crash-child", parent, guest);
-    Result result = finish(new ProcessBuilder(command).start(), new byte[0]);
-    check(result.exit == 0, "crash helper exited: " + result.err());
-    gone(Long.parseLong(field(result.out(), "PRIMARY")));
-    gone(Long.parseLong(field(result.out(), "DESCENDANT")));
+    Path recordedProfile = parent.resolve("crash-profile-sid");
+    try {
+      List<String> command = self("--crash-child", parent, guest);
+      Result result = finish(new ProcessBuilder(command).start(), new byte[0]);
+      check(result.exit == 0, "crash helper exited: " + result.err());
+      gone(Long.parseLong(field(result.out(), "PRIMARY")));
+      gone(Long.parseLong(field(result.out(), "DESCENDANT")));
+      check(Files.isRegularFile(recordedProfile), "crash fixture records its exact owned profile SID");
+    } finally {
+      if (Files.exists(recordedProfile)) {
+        String sid = Files.readString(recordedProfile);
+        Path profile = profilePath(guest, sid);
+        passed(finish(new ProcessBuilder(guest.toString(), "profile-delete", sid).start(), new byte[0]),
+            "remove only the recorded crash fixture profile");
+        check(Files.notExists(profile), "crash fixture profile storage cleaned up");
+        Files.delete(recordedProfile);
+      }
+    }
   }
 
   private static void nativeWorker(WindowsJail jail, Path staged) throws Exception {
