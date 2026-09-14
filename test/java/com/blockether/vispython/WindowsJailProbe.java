@@ -73,7 +73,17 @@ public final class WindowsJailProbe {
       } catch (Throwable failure) { sent.completeExceptionally(failure); }
     });
     try {
-      check(process.waitFor(20, TimeUnit.SECONDS), "process watchdog expired");
+      if (!process.waitFor(20, TimeUnit.SECONDS)) {
+        AssertionError timeout = new AssertionError("process watchdog expired");
+        process.destroyForcibly();
+        try {
+          check(process.waitFor(5, TimeUnit.SECONDS), "timed-out process terminates after kill");
+          Result captured = new Result(process.exitValue(), out.get(5, TimeUnit.SECONDS), err.get(5, TimeUnit.SECONDS));
+          System.err.println("Timed-out child stdout=" + captured.out() + " stderr=" + captured.err());
+        } catch (Exception | AssertionError captureFailure) { timeout.addSuppressed(captureFailure); }
+        throw timeout;
+      }
+      checks++;
       sent.get(5, TimeUnit.SECONDS);
       return new Result(process.exitValue(), out.get(5, TimeUnit.SECONDS), err.get(5, TimeUnit.SECONDS));
     } finally {
@@ -405,7 +415,9 @@ public final class WindowsJailProbe {
   }
 
   private static void terminalBackpressure(Path parent, Path guest) throws Exception {
+    System.out.println("START WindowsJail ConPTY preparation");
     WindowsJail jail = prepare(parent, guest);
+    System.out.println("START WindowsJail ConPTY flood spawn");
     Process process = jail.spawn(List.of(jail.applicationDirectory().resolve("guest.exe").toString(), "pty-flood"),
         Map.of(), null, true, true, 31, 97);
     // Consume more than the Java 64KiB pipe, then deliberately stop draining it.
@@ -419,22 +431,37 @@ public final class WindowsJailProbe {
       }
       catch (IOException expectedOnClose) { /* Closing a blocked writer is expected. */ }
     });
+    Throwable failure = null;
     try {
-      read.get(10, TimeUnit.SECONDS);
+      stage("ConPTY output readiness", () -> read.get(10, TimeUnit.SECONDS));
       check(process.isAlive(), "flood guest remains active before context close");
       check(!write.isDone(), "ConPTY stdin is active under backpressure at close");
-      background(jail::close).get(10, TimeUnit.SECONDS);
-      check(process.waitFor(5, TimeUnit.SECONDS), "ConPTY backpressure close kills process");
-      write.get(5, TimeUnit.SECONDS);
+      stage("ConPTY context close", () -> background(jail::close).get(10, TimeUnit.SECONDS));
+      stage("ConPTY process exit", () ->
+          check(process.waitFor(5, TimeUnit.SECONDS), "ConPTY backpressure close kills process"));
+      stage("ConPTY blocked writer release", () -> write.get(5, TimeUnit.SECONDS));
+    } catch (Exception | AssertionError caught) {
+      failure = caught;
+      caught.printStackTrace(System.err);
+      Thread.getAllStackTraces().forEach((thread, stack) -> {
+        System.err.println("ConPTY thread " + thread.getName() + " " + thread.getState());
+        for (StackTraceElement frame : stack) System.err.println("  at " + frame);
+      });
+      throw caught;
     } finally {
       // Cleanup itself is bounded: a native lock bug must fail, not hang the runner.
-      background(() -> {
-        process.destroyForcibly();
-        process.getInputStream().close();
-        process.getOutputStream().close();
-        process.getErrorStream().close();
-        jail.close();
-      }).get(10, TimeUnit.SECONDS);
+      try {
+        stage("ConPTY cleanup", () -> background(() -> {
+          process.destroyForcibly();
+          process.getInputStream().close();
+          process.getOutputStream().close();
+          process.getErrorStream().close();
+          jail.close();
+        }).get(10, TimeUnit.SECONDS));
+      } catch (Exception | AssertionError cleanup) {
+        if (failure == null) throw cleanup;
+        failure.addSuppressed(cleanup);
+      }
     }
   }
 

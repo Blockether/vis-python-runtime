@@ -358,6 +358,16 @@ external runtime in each probe process's environment, inherited by its test
 children, without changing the calling shell's environment. Each top-level probe
 also checks that the selected DLL is the requested runtime before the jail tests.
 
-Native-image launcher execution, subsequent runtime/documentation-example suites
-and extracted-archive verification remain pending. No Windows release completion
-is claimed yet.
+Run 34909384557 passes the complete JVM launcher with 267 checks. The native-image
+launcher now verifies its selected runtime and passes validation, staging,
+registry, filesystem, streams, network, lifetime and terminal round trips. Its
+active-ConPTY-close subprocess reaches the 20-second watchdog. The outer harness
+discarded child output on timeout, so the failing inner phase was not visible.
+The probe now retains bounded post-kill diagnostics, labels its readiness/close/
+exit/writer/cleanup phases and prints thread stacks on an inner failure. Cleanup
+preserves the primary exception. The 20-second success deadline is unchanged;
+no confinement or production teardown behavior has changed for this diagnosis.
+
+The remaining native-image stages, subsequent runtime/documentation-example
+suites and extracted-archive verification remain pending. No Windows release
+completion is claimed yet.
