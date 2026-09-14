@@ -165,15 +165,22 @@ lint/reflection, PowerShell analysis and diff checks passed.
 
 Instrumented CI `34843998016` isolated the hang to a denied DOS console path in
 `windows-native-confinement-test`. CPython's WindowsConsoleIO opens console handles
-without emitting the `open` audit event. The local C fix guards its constructor
+without emitting the `open` audit event. The C fix in `b3188e0` guards its constructor
 and existing initializer descriptor, including cached bound wrappers, while
 preserving unconfined behavior. Initialization fails closed if site customization
 already created subclasses with copied initializer slots. Regression tests cover
 automatic dispatch, raw constructors, subclasses, cached initializers and startup
-customization. Linux, macOS and documentation jobs passed the diagnostic commit.
+customization. Follow-up `e2d2807` passes helper JVM scripts through stdin on Windows
+and tests a recorded `runtime/run` call instead of raw `eval-str`.
 
-Next: verify the fix on Windows and the existing Linux/macOS/archive gates. Do not
-loosen confinement, skip tests or extend the timeout to hide failures. Pre-existing
-asynchronous-runtime changes and concurrent live-worker diagnostics remain outside
-this repair. The user authorized scoped commits, pushes and CI runs. No new
-release, consumer installation or live gateway restart is in scope.
+Windows execution is complete at `e2d2807`. CI `34847306246` passed all six jobs:
+Windows, Linux x64/arm64, macOS x64/arm64 and generated API documentation. Windows
+built the DLL and native worker, passed 11 native-boundary tests and 82 shared
+suite tests, verified the archive and offline uv, then passed both suites again
+against the extracted archive. Local affected checks passed 27 tests and 89
+assertions, with clean Clojure formatting, lint/reflection and diff checks.
+
+The repair is pushed without loosening confinement or extending the job timeout.
+Pre-existing asynchronous-runtime changes and concurrent live-worker diagnostics
+remain outside its commits. No release tag, consumer installation or live gateway
+restart was performed; release publication remains a separate workflow.
