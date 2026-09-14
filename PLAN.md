@@ -259,12 +259,12 @@ the documentation checks. Local formatting, lint and PowerShell analysis pass;
 read-only review findings on source pinning and process/ConPTY lifetimes have
 been addressed.
 
-Windows CI run 34865611509 creates the profile, but the first `CreateProcessW`
-call reports missing environment data (error 203), instead of the earlier error
-2. The launcher now supplies only the OS-derived `SystemRoot` and private
-`TEMP`/`TMP` as its required environment baseline, with checks for empty-map
-launches, reserved-value overrides and no ambient environment inheritance.
-Windows execution remains pending. LPAC/ACL enforcement, network denial, ConPTY,
-native-image launcher downcalls and extracted-archive checks remain unverified.
-No Windows confinement support or release completion is claimed until those
-checks pass.
+Windows CI run 34866779569 still reports missing environment data (error 203)
+at the first `CreateProcessW` call. Profile registration and OS-derived
+`SystemRoot` alone are insufficient. A failure-only probe now compares the
+AppContainer-required `LOCALAPPDATA` using the host known-folder value and the
+private temporary directory, without inheriting the whole host environment or
+accepting a diagnostic success as a passing suite. Windows execution remains
+pending. LPAC/ACL enforcement, network denial, ConPTY, native-image launcher
+downcalls and extracted-archive checks remain unverified. No Windows confinement
+support or release completion is claimed until those checks pass.

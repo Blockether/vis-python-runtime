@@ -137,7 +137,28 @@ public final class WindowsJailProbe {
             && expected.getMessage().contains("Windows error 2"),
             "missing executable preserves the failing operation and native error: " + expected.getMessage());
       }
-      passed(run(jail, "token"), "token");
+      try {
+        passed(run(jail, "token"), "token");
+      } catch (VisPythonException original) {
+        // Keep the original failure; probe only the documented AppContainer variable.
+        for (String label : List.of("host-local-app-data", "private-temp")) {
+          String value = label.equals("private-temp") ? jail.temporaryDirectory().toString()
+              : System.getenv("LOCALAPPDATA");
+          if (value == null) {
+            System.out.println("LAUNCH_DIAGNOSTIC " + label + " unavailable");
+            continue;
+          }
+          try {
+            Result result = finish(jail.spawn(List.of(stagedGuest.toString(), "token"),
+                Map.of("LOCALAPPDATA", value), null, false, false, 0, 0), new byte[0]);
+            passed(result, "LOCALAPPDATA diagnostic token");
+            System.out.println("LAUNCH_DIAGNOSTIC " + label + " PASS");
+          } catch (Exception | AssertionError diagnostic) {
+            System.out.println("LAUNCH_DIAGNOSTIC " + label + " " + diagnostic.getMessage());
+          }
+        }
+        throw original;
+      }
       denied(() -> jail.stage(source, "late.txt"), "staging remains open after spawn");
       denied(() -> jail.spawn(List.of(guest.toString(), "token"), Map.of(), null, false, false, 0, 0),
           "host executable outside staged app accepted");
