@@ -107,12 +107,24 @@ public final class WindowsJailProbe {
     try (WindowsJail jail = prepare(parent, guest)) {
       check(Files.isDirectory(jail.directory()), "private root exists");
       check(!jail.directory().equals(parent), "context creates a new root");
+      Path stagedGuest = jail.applicationDirectory().resolve("guest.exe");
+      check(Files.isRegularFile(stagedGuest) && Files.size(stagedGuest) == Files.size(guest),
+          "guest executable is staged completely");
       for (String destination : List.of("../escape", "C:\\escape", "file:stream", "NUL", "")) {
         denied(() -> jail.stage(source, destination), "unsafe destination accepted: " + destination);
       }
       jail.stage(source, "data/input.txt");
       check(Files.readString(jail.applicationDirectory().resolve("data/input.txt")).equals("source-data"),
           "staged bytes are copied");
+      try {
+        jail.spawn(List.of(jail.applicationDirectory().resolve("missing.exe").toString()),
+            Map.of(), null, false, false, 0, 0);
+        throw new AssertionError("missing executable was accepted");
+      } catch (VisPythonException expected) {
+        check(expected.getMessage().contains("Pin Windows launch paths")
+            && expected.getMessage().contains("Windows error 2"),
+            "missing executable preserves the failing operation and native error: " + expected.getMessage());
+      }
       passed(run(jail, "token"), "token");
       denied(() -> jail.stage(source, "late.txt"), "staging remains open after spawn");
       denied(() -> jail.spawn(List.of(guest.toString(), "token"), Map.of(), null, false, false, 0, 0),

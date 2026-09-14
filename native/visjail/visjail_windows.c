@@ -872,6 +872,7 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     Pin *launch_pins = NULL;
     int argc = 0, envc = 0, context_id = 0, status = 0, pty = !!(flags & VISJAIL_PTY);
     char *end;
+    const char *operation = "Prepare private Windows process";
     long parsed;
     HANDLE host_in = NULL, host_out = NULL, host_err = NULL;
     HANDLE child_in = NULL, child_out = NULL, child_err = NULL;
@@ -923,6 +924,7 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
         free(block); block = environment_block(env, envc);
         if (!block) goto fail;
     }
+    operation = "Pin Windows launch paths";
     {
         UINT system_length = GetSystemDirectoryW(system_directory, MAX_PATH + 1);
         HANDLE directory_handle;
@@ -951,6 +953,7 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     if (pty && (rows <= 0 || cols <= 0 || rows > SHRT_MAX || cols > SHRT_MAX)) {
         SetLastError(ERROR_INVALID_PARAMETER); goto fail;
     }
+    operation = "Create private Windows pipes";
     if (!pipe_pair(&host_in, &child_in, 0) || !pipe_pair(&host_out, &child_out, 1)) goto fail;
     if (!pty && !(flags & VISJAIL_MERGE_STDERR) && !pipe_pair(&host_err, &child_err, 1)) goto fail;
     if (pty) {
@@ -958,6 +961,7 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
         hr = CreatePseudoConsole(size, child_in, child_out, 0, &console);
         if (FAILED(hr)) { SetLastError((DWORD)hr); goto fail; }
     }
+    operation = "Configure Windows process security";
     startup.StartupInfo.cb = sizeof(startup);
     InitializeProcThreadAttributeList(NULL, 3, 0, &attribute_size);
     startup.lpAttributeList = malloc(attribute_size);
@@ -981,14 +985,18 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
         if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
             inherit, (child_err ? 3 : 2) * sizeof(HANDLE), NULL, NULL)) goto fail;
     }
+    operation = "Create Windows process job";
     p = calloc(1, sizeof(*p));
     if (!p) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto fail; }
     p->job = new_job();
     if (!p->job || !(p->id = allocate_id())) goto fail;
+    operation = "Create confined Windows process";
     if (!CreateProcessW(args[0], line, NULL, NULL, !pty,
         CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT |
             (pty ? 0 : CREATE_NO_WINDOW), block, directory, &startup.StartupInfo, &info)) goto fail;
+    operation = "Assign Windows process jobs";
     if (!AssignProcessToJobObject(c->job, info.hProcess) || !AssignProcessToJobObject(p->job, info.hProcess)) goto fail;
+    operation = "Connect Windows process streams";
     input = stream_new(c->id, pty ? host_out : NULL, host_in);
     if (!input) goto fail;
     host_in = NULL; if (pty) host_out = NULL;
@@ -996,6 +1004,7 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
         output = stream_new(c->id, host_out, NULL); if (!output) goto fail; host_out = NULL;
         if (host_err) { errstream = stream_new(c->id, host_err, NULL); if (!errstream) goto fail; host_err = NULL; }
     }
+    operation = "Start confined Windows process";
     if (ResumeThread(info.hThread) == (DWORD)-1) goto fail;
     p->process = info.hProcess; p->pid = info.dwProcessId; p->context = c->id; p->console = console;
     p->next = processes; processes = p;
@@ -1004,7 +1013,7 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     info.hProcess = NULL; console = NULL; p = NULL;
     goto done;
 fail:
-    status = failure(error, error_cap, "Spawn private Windows process");
+    status = failure(error, error_cap, operation);
     if (info.hProcess) { TerminateProcess(info.hProcess, 1); WaitForSingleObject(info.hProcess, INFINITE); }
     if (p && p->job) finish_job(p->job);
     for (Stream **slot = &streams; *slot;) {
