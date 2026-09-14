@@ -51,3 +51,12 @@
                        [".uv-version" "UV_SHA256_WINDOWS_X64"]
                        [".graalvm-version" "GRAAL_SHA256_windows_x64"]]]
     (is (re-find (re-pattern (str "(?m)^" name "=\"?[0-9a-f]{64}\"?$")) (slurp path)) path)))
+
+(deftest windows-test-diagnostics-gate-test
+  (let [script (slurp "scripts/test-windows.ps1")]
+    (is (= 2 (count (re-seq #"-M:test:test-diagnostics" script)))
+        "Both the isolated native boundary and shared suites must retain the watchdog")
+    (doseq [namespace ["com.blockether.vis-python-runtime.asyncio-test"
+                       "com.blockether.vis-python-runtime.test-diagnostics-test"]]
+      (is (str/includes? script namespace) namespace))
+    (is (str/includes? (slurp "deps.edn") "com.blockether.vis-python-runtime.test-diagnostics"))))

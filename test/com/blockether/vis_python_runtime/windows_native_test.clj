@@ -3,7 +3,8 @@
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [com.blockether.vis-python-runtime :as runtime])
+            [com.blockether.vis-python-runtime :as runtime]
+            [com.blockether.vis-python-runtime.test-diagnostics :as diagnostics])
   (:import [com.blockether.vispython VisPythonException]
            [java.nio.file Files Path]
            [java.nio.file.attribute FileAttribute]))
@@ -20,13 +21,28 @@
 
 (use-fixtures :each
               (fn [run]
+                (diagnostics/stage! "Initialize native runtime")
                 (runtime/initialize!)
+                (when diagnostics/*stage*
+                  ;; Timed dumps use CPython's watchdog, not its fatal-signal handlers:
+                  ;; the embedding JVM must retain ownership of those handlers.
+                  (runtime/exec!
+                    "windows-test-diagnostics"
+                    (str
+                      "import faulthandler, sys\n"
+                      "faulthandler.dump_traceback_later(90, repeat=True, file=sys.__stderr__)")))
                 (try (run)
-                     (finally (runtime/confine! [] [])
+                     (finally (diagnostics/stage! "Reset native filesystem policy")
+                              (runtime/confine! [] [])
+                              (diagnostics/stage! "Reset native network, thread and log policy")
                               (runtime/network! true)
                               (runtime/threads! 100 0 8)
                               (runtime/logging! :off)
-                              (runtime/drain-log!)))))
+                              (runtime/drain-log!)
+                              (when diagnostics/*stage*
+                                (runtime/exec! "windows-test-diagnostics"
+                                               "faulthandler.cancel_dump_traceback_later()"))
+                              (diagnostics/stage! "Native fixture complete")))))
 
 (deftest invalid-policy-fails-closed-test
   ;; Windows rejects device/UNC roots; dropping every root must not unconfine the process.

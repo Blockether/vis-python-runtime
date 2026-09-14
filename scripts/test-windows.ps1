@@ -24,6 +24,8 @@ $namespaces = @(
     'com.blockether.vis-python-runtime-test'
     'com.blockether.vis-python-runtime.native-test'
     'com.blockether.vis-python-runtime.bridge-test'
+    'com.blockether.vis-python-runtime.asyncio-test'
+    'com.blockether.vis-python-runtime.test-diagnostics-test'
     'com.blockether.vis-python-runtime.host-test'
     'com.blockether.vis-python-runtime.log-test'
     'com.blockether.vis-python-runtime.threads-test'
@@ -33,12 +35,12 @@ $namespaces = @(
     'com.blockether.vis-python-runtime.windows-test'
     'com.blockether.vis-python-runtime.windows-native-test'
 )
-$arguments = @('-M:test')
+$arguments = @('-M:test:test-diagnostics')
 foreach ($namespace in $namespaces) { $arguments += @('-n', $namespace) }
 Push-Location $repo
 try {
     # Isolate the new native boundary before the shared-interpreter suites.
-    & clojure -M:test -n com.blockether.vis-python-runtime.windows-native-test
+    & clojure -M:test:test-diagnostics -n com.blockether.vis-python-runtime.windows-native-test
     if ($LASTEXITCODE -ne 0) { throw "Windows native boundary tests failed: $LASTEXITCODE" }
     & clojure @arguments
     if ($LASTEXITCODE -ne 0) { throw "Windows runtime tests failed: $LASTEXITCODE" }
