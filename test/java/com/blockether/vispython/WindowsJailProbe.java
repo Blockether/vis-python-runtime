@@ -217,7 +217,8 @@ public final class WindowsJailProbe {
       command = List.of(jail.applicationDirectory().resolve("guest.exe").toString(), "environment",
           nested.toString(), jail.temporaryDirectory().toString());
       passed(finish(jail.spawn(command, Map.of("VIS_JAIL_TEST", "expected", "TEMP", parent.toString(),
-          "TMP", parent.toString()), "nested", false, false, 0, 0), new byte[0]), "environment and cwd");
+          "TMP", parent.toString(), "sYsTeMrOoT", parent.toString()), "nested", false, false, 0, 0), new byte[0]),
+          "environment, forced OS SystemRoot and cwd");
       byte[] input = new byte[262144];
       Arrays.fill(input, (byte) 'i');
       command = List.of(jail.applicationDirectory().resolve("guest.exe").toString(), "streams");
@@ -520,7 +521,7 @@ public final class WindowsJailProbe {
       server.configureBlocking(false);
       Process process = jail.spawn(List.of(staged.resolve("vis-python-worker.exe").toString(),
           "-Duser.home=" + jail.workDirectory(), socket.toString()),
-          Map.of("VIS_PYTHON_NATIVE_PATH", staged.toString(), "SystemRoot", System.getenv("SystemRoot")),
+          Map.of("VIS_PYTHON_NATIVE_PATH", staged.toString()),
           null, false, false, 0, 0);
       CompletableFuture<byte[]> out = drain(process.getInputStream());
       CompletableFuture<byte[]> err = drain(process.getErrorStream());

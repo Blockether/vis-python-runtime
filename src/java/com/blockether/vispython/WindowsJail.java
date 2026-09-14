@@ -193,9 +193,9 @@ public final class WindowsJail implements AutoCloseable {
    * Launch a confined process. The executable must be an absolute path inside
    * app or Windows System32; no PATH search is performed. The working directory
    * is relative to work (null or empty means its root) and must already exist.
-   * Environment entries replace, rather than extend, the host environment;
-   * TEMP and TMP are always set to this context's private temporary directory.
-   * Pass SystemRoot explicitly if the selected program requires it.
+   * Environment entries replace, rather than extend, the host environment.
+   * TEMP/TMP always use the private temporary directory, and SystemRoot always
+   * uses the OS-derived Windows directory, overriding caller values.
    *
    * <p>Pipes preserve separate stdout/stderr unless {@code mergeError} is true.
    * ConPTY combines them and uses positive {@code rows}/{@code columns}. Consume

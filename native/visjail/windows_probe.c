@@ -43,6 +43,14 @@ static void staged_denied(const wchar_t *path, DWORD access, const char *name) {
     else printf("STAGED_DENIAL=%lu %s\n", error, name);
 }
 
+static void system_root_check(void) {
+    wchar_t directory[MAX_PATH + 1], value[MAX_PATH + 1];
+    UINT length = GetSystemWindowsDirectoryW(directory, MAX_PATH + 1);
+    DWORD value_length = GetEnvironmentVariableW(L"SystemRoot", value, MAX_PATH + 1);
+    check(length > 0 && length <= MAX_PATH && value_length == length && _wcsicmp(value, directory) == 0,
+          "SystemRoot is the OS-derived Windows directory");
+}
+
 static void token_check(void) {
     HANDLE token = NULL;
     DWORD size = 0, value = 0;
@@ -71,6 +79,7 @@ static void token_check(void) {
     } else check(0, "query AppContainer SID");
     check(IsProcessInJob(GetCurrentProcess(), NULL, &in_job) && in_job, "assigned job");
     CloseHandle(token);
+    system_root_check();
 }
 
 static void security_check(int argc, wchar_t **argv) {
@@ -549,6 +558,22 @@ int wmain(int argc, wchar_t **argv) {
         check(GetEnvironmentVariableW(L"VIS_JAIL_TEST", value, 32768) && wcscmp(value, L"expected") == 0,
               "complete explicit environment");
         check(!GetEnvironmentVariableW(L"VIS_JAIL_SECRET", value, 32768), "host environment not inherited");
+        system_root_check();
+        {
+            LPWCH environment = GetEnvironmentStringsW();
+            int count = 0;
+            check(environment != NULL, "read complete child environment");
+            if (environment) {
+                for (const wchar_t *entry = environment; *entry; entry += wcslen(entry) + 1) {
+                    check(!_wcsnicmp(entry, L"VIS_JAIL_TEST=", 14) || !_wcsnicmp(entry, L"TEMP=", 5) ||
+                          !_wcsnicmp(entry, L"TMP=", 4) || !_wcsnicmp(entry, L"SystemRoot=", 11),
+                          "no unrelated environment entries");
+                    count++;
+                }
+                check(count == 4, "explicit entry plus three reserved environment entries");
+                FreeEnvironmentStringsW(environment);
+            }
+        }
         check(GetCurrentDirectoryW(32768, value) > 0 && argc == 4 && _wcsicmp(value, argv[2]) == 0,
               "private working directory");
         check(GetEnvironmentVariableW(L"TEMP", value, 32768) && _wcsicmp(value, argv[3]) == 0, "private TEMP");

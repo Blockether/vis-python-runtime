@@ -21,7 +21,7 @@ public final class WindowsJailExample {
       Path python = jail.stage(runtime.resolve("python"), "python").resolve("python.exe");
       Process process = jail.spawn(List.of(python.toString(), "-I", "-c",
           "from pathlib import Path; Path('result.txt').write_text('6'); print(6)"),
-          Map.of("SystemRoot", System.getenv("SystemRoot")), null, false, true, 0, 0);
+          Map.of(), null, false, true, 0, 0);
       process.getOutputStream().close();
       try (var output = process.getInputStream()) {
         // This command has tiny output; large-output programs need concurrent readers.

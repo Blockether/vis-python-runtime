@@ -186,8 +186,8 @@
   "Run a command in a [[windows-jail]], returning `java.lang.Process`.
    The executable must be absolute, inside its staged app or Windows System32.
    `:directory` is work-relative (nil means work); `:environment` replaces the host environment.
-   TEMP/TMP stay private. `:pty?` needs positive `:rows`/`:columns`; default is pipes.
-   No network, host-path or credential options are supported; unknown keys throw.
+   TEMP/TMP stay private; SystemRoot is OS-derived. Pipes are the default.
+   `:pty?` needs positive `:rows`/`:columns`; unknown, network, host-path or credential options throw.
    Both destroy methods terminate the process job and its descendants."
   ([jail command] (spawn-windows-process! jail command {}))
   ([^WindowsJail jail command

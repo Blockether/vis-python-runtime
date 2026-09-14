@@ -56,7 +56,7 @@ try (WindowsJail jail = WindowsJail.create(Path.of("C:/tasks"))) {
       .resolve("python.exe");
   Process process = jail.spawn(
       List.of(python.toString(), "-I", "-c", "print(6)"),
-      Map.of("SystemRoot", System.getenv("SystemRoot")),
+      Map.of(),
       null, false, true, 0, 0);
   process.getOutputStream().close();
   String output = new String(process.getInputStream().readAllBytes(),
@@ -82,8 +82,7 @@ the documentation archive.
                     "/python.exe")
         process (runtime/spawn-windows-process!
                   jail [python "-I" "-c" "print(6)"]
-                  {:environment {"SystemRoot" (System/getenv "SystemRoot")}
-                   :merge-stderr? true})]
+                  {:merge-stderr? true})]
     (.close (.getOutputStream process))
     (print (slurp (.getInputStream process)))
     (assert (zero? (.waitFor process)))))
@@ -96,10 +95,12 @@ application while guests are running.
 ## Environment, streams and lifetime
 
 The environment is **complete**, not additions to the host environment. Pass
-only the values the program needs, including `SystemRoot` when required. `TEMP`
-and `TMP` always point to the private temporary directory, even if the caller
-supplies different values. An environment marker cannot bypass Windows
-confinement.
+only the values the program needs; an empty map is valid. The launcher supplies
+three reserved values: `TEMP` and `TMP` point to the private temporary directory,
+and `SystemRoot` comes from Windows itself so the OS can initialize the process.
+Caller values cannot override these, even with different capitalization. No
+other host environment values are copied, and an environment marker cannot
+bypass Windows confinement.
 
 The working directory is relative to `work`; null/nil or an empty string means
 its root. It must exist. Dot components, device names and reparse-point paths

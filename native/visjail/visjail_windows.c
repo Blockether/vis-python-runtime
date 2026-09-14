@@ -904,7 +904,7 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     Stream *input = NULL, *output = NULL, *errstream = NULL;
     wchar_t **args = NULL, **env = NULL, *line = NULL, *block = NULL, *directory = NULL;
     wchar_t *app = NULL, *work = NULL, *tmp = NULL;
-    wchar_t system_directory[MAX_PATH + 1];
+    wchar_t system_directory[MAX_PATH + 1], system_root[MAX_PATH + 1];
     Pin *launch_pins = NULL;
     int argc = 0, envc = 0, context_id = 0, status = 0, pty = !!(flags & VISJAIL_PTY);
     char *end;
@@ -942,17 +942,25 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     app = join(c->path, L"app"); work = join(c->path, L"work"); tmp = join(c->path, L"tmp");
     if (!app || !work || !tmp) goto fail;
     {
-        const wchar_t *keys[2] = {L"TEMP=", L"TMP="};
-        wchar_t **expanded = realloc(env, ((size_t)envc + 2) * sizeof(*env));
+        const wchar_t *keys[3] = {L"TEMP=", L"TMP=", L"SystemRoot="};
+        const wchar_t *values[3] = {tmp, tmp, system_root};
+        wchar_t **expanded;
+        UINT windows_length;
+        operation = "Read Windows directory for process environment";
+        windows_length = GetSystemWindowsDirectoryW(system_root, MAX_PATH + 1);
+        if (!windows_length) goto fail;
+        if (windows_length > MAX_PATH) { SetLastError(ERROR_INSUFFICIENT_BUFFER); goto fail; }
+        operation = "Prepare private Windows environment";
+        expanded = realloc(env, ((size_t)envc + 3) * sizeof(*env));
         if (!expanded) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto fail; }
         env = expanded;
-        for (int k = 0; k < 2; k++) {
-            size_t key_length = wcslen(keys[k]), temp_length = wcslen(tmp);
+        for (int k = 0; k < 3; k++) {
+            size_t key_length = wcslen(keys[k]), value_length = wcslen(values[k]);
             int at;
-            wchar_t *value = calloc(key_length + temp_length + 1, sizeof(wchar_t));
+            wchar_t *value = calloc(key_length + value_length + 1, sizeof(wchar_t));
             if (!value) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto fail; }
             memcpy(value, keys[k], key_length * sizeof(wchar_t));
-            memcpy(value + key_length, tmp, (temp_length + 1) * sizeof(wchar_t));
+            memcpy(value + key_length, values[k], (value_length + 1) * sizeof(wchar_t));
             for (at = 0; at < envc; at++) if (!_wcsnicmp(env[at], keys[k], key_length)) break;
             if (at < envc) free(env[at]); else envc++;
             env[at] = value;

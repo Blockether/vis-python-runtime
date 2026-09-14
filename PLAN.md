@@ -259,10 +259,12 @@ the documentation checks. Local formatting, lint and PowerShell analysis pass;
 read-only review findings on source pinning and process/ConPTY lifetimes have
 been addressed.
 
-Windows CI run 34863155067 reaches `CreateProcessW` but fails the first confined
-launch with error 2. Unique profile registration and owned-profile cleanup now
-replace the unverified SID-only setup, with regression checks for profile
-separation, cleanup and retained workspace outputs. This fix still needs Windows
-execution. LPAC/ACL enforcement, network denial, ConPTY, native-image launcher
-downcalls and extracted-archive checks remain unverified. No Windows confinement
-support or release completion is claimed until those checks pass.
+Windows CI run 34865611509 creates the profile, but the first `CreateProcessW`
+call reports missing environment data (error 203), instead of the earlier error
+2. The launcher now supplies only the OS-derived `SystemRoot` and private
+`TEMP`/`TMP` as its required environment baseline, with checks for empty-map
+launches, reserved-value overrides and no ambient environment inheritance.
+Windows execution remains pending. LPAC/ACL enforcement, network denial, ConPTY,
+native-image launcher downcalls and extracted-archive checks remain unverified.
+No Windows confinement support or release completion is claimed until those
+checks pass.
