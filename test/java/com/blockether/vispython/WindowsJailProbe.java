@@ -279,6 +279,27 @@ public final class WindowsJailProbe {
          var udp4 = new java.net.DatagramSocket(new java.net.InetSocketAddress(ipv4, tcp4.getLocalPort()));
          var udp6 = new java.net.DatagramSocket(new java.net.InetSocketAddress(ipv6, tcp4.getLocalPort()));
          WindowsJail jail = prepare(parent, guest)) {
+      // Positive controls prove both families and transports reach the host receivers.
+      for (var server : List.of(tcp4, tcp6)) {
+        server.setSoTimeout(2000);
+        try (var client = new java.net.Socket()) {
+          client.connect(new java.net.InetSocketAddress(server.getInetAddress(), server.getLocalPort()), 2000);
+          client.getOutputStream().write(0x63);
+          try (var accepted = server.accept()) {
+            accepted.setSoTimeout(2000);
+            check(accepted.getInputStream().read() == 0x63, "host TCP control reaches listener");
+          }
+        }
+      }
+      for (var socket : List.of(udp4, udp6)) {
+        socket.setSoTimeout(2000);
+        try (var client = new java.net.DatagramSocket(new java.net.InetSocketAddress(socket.getLocalAddress(), 0))) {
+          client.send(new java.net.DatagramPacket(new byte[] {0x63}, 1, socket.getLocalSocketAddress()));
+          var packet = new java.net.DatagramPacket(new byte[16], 16);
+          socket.receive(packet);
+          check(packet.getLength() == 1 && packet.getData()[0] == 0x63, "host UDP control reaches receiver");
+        }
+      }
       passed(run(jail, "network", Integer.toString(tcp4.getLocalPort())), "TCP UDP IPv4 IPv6 network denied");
       for (var server : List.of(tcp4, tcp6)) {
         server.setSoTimeout(200);

@@ -245,8 +245,16 @@ static void network_one(int family, int type, unsigned short port, int public_ad
     SOCKADDR_STORAGE address;
     int length, result, error;
     u_long nonblocking = 1;
-    check(socket_handle != INVALID_SOCKET, "network probe socket available");
-    if (socket_handle == INVALID_SOCKET) return;
+    if (socket_handle == INVALID_SOCKET) {
+        /* LPAC can deny socket creation before connect/send can be attempted. */
+        error = WSAGetLastError();
+        if (error != WSAEACCES) {
+            fprintf(stderr, "FAIL socket creation family=%d type=%d public=%d error=%d\n",
+                    family, type, public_address, error);
+            failures++;
+        }
+        return;
+    }
     ZeroMemory(&address, sizeof(address));
     if (family == AF_INET) {
         SOCKADDR_IN *ipv4 = (SOCKADDR_IN *)&address;

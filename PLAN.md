@@ -313,23 +313,22 @@ adding shared capability grants. No network capability or existing host ACL is
 changed. This is not a SideBySide-only grant or an intrinsic read-only filter;
 the documentation describes the broader Windows ACL-based boundary.
 
-Regression coverage must verify the exact token SID and attributes, successful
-system initialization reads, denied system writes, and denied reads/writes of
-owned synthetic private host registry keys through both Win32 and native opens.
-Host controls verify the exact native names before guest execution. The existing
-untraced descendant, breakaway, sibling, filesystem and network checks remain
-mandatory. Windows execution of this candidate and the later E2E stages is still
-pending.
+Run 34901704961 passes the first JVM launcher's validation, staging stress,
+registry, filesystem and streams stages on Windows Server 2022. This includes
+exact capability readback, native/Win32 SxS reads and private-key denials,
+unchanged host registry fixtures, real descendant creation and breakaway denial.
+Profile removal and private application-data writes also pass. All Windows
+builds, including the native-image launcher, succeed; its execution is not yet
+reached.
 
-`GetAppContainerFolderPath` returns local application data beneath the profile,
-not its root. Test cleanup validates the generated parent name and exact SID;
-explicit profile-removal assertions still follow the failing descendant test.
-Application-data writes in the environment stage also remain unverified.
+The next failure is the network probe's assumption that it can create sockets:
+all eight attempts return `WSAEACCES` at creation, before connect/send. The probe
+now accepts only this explicit permission denial at either point. Other socket
+errors still fail. Host TCP/UDP positive controls for both IP families establish
+that the receivers work; the existing zero-connection/packet checks remain.
+No network capability or production policy is relaxed.
 
-Diagnostic run 34870999620 was cancelled without a downloadable Windows job log.
-Separate CI/release steps expose native-library, Java, worker, native-image and
-runtime-test phases. Probes stop at the first failure and report it before the
-outer workspace cleanup, rather than allowing later stages to obscure it.
-Complete environment, network, ConPTY, native-image launcher and extracted-archive
-verification remain pending. No Windows confinement support or release
+Network completion, lifetime, ConPTY, crash cleanup, inherited-handle and
+nonadministrator-host checks, stock Python/native worker, native-image launcher
+execution and extracted-archive verification remain pending. No Windows release
 completion is claimed yet.
