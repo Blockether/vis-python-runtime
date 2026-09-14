@@ -18,13 +18,6 @@
 #include <io.h>
 #include <fcntl.h>
 
-#ifndef PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY
-#define PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY 0x0002000f
-#endif
-#ifndef PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT
-#define PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT 1
-#endif
-
 static int failures;
 
 static void check(int ok, const char *name) {
@@ -272,77 +265,49 @@ static void network_check(int argc, wchar_t **argv) {
     WSACleanup();
 }
 
-/* Compare launch inputs without granting a capability or changing any object ACL. */
-static void child_launch_diagnostics(const wchar_t *executable) {
-    wchar_t cwd[32768], app[32768], local[32768], base[32768], command[32768];
-    union { TOKEN_APPCONTAINER_INFORMATION value; BYTE data[4096]; } container;
-    HANDLE directory, thread, token = NULL;
-    DWORD size, local_length;
-    wchar_t *slash;
+typedef LONG (__stdcall *last_ntstatus_fn)(void);
+
+/* Compare creation APIs and images without granting capabilities or changing ACLs. */
+static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn last_status) {
+    static const char *const variants[] = {"null-application", "current-primary-token", "system-command"};
+    wchar_t system_executable[32768] = {0}, command[32768];
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    HANDLE token = NULL;
+    DWORD error;
+    UINT system_length;
+    BOOL queried, system_available;
     SetLastError(ERROR_SUCCESS);
-    thread = OpenThread(THREAD_ALL_ACCESS, FALSE, GetCurrentThreadId());
-    printf("DESCENDANT_SELF_THREAD_ACCESS=%d ERROR=%lu\n", thread != NULL, GetLastError());
-    if (thread) CloseHandle(thread);
+    queried = QueryInformationJobObject(NULL, JobObjectExtendedLimitInformation, &limits, sizeof(limits), NULL);
+    error = GetLastError();
+    printf("DESCENDANT_JOB_QUERY=%d LIMIT_FLAGS=%08lX ACTIVE_LIMIT=%lu ERROR=%lu\n", queried,
+           limits.BasicLimitInformation.LimitFlags, limits.BasicLimitInformation.ActiveProcessLimit, error);
     SetLastError(ERROR_SUCCESS);
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &token)) {
-        printf("DESCENDANT_TOKEN_ASSIGN_ACCESS=1\n");
-        CloseHandle(token); token = NULL;
-    } else printf("DESCENDANT_TOKEN_ASSIGN_ACCESS=0 ERROR=%lu\n", GetLastError());
-    if (!GetCurrentDirectoryW(32768, cwd)) return;
-    SetLastError(ERROR_SUCCESS);
-    directory = CreateFileW(cwd, FILE_TRAVERSE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                            NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    printf("DESCENDANT_CWD_TRAVERSE=%d ERROR=%lu\n", directory != INVALID_HANDLE_VALUE, GetLastError());
-    if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
-    wcscpy_s(app, 32768, executable);
-    slash = wcsrchr(app, L'\\');
-    if (!slash) return;
-    *slash = 0;
-    local_length = GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
-    if (!local_length || local_length >= 32768) return;
-    wcscpy_s(base, 32768, local);
+    queried = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &token);
+    error = GetLastError();
+    printf("DESCENDANT_TOKEN_ASSIGN_ACCESS=%d ERROR=%lu\n", queried, error);
+    system_length = GetSystemDirectoryW(system_executable, 32768);
+    system_available = system_length > 0 && system_length < 32768 - 8;
+    if (system_available) wcscat_s(system_executable, 32768, L"\\cmd.exe");
     for (int i = 0; i < 3; i++) {
-        slash = wcsrchr(base, L'\\');
-        if (!slash) return;
-        *slash = 0;
-    }
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return;
-    if (!GetTokenInformation(token, TokenAppContainerSid, &container, sizeof(container), &size) ||
-        !container.value.TokenAppContainer) { CloseHandle(token); return; }
-    for (int i = 0; i < 4; i++) {
-        STARTUPINFOEXW startup = {0};
+        const wchar_t *program = i == 2 ? system_executable : executable;
+        STARTUPINFOW startup = {0};
         PROCESS_INFORMATION process = {0};
-        SECURITY_CAPABILITIES capabilities = {0};
-        DWORD policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
-        DWORD flags = 0, error, code = STILL_ACTIVE, waited = WAIT_FAILED;
-        SIZE_T attribute_size = 0;
-        BOOL configured = TRUE, initialized = FALSE, started = FALSE;
-        startup.StartupInfo.cb = sizeof(STARTUPINFOW);
-        if (i == 1 || i == 2) {
-            DWORD count = i == 2 ? 2 : 1;
-            startup.StartupInfo.cb = sizeof(startup);
-            flags = EXTENDED_STARTUPINFO_PRESENT;
-            InitializeProcThreadAttributeList(NULL, count, 0, &attribute_size);
-            startup.lpAttributeList = malloc(attribute_size);
-            if (!startup.lpAttributeList) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); configured = FALSE; }
-            else initialized = configured = InitializeProcThreadAttributeList(startup.lpAttributeList, count,
-                                                                              0, &attribute_size);
-            capabilities.AppContainerSid = container.value.TokenAppContainer;
-            if (configured) configured = UpdateProcThreadAttribute(startup.lpAttributeList, 0,
-                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities, sizeof(capabilities), NULL, NULL);
-            if (configured && i == 2) configured = UpdateProcThreadAttribute(startup.lpAttributeList, 0,
-                PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &policy, sizeof(policy), NULL, NULL);
-        } else if (i == 3) configured = SetEnvironmentVariableW(L"LOCALAPPDATA", base);
-        swprintf_s(command, 32768, L"\"%ls\" token", executable);
+        DWORD code = STILL_ACTIVE, waited = WAIT_FAILED;
+        LONG nt_status = 0;
+        BOOL configured = i == 1 ? token != NULL : i != 2 || system_available;
+        BOOL started = FALSE;
+        startup.cb = sizeof(startup);
+        error = ERROR_INVALID_PARAMETER;
         if (configured) {
+            swprintf_s(command, 32768, i == 2 ? L"\"%ls\" /d /c exit 0" : L"\"%ls\" token", program);
             SetLastError(ERROR_SUCCESS);
-            started = CreateProcessW(executable, command, NULL, NULL, TRUE, flags, NULL,
-                                     i == 0 ? app : NULL, &startup.StartupInfo, &process);
+            if (i == 1) started = CreateProcessAsUserW(token, program, command, NULL, NULL, TRUE,
+                                                       0, NULL, NULL, &startup, &process);
+            else started = CreateProcessW(i == 0 ? NULL : program, command, NULL, NULL, TRUE,
+                                          0, NULL, NULL, &startup, &process);
+            error = GetLastError();
+            if (!started && last_status) nt_status = last_status();
         }
-        error = GetLastError();
-        if (i == 3) check(SetEnvironmentVariableW(L"LOCALAPPDATA", local), "restore diagnostic guest environment");
-        if (initialized) DeleteProcThreadAttributeList(startup.lpAttributeList);
-        free(startup.lpAttributeList);
         if (started) {
             waited = WaitForSingleObject(process.hProcess, 10000);
             if (waited != WAIT_OBJECT_0) {
@@ -352,10 +317,10 @@ static void child_launch_diagnostics(const wchar_t *executable) {
             GetExitCodeProcess(process.hProcess, &code);
             CloseHandle(process.hThread); CloseHandle(process.hProcess);
         }
-        printf("DESCENDANT_VARIANT=%d CONFIGURED=%d STARTED=%d ERROR=%lu WAIT=%lu EXIT=%lu\n",
-               i, configured, started, error, waited, code);
+        printf("DESCENDANT_VARIANT=%s CONFIGURED=%d STARTED=%d ERROR=%lu LAST_NTSTATUS=%08lX WAIT=%lu EXIT=%lu\n",
+               variants[i], configured, started, error, (unsigned long)nt_status, waited, code);
     }
-    CloseHandle(token);
+    if (token) CloseHandle(token);
 }
 
 static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
@@ -364,6 +329,9 @@ static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
     PROCESS_INFORMATION process;
     BOOL spawned;
     DWORD code = 1;
+    last_ntstatus_fn last_status = NULL;
+    FARPROC address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetLastNtStatus");
+    memcpy(&last_status, &address, sizeof(last_status));
     ZeroMemory(&startup, sizeof(startup));
     ZeroMemory(&process, sizeof(process));
     startup.cb = sizeof(startup);
@@ -376,7 +344,10 @@ static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
     } else {
         if (!spawned) {
             DWORD original_error = GetLastError();
-            child_launch_diagnostics(executable);
+            LONG nt_status = last_status ? last_status() : 0;
+            printf("DESCENDANT_ERROR=%lu NTSTATUS_AVAILABLE=%d LAST_NTSTATUS=%08lX\n",
+                   original_error, last_status != NULL, (unsigned long)nt_status);
+            child_launch_diagnostics(executable, last_status);
             SetLastError(original_error);
         }
         check(spawned, "confined descendant starts");

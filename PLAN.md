@@ -270,10 +270,15 @@ Run 34883140674 successfully configured and read back explicit user/package/Syst
 default object grants, but descendant creation failed identically. That ineffective
 token adjustment is removed rather than retained as an unproven permissions fix.
 
-The next failure-only comparisons isolate working-directory access, explicit
-same-container startup attributes and the inherited application-data base path.
-They preserve the original mandatory failure and add no capabilities or host ACL
-grants. Windows descendant support is still unverified.
+Run 34884642944 also fails after changing the inherited working directory,
+explicit same-container startup attributes and the guest application-data base.
+Self-thread access, token query/duplicate/assign access and directory traversal
+succeed. All four Unix lanes and API documentation checks pass.
+
+Failure-only probes now record the last NT status and effective job limits,
+then compare a null application name, the current primary token and a System32
+command. They preserve the original mandatory failure and add no capabilities or
+host ACL grants. Windows descendant support is still unverified.
 
 `GetAppContainerFolderPath` returns local application data beneath the profile,
 not its root. Test cleanup validates the generated parent name and exact SID;
