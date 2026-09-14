@@ -38,3 +38,38 @@
                (subvec result 0 12)))
         (is (= [["launcher" "-q" "--" "test_example.py"] 3 3 true] (subvec result 12))))
       (finally (runtime/trust! session false) (runtime/close-session! session)))))
+
+(defbuilt-test
+  module-executes-once-as-main-test
+  ;; JVM/SDK dogfooding: importing before runpy duplicated side effects and lost SystemExit.
+  (runtime/initialize!)
+  (let [session "module-runner-once"]
+    (runtime/trust! session)
+    (try
+      (runtime/install-runtime! session)
+      (runtime/exec! session (slurp (io/resource "vis-python/module_runner.py")))
+      (let
+        [result
+         (ev
+           session
+           (str
+             "import sys, tempfile, pathlib, builtins\n"
+             "results = []\n" "with tempfile.TemporaryDirectory() as directory:\n"
+             "    folder = pathlib.Path(directory)\n"
+             "    (folder / 'module_once_probe.py').write_text('import builtins\\nbuiltins._vis_module_runs.append(__name__)\\n')\n"
+             "    (folder / 'module_async_probe.py').write_text(\"import asyncio\\nasync def compute():\\n    await asyncio.sleep(0)\\n    return 42\\nprint('module-result', asyncio.run(compute()))\\nraise SystemExit(7)\\n\")\n"
+             "    builtins._vis_module_runs = []\n"
+             "    sys.path.insert(0, directory)\n" "    try:\n"
+             "        results.append(__vis_run_module__('module_once_probe'))\n"
+             "        results.append(list(builtins._vis_module_runs))\n"
+             "        results.append(__import__('vis_runtime').run_sync_block(\"__vis_run_module__('module_async_probe')\", globals()))\n"
+             "        results.append(globals().get('__vis_module_exit__'))\n"
+             "    finally:\n" "        sys.path.remove(directory)\n"
+             "        sys.modules.pop('module_once_probe', None)\n"
+             "        sys.modules.pop('module_async_probe', None)\n"
+             "        del builtins._vis_module_runs\n" "results\n"))]
+        (is (= 0 (nth result 0)))
+        (is (= ["__main__"] (nth result 1)))
+        (is (= {"stdout" "module-result 42\n" "error" nil} (nth result 2)))
+        (is (= 7 (nth result 3))))
+      (finally (runtime/trust! session false) (runtime/close-session! session)))))

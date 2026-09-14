@@ -8,7 +8,7 @@ def __vis_run_module__(name):
     a value. It is left in `__vis_module_exit__` instead, which the host reads
     once the block has settled.
     """
-    import importlib, runpy
+    import runpy
 
     def done(code):
         if code is None:
@@ -18,20 +18,6 @@ def __vis_run_module__(name):
         globals()["__vis_module_exit__"] = int(code)
         return int(code)
 
-    mod = None
-    try:
-        mod = importlib.import_module(name)
-    except ImportError:
-        mod = None
-    # A module with no `__file__` is synthesised rather than imported from a
-    # file, and `runpy` cannot run one: reach for its entry point directly.
-    if mod is not None and getattr(mod, "__file__", None) is None:
-        entry = getattr(mod, "console_main", None) or getattr(mod, "main", None)
-        if callable(entry):
-            try:
-                return done(entry(_sys.argv[1:]))
-            except SystemExit as _e:
-                return done(_e.code)
     original_argv = _sys.argv
     if name == "pytest":
         # The embedded host owns fatal-signal handlers. pytest's faulthandler
