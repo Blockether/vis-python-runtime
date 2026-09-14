@@ -97,17 +97,22 @@ jobs:
       - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
-      - name: Build and execute the Windows runtime and extracted archive
+      - name: Build the Windows runtime libraries
+        run: ./native/vispython/build.ps1
+      - name: Compile the Java API
+        run: clojure -T:build javac
+      - name: Build the Windows native worker
+        run: clojure -T:build worker-image
+      - name: Build the Windows jail probes
+        run: clojure -T:build windows-jail-probe
+      - name: Test the Windows runtime
+        run: ./scripts/test-windows.ps1
+      - name: Package the Windows runtime
+        run: clojure -T:build platform-archive :platform windows-x64
+      - name: Verify the extracted Windows archive
+        run: ./scripts/verify-platform-archive.ps1
+      - name: Test the extracted Windows runtime
         run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          ./native/vispython/build.ps1
-          clojure -T:build javac
-          clojure -T:build worker-image
-          clojure -T:build windows-jail-probe
-          ./scripts/test-windows.ps1
-          clojure -T:build platform-archive :platform windows-x64
-          ./scripts/verify-platform-archive.ps1
           $env:VIS_PYTHON_NATIVE_PATH = (Resolve-Path 'target/archive-check-windows-x64').Path
           ./scripts/test-windows.ps1
 

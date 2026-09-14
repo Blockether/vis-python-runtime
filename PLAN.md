@@ -264,7 +264,10 @@ LPAC access mask (`2`). Validation, staging stress, unique owned profiles,
 sibling-profile denial, staged read-only inputs, host/sibling file denial and
 private work-file writes execute successfully. Creating a file under the child's
 `TEMP` fails with Windows error 3; the effective path has not yet been diagnosed.
-The probes now report the exact temporary paths and continue independent cases
-without accepting a partial pass. Complete environment, network, ConPTY,
-native-image launcher and extracted-archive verification remain pending.
+The probes report exact temporary paths and retain independent failures without
+accepting a partial pass. Diagnostic run 34870999620 was cancelled without a
+downloadable Windows job log; its failing phase is unknown. CI and release now
+expose separate build/test phases, and probes print each failure immediately.
+Complete environment, network, ConPTY, native-image launcher and extracted-archive
+verification remain pending.
 No Windows confinement support or release completion is claimed yet.

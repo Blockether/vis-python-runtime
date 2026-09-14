@@ -38,6 +38,7 @@ public final class WindowsJailProbe {
     try { action.run(); } catch (Exception | AssertionError failed) {
       failures.addSuppressed(new AssertionError(name, failed));
       System.err.println("FAIL WindowsJail " + name);
+      failed.printStackTrace(System.err);
     }
   }
 

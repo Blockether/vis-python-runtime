@@ -39,6 +39,18 @@
                      "clojure -T:build windows-jail-probe" "./scripts/verify-platform-archive.ps1"
                      "target/archive-check-windows-x64" "./scripts/test-windows.ps1"]]
       (is (str/includes? workflow command) (str path ": " command)))
+    ;; CI 34870999620 had no downloadable Windows job log after cancellation.
+    ;; Separate steps expose the active phase even when the runner stops reporting.
+    (doseq [command ["./native/vispython/build.ps1" "clojure -T:build javac"
+                     "clojure -T:build worker-image" "clojure -T:build windows-jail-probe"
+                     "./scripts/test-windows.ps1"
+                     "clojure -T:build platform-archive :platform windows-x64"
+                     "./scripts/verify-platform-archive.ps1"]]
+      (is (re-find (re-pattern (str "(?m)^      - name: [^\n]+\n        run: "
+                                    (java.util.regex.Pattern/quote command)
+                                    "$"))
+                   workflow)
+          (str path ": independently observable phase for " command)))
     (is (= 2 (count (re-seq #"\./scripts/test-windows\.ps1" workflow)))
         (str path ": execute before and after archive extraction"))
     (is
