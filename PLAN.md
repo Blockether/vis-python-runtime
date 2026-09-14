@@ -263,18 +263,17 @@ Windows CI run 34878855420 verifies minimal process launch, the effective LPAC
 access mask (`2`), validation and staging stress. The private profile subtree
 exists before launch; the corrected profile-path checks, temporary-file
 create/write/delete, staged read-only inputs and host/sibling/profile/temporary
-file denials pass. Ordinary descendant creation still returned Windows error 5
-in runs 34880164527 and 34881927919. Self-process access, child mitigation policy,
-console/handle variants and executable read/execute/mapping checks ruled out
-those prerequisites. The inherited default token DACL instead grants the normal
-user side only logon read/execute when the Administrators group is deny-only.
+file denials pass. Ordinary descendant creation still returns Windows error 5.
+Runs 34880164527 and 34881927919 ruled out self-process access, child mitigation
+policy, console/handle variants and executable read/execute/mapping prerequisites.
+Run 34883140674 successfully configured and read back explicit user/package/System
+default object grants, but descendant creation failed identically. That ineffective
+token adjustment is removed rather than retained as an unproven permissions fix.
 
-The launch now sets only the suspended guest token's default object DACL to
-explicit user, private package and System grants, after verifying the package SID
-and assigning both jobs. It fails closed before resume on any setup error.
-Existing host ACLs, capabilities and restrictions are unchanged. Mandatory token
-readback and the original descendant/breakaway tests verify this candidate fix;
-Windows runtime confirmation is still pending. Transient comparisons are removed.
+The next failure-only comparisons isolate working-directory access, explicit
+same-container startup attributes and the inherited application-data base path.
+They preserve the original mandatory failure and add no capabilities or host ACL
+grants. Windows descendant support is still unverified.
 
 `GetAppContainerFolderPath` returns local application data beneath the profile,
 not its root. Test cleanup validates the generated parent name and exact SID;

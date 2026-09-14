@@ -18,6 +18,13 @@
 #include <io.h>
 #include <fcntl.h>
 
+#ifndef PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY
+#define PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY 0x0002000f
+#endif
+#ifndef PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT
+#define PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT 1
+#endif
+
 static int failures;
 
 static void check(int ok, const char *name) {
@@ -90,45 +97,6 @@ static void lpac_check(HANDLE token) {
     CloseHandle(impersonation);
 }
 
-/* CI 34881927919: guest object grants must cover both sides of the token check. */
-static void default_dacl_check(HANDLE token) {
-    union TokenData {
-        TOKEN_USER user;
-        TOKEN_APPCONTAINER_INFORMATION package;
-        TOKEN_DEFAULT_DACL defaults;
-        BYTE data[4096];
-    } user, package, defaults;
-    DWORD size;
-    int has_user = 0, has_package = 0, has_system = 0;
-    PACL acl;
-    if (!GetTokenInformation(token, TokenUser, &user, sizeof(user), &size) ||
-        !GetTokenInformation(token, TokenAppContainerSid, &package, sizeof(package), &size) ||
-        !GetTokenInformation(token, TokenDefaultDacl, &defaults, sizeof(defaults), &size)) {
-        check(0, "read guest object default permissions"); return;
-    }
-    check(package.package.TokenAppContainer != NULL, "guest object package identity");
-    if (!package.package.TokenAppContainer) return;
-    acl = defaults.defaults.DefaultDacl;
-    check(acl != NULL && IsValidAcl(acl), "explicit valid guest object DACL");
-    if (!acl || !IsValidAcl(acl)) return;
-    check(acl->AceCount >= 2 && acl->AceCount <= 3, "only user, package and system default grants");
-    for (DWORD index = 0; index < acl->AceCount; index++) {
-        ACCESS_ALLOWED_ACE *ace = NULL;
-        int own_user, own_package, system;
-        check(GetAce(acl, index, (void **)&ace), "read guest object ACE");
-        if (!ace) continue;
-        check(ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && ace->Header.AceFlags == 0 &&
-              ace->Mask == GENERIC_ALL, "explicit full guest object grant");
-        if (ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
-        own_user = EqualSid(&ace->SidStart, user.user.User.Sid);
-        own_package = EqualSid(&ace->SidStart, package.package.TokenAppContainer);
-        system = IsWellKnownSid(&ace->SidStart, WinLocalSystemSid);
-        check(own_user || own_package || system, "no ambient group object grants");
-        has_user |= own_user; has_package |= own_package; has_system |= system;
-    }
-    check(has_user && has_package && has_system, "user and private package both have object access");
-}
-
 static void token_check(void) {
     HANDLE token = NULL;
     DWORD size = 0, value = 0;
@@ -139,7 +107,6 @@ static void token_check(void) {
     check(GetTokenInformation(token, TokenIsAppContainer, &value, sizeof(value), &size)
           && value == 1, "AppContainer token");
     lpac_check(token);
-    default_dacl_check(token);
     if (GetTokenInformation(token, TokenIntegrityLevel, data, sizeof(data), &size)) {
         PSID integrity = ((TOKEN_MANDATORY_LABEL *)data)->Label.Sid;
         DWORD rid = *GetSidSubAuthority(integrity, (DWORD)*GetSidSubAuthorityCount(integrity) - 1);
@@ -305,6 +272,92 @@ static void network_check(int argc, wchar_t **argv) {
     WSACleanup();
 }
 
+/* Compare launch inputs without granting a capability or changing any object ACL. */
+static void child_launch_diagnostics(const wchar_t *executable) {
+    wchar_t cwd[32768], app[32768], local[32768], base[32768], command[32768];
+    union { TOKEN_APPCONTAINER_INFORMATION value; BYTE data[4096]; } container;
+    HANDLE directory, thread, token = NULL;
+    DWORD size, local_length;
+    wchar_t *slash;
+    SetLastError(ERROR_SUCCESS);
+    thread = OpenThread(THREAD_ALL_ACCESS, FALSE, GetCurrentThreadId());
+    printf("DESCENDANT_SELF_THREAD_ACCESS=%d ERROR=%lu\n", thread != NULL, GetLastError());
+    if (thread) CloseHandle(thread);
+    SetLastError(ERROR_SUCCESS);
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &token)) {
+        printf("DESCENDANT_TOKEN_ASSIGN_ACCESS=1\n");
+        CloseHandle(token); token = NULL;
+    } else printf("DESCENDANT_TOKEN_ASSIGN_ACCESS=0 ERROR=%lu\n", GetLastError());
+    if (!GetCurrentDirectoryW(32768, cwd)) return;
+    SetLastError(ERROR_SUCCESS);
+    directory = CreateFileW(cwd, FILE_TRAVERSE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    printf("DESCENDANT_CWD_TRAVERSE=%d ERROR=%lu\n", directory != INVALID_HANDLE_VALUE, GetLastError());
+    if (directory != INVALID_HANDLE_VALUE) CloseHandle(directory);
+    wcscpy_s(app, 32768, executable);
+    slash = wcsrchr(app, L'\\');
+    if (!slash) return;
+    *slash = 0;
+    local_length = GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
+    if (!local_length || local_length >= 32768) return;
+    wcscpy_s(base, 32768, local);
+    for (int i = 0; i < 3; i++) {
+        slash = wcsrchr(base, L'\\');
+        if (!slash) return;
+        *slash = 0;
+    }
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return;
+    if (!GetTokenInformation(token, TokenAppContainerSid, &container, sizeof(container), &size) ||
+        !container.value.TokenAppContainer) { CloseHandle(token); return; }
+    for (int i = 0; i < 4; i++) {
+        STARTUPINFOEXW startup = {0};
+        PROCESS_INFORMATION process = {0};
+        SECURITY_CAPABILITIES capabilities = {0};
+        DWORD policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
+        DWORD flags = 0, error, code = STILL_ACTIVE, waited = WAIT_FAILED;
+        SIZE_T attribute_size = 0;
+        BOOL configured = TRUE, initialized = FALSE, started = FALSE;
+        startup.StartupInfo.cb = sizeof(STARTUPINFOW);
+        if (i == 1 || i == 2) {
+            DWORD count = i == 2 ? 2 : 1;
+            startup.StartupInfo.cb = sizeof(startup);
+            flags = EXTENDED_STARTUPINFO_PRESENT;
+            InitializeProcThreadAttributeList(NULL, count, 0, &attribute_size);
+            startup.lpAttributeList = malloc(attribute_size);
+            if (!startup.lpAttributeList) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); configured = FALSE; }
+            else initialized = configured = InitializeProcThreadAttributeList(startup.lpAttributeList, count,
+                                                                              0, &attribute_size);
+            capabilities.AppContainerSid = container.value.TokenAppContainer;
+            if (configured) configured = UpdateProcThreadAttribute(startup.lpAttributeList, 0,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities, sizeof(capabilities), NULL, NULL);
+            if (configured && i == 2) configured = UpdateProcThreadAttribute(startup.lpAttributeList, 0,
+                PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &policy, sizeof(policy), NULL, NULL);
+        } else if (i == 3) configured = SetEnvironmentVariableW(L"LOCALAPPDATA", base);
+        swprintf_s(command, 32768, L"\"%ls\" token", executable);
+        if (configured) {
+            SetLastError(ERROR_SUCCESS);
+            started = CreateProcessW(executable, command, NULL, NULL, TRUE, flags, NULL,
+                                     i == 0 ? app : NULL, &startup.StartupInfo, &process);
+        }
+        error = GetLastError();
+        if (i == 3) check(SetEnvironmentVariableW(L"LOCALAPPDATA", local), "restore diagnostic guest environment");
+        if (initialized) DeleteProcThreadAttributeList(startup.lpAttributeList);
+        free(startup.lpAttributeList);
+        if (started) {
+            waited = WaitForSingleObject(process.hProcess, 10000);
+            if (waited != WAIT_OBJECT_0) {
+                TerminateProcess(process.hProcess, 99);
+                WaitForSingleObject(process.hProcess, 1000);
+            }
+            GetExitCodeProcess(process.hProcess, &code);
+            CloseHandle(process.hThread); CloseHandle(process.hProcess);
+        }
+        printf("DESCENDANT_VARIANT=%d CONFIGURED=%d STARTED=%d ERROR=%lu WAIT=%lu EXIT=%lu\n",
+               i, configured, started, error, waited, code);
+    }
+    CloseHandle(token);
+}
+
 static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
     wchar_t executable[32768], command[32768];
     STARTUPINFOW startup;
@@ -321,6 +374,11 @@ static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
         check(!spawned, "job breakaway denied");
         if (spawned) TerminateProcess(process.hProcess, 99);
     } else {
+        if (!spawned) {
+            DWORD original_error = GetLastError();
+            child_launch_diagnostics(executable);
+            SetLastError(original_error);
+        }
         check(spawned, "confined descendant starts");
         if (spawned && wcscmp(mode, L"sleep") == 0) {
             printf("CHILD=%lu\n", process.dwProcessId);
