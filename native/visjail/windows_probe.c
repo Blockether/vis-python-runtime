@@ -10,6 +10,7 @@
 #include <userenv.h>
 #include <objbase.h>
 #include <stdint.h>
+#include <intrin.h>
 #include <winioctl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,8 @@
 #include <wchar.h>
 #include <io.h>
 #include <fcntl.h>
+
+#pragma intrinsic(_ReturnAddress)
 
 static int failures;
 
@@ -266,6 +269,7 @@ static void network_check(int argc, wchar_t **argv) {
 }
 
 typedef LONG (__stdcall *last_ntstatus_fn)(void);
+typedef void (__stdcall *set_last_error_fn)(LONG);
 
 typedef LONG (__stdcall *nt_create_fn)(
     PHANDLE, PHANDLE, ACCESS_MASK, ACCESS_MASK, const void *, const void *,
@@ -276,6 +280,8 @@ typedef LONG (__stdcall *nt_memory_fn)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
 typedef LONG (__stdcall *nt_open_token_fn)(HANDLE, ACCESS_MASK, PHANDLE);
 typedef LONG (__stdcall *nt_open_token_ex_fn)(HANDLE, ACCESS_MASK, ULONG, PHANDLE);
 typedef LONG (__stdcall *nt_duplicate_fn)(HANDLE, HANDLE, HANDLE, PHANDLE, ACCESS_MASK, ULONG, ULONG);
+typedef LONG (__stdcall *nt_terminate_fn)(HANDLE, LONG);
+typedef ULONG (__stdcall *nt_error_fn)(LONG);
 typedef LONG (__stdcall *nt_resume_fn)(HANDLE, PULONG);
 typedef LONG (__stdcall *csr_call_fn)(PVOID, PVOID, ULONG, ULONG);
 
@@ -286,13 +292,28 @@ static nt_memory_fn original_read_memory, original_write_memory;
 static nt_open_token_fn original_open_token;
 static nt_open_token_ex_fn original_open_token_ex;
 static nt_duplicate_fn original_duplicate;
+static nt_terminate_fn original_terminate;
+static nt_error_fn original_error_conversion, original_error_conversion_no_teb;
+static set_last_error_fn original_set_nt_status, original_set_win32_error;
 static nt_resume_fn original_resume;
 static csr_call_fn original_csr_call;
 static volatile LONG native_calls;
 static BOOL native_started;
+static struct {
+    const wchar_t *name;
+    uintptr_t base;
+    DWORD size, timestamp;
+} native_modules[] = {
+    {L"KernelBase.dll", 0, 0, 0},
+    {L"kernel32.dll", 0, 0, 0}
+};
+
 static struct native_step {
     const char *operation;
-    LONG status, message_status;
+    const wchar_t *caller_module;
+    LONG status, message_status, input_status;
+    DWORD caller_rva;
+    BOOL no_result;
     ULONG state, process_flags, thread_flags, info_class, length;
     ULONG api_number, message_api, message_data, message_total, access_mask, options;
     SIZE_T memory_size;
@@ -308,6 +329,22 @@ static struct native_step *record_native_step(const char *operation, LONG status
     native_steps[index].operation = operation;
     native_steps[index].status = status;
     return &native_steps[index];
+}
+
+static void record_error_step(const char *operation, LONG result, LONG input, BOOL no_result, const void *caller) {
+    struct native_step *step = record_native_step(operation, result);
+    uintptr_t address = (uintptr_t)caller;
+    if (!step) return;
+    step->input_status = input;
+    step->no_result = no_result;
+    step->caller_module = L"unresolved";
+    for (SIZE_T i = 0; i < sizeof(native_modules) / sizeof(native_modules[0]); i++) {
+        if (address >= native_modules[i].base && address - native_modules[i].base < native_modules[i].size) {
+            step->caller_module = native_modules[i].name;
+            step->caller_rva = (DWORD)(address - native_modules[i].base);
+            break;
+        }
+    }
 }
 
 /* Observe actual calls; never replace their arguments, output buffers or results. */
@@ -405,6 +442,34 @@ static LONG __stdcall observe_duplicate(HANDLE source_process, HANDLE source, HA
     return status;
 }
 
+static LONG __stdcall observe_terminate(HANDLE process, LONG exit_status) {
+    LONG status = original_terminate(process, exit_status);
+    record_error_step("NtTerminateProcess", status, exit_status, FALSE, _ReturnAddress());
+    return status;
+}
+
+static ULONG __stdcall observe_error_conversion(LONG status) {
+    ULONG error = original_error_conversion(status);
+    record_error_step("RtlNtStatusToDosError", (LONG)error, status, FALSE, _ReturnAddress());
+    return error;
+}
+
+static ULONG __stdcall observe_error_conversion_no_teb(LONG status) {
+    ULONG error = original_error_conversion_no_teb(status);
+    record_error_step("RtlNtStatusToDosErrorNoTeb", (LONG)error, status, FALSE, _ReturnAddress());
+    return error;
+}
+
+static void __stdcall observe_set_nt_status(LONG status) {
+    original_set_nt_status(status);
+    record_error_step("RtlSetLastWin32ErrorAndNtStatusFromNtStatus", 0, status, TRUE, _ReturnAddress());
+}
+
+static void __stdcall observe_set_win32_error(LONG error) {
+    original_set_win32_error(error);
+    record_error_step("RtlSetLastWin32Error", 0, error, TRUE, _ReturnAddress());
+}
+
 static LONG __stdcall observe_resume(HANDLE thread, PULONG previous_count) {
     LONG status = original_resume(thread, previous_count);
     record_native_step("NtResumeThread", status);
@@ -435,8 +500,8 @@ static LONG __stdcall observe_csr_call(PVOID message, PVOID capture, ULONG api_n
 }
 
 /* Search only the loaded OS module's bounded x64 import-address table. */
-static ULONGLONG *native_import(const wchar_t *module_name, const char *name) {
-    BYTE *module = (BYTE *)GetModuleHandleW(module_name);
+static ULONGLONG *native_import(SIZE_T module_index, const char *name) {
+    BYTE *module = (BYTE *)GetModuleHandleW(native_modules[module_index].name);
     FARPROC address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), name);
     IMAGE_DOS_HEADER *dos;
     IMAGE_NT_HEADERS64 *headers;
@@ -448,6 +513,9 @@ static ULONGLONG *native_import(const wchar_t *module_name, const char *name) {
     headers = (IMAGE_NT_HEADERS64 *)(module + dos->e_lfanew);
     if (headers->Signature != IMAGE_NT_SIGNATURE || headers->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
         headers->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IAT) return NULL;
+    native_modules[module_index].base = (uintptr_t)module;
+    native_modules[module_index].size = headers->OptionalHeader.SizeOfImage;
+    native_modules[module_index].timestamp = headers->FileHeader.TimeDateStamp;
     table = headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT];
     if (!table.VirtualAddress || table.VirtualAddress % sizeof(ULONGLONG) ||
         table.VirtualAddress >= headers->OptionalHeader.SizeOfImage ||
@@ -469,11 +537,11 @@ static BOOL replace_nt_import(ULONGLONG *slot, ULONGLONG value) {
     return TRUE;
 }
 
-static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn last_status) {
+static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn last_status,
+                                     set_last_error_fn reset_status) {
     static const char *const variants[] = {
         "ordinary-traced", "current-token-inherited-desktop", "current-token-empty-desktop"
     };
-    static const wchar_t *const modules[] = {L"KernelBase.dll", L"kernel32.dll"};
     wchar_t command[32768], desktop[] = L"";
     HANDLE token = NULL;
     nt_create_fn create_observer = observe_nt_create;
@@ -484,6 +552,9 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
     nt_open_token_fn open_token_observer = observe_open_token;
     nt_open_token_ex_fn open_token_ex_observer = observe_open_token_ex;
     nt_duplicate_fn duplicate_observer = observe_duplicate;
+    nt_terminate_fn terminate_observer = observe_terminate;
+    nt_error_fn error_observer = observe_error_conversion, no_teb_observer = observe_error_conversion_no_teb;
+    set_last_error_fn set_nt_observer = observe_set_nt_status, set_win32_observer = observe_set_win32_error;
     nt_resume_fn resume_observer = observe_resume;
     csr_call_fn csr_observer = observe_csr_call;
     struct native_import_slot {
@@ -507,18 +578,24 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
         {"NtOpenProcessToken", &original_open_token, &open_token_observer, {{0}}},
         {"NtOpenProcessTokenEx", &original_open_token_ex, &open_token_ex_observer, {{0}}},
         {"NtDuplicateObject", &original_duplicate, &duplicate_observer, {{0}}},
+        {"NtTerminateProcess", &original_terminate, &terminate_observer, {{0}}},
+        {"RtlNtStatusToDosError", &original_error_conversion, &error_observer, {{0}}},
+        {"RtlNtStatusToDosErrorNoTeb", &original_error_conversion_no_teb, &no_teb_observer, {{0}}},
+        {"RtlSetLastWin32ErrorAndNtStatusFromNtStatus", &original_set_nt_status, &set_nt_observer, {{0}}},
+        {"RtlSetLastWin32Error", &original_set_win32_error, &set_win32_observer, {{0}}},
         {"NtResumeThread", &original_resume, &resume_observer, {{0}}},
         {"CsrClientCallServer", &original_csr_call, &csr_observer, {{0}}}
     };
     C_ASSERT(sizeof(nt_create_fn) == 8 && sizeof(nt_info_fn) == 8 && sizeof(nt_query_fn) == 8 &&
              sizeof(nt_memory_fn) == 8 && sizeof(nt_open_token_fn) == 8 && sizeof(nt_open_token_ex_fn) == 8 &&
-             sizeof(nt_duplicate_fn) == 8 && sizeof(nt_resume_fn) == 8 && sizeof(csr_call_fn) == 8);
+             sizeof(nt_duplicate_fn) == 8 && sizeof(nt_resume_fn) == 8 && sizeof(csr_call_fn) == 8 &&
+             sizeof(nt_terminate_fn) == 8 && sizeof(nt_error_fn) == 8 && sizeof(set_last_error_fn) == 8);
     for (SIZE_T i = 0; i < sizeof(imports) / sizeof(imports[0]); i++) {
-        for (SIZE_T j = 0; j < sizeof(modules) / sizeof(modules[0]); j++) {
+        for (SIZE_T j = 0; j < sizeof(native_modules) / sizeof(native_modules[0]); j++) {
             struct native_import_slot *slot = &imports[i].slots[j];
             ULONGLONG replacement;
             DWORD trace_error = ERROR_SUCCESS;
-            slot->address = native_import(modules[j], imports[i].name);
+            slot->address = native_import(j, imports[i].name);
             if (slot->address) {
                 slot->saved = *slot->address;
                 memcpy(imports[i].original, &slot->saved, sizeof(ULONGLONG));
@@ -528,9 +605,12 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
                 if (!slot->installed) trace_error = GetLastError();
             }
             printf("DESCENDANT_IMPORT=%s MODULE=%ls FOUND=%d INSTALLED=%d ERROR=%lu\n",
-                   imports[i].name, modules[j], slot->address != NULL, slot->installed, trace_error);
+                   imports[i].name, native_modules[j].name, slot->address != NULL, slot->installed, trace_error);
         }
     }
+    for (SIZE_T i = 0; i < sizeof(native_modules) / sizeof(native_modules[0]); i++)
+        printf("DESCENDANT_MODULE=%ls IMAGE_SIZE=%lu TIMESTAMP=%08lX\n",
+               native_modules[i].name, native_modules[i].size, native_modules[i].timestamp);
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &token))
         printf("DESCENDANT_TOKEN_ASSIGN_ACCESS=0 ERROR=%lu\n", GetLastError());
     for (int i = 0; i < 3; i++) {
@@ -547,6 +627,7 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
         ZeroMemory(native_steps, sizeof(native_steps));
         if (configured) {
             swprintf_s(command, 32768, L"\"%ls\" token", executable);
+            if (reset_status) reset_status(0);
             SetLastError(ERROR_SUCCESS);
             if (i != 0) started = CreateProcessAsUserW(token, executable, command, NULL, NULL, TRUE,
                                                        0, NULL, NULL, &startup, &process);
@@ -555,14 +636,18 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
             error = GetLastError();
             if (!started && last_status) nt_status = last_status();
         }
+        native_started = FALSE;
         printf("DESCENDANT_VARIANT=%s CONFIGURED=%d STARTED=%d ERROR=%lu LAST_NTSTATUS=%08lX CREATE_AND_POST_CALLS=%ld\n",
                variants[i], configured, started, error, (unsigned long)nt_status, native_calls);
         for (LONG j = 0; j < native_calls && j < 128; j++) {
             const struct native_step *step = &native_steps[j];
-            printf("DESCENDANT_NATIVE_STEP=%ld API=%s RESULT=%08lX STATE=%lu PROCESS_FLAGS=%08lX THREAD_FLAGS=%08lX "
+            printf("DESCENDANT_NATIVE_STEP=%ld API=%s RESULT_KIND=%s RESULT=%08lX INPUT=%08lX CALLER=%ls+%08lX "
+                   "STATE=%lu PROCESS_FLAGS=%08lX THREAD_FLAGS=%08lX "
                    "CLASS=%lu LENGTH=%lu ACCESS=%08lX OPTIONS=%08lX MEMORY_SIZE=%zu CSR_API=%08lX CSR_LAYOUT=%d CSR_MESSAGE_API=%08lX "
                    "CSR_MESSAGE_STATUS=%08lX CSR_LENGTHS=%lu/%lu\n",
-                   j, step->operation, (unsigned long)step->status, step->state,
+                   j, step->operation, step->no_result ? "void" : "return", (unsigned long)step->status,
+                   (unsigned long)step->input_status, step->caller_module ? step->caller_module : L"-", step->caller_rva,
+                   step->state,
                    step->process_flags, step->thread_flags, step->info_class, step->length,
                    step->access_mask, step->options, step->memory_size,
                    step->api_number, step->message_valid, step->message_api,
@@ -580,7 +665,7 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
         printf("DESCENDANT_VARIANT=%s WAIT=%lu EXIT=%lu\n", variants[i], waited, code);
     }
     for (SIZE_T i = sizeof(imports) / sizeof(imports[0]); i > 0; i--) {
-        for (SIZE_T j = sizeof(modules) / sizeof(modules[0]); j > 0; j--) {
+        for (SIZE_T j = sizeof(native_modules) / sizeof(native_modules[0]); j > 0; j--) {
             struct native_import_slot *slot = &imports[i - 1].slots[j - 1];
             if (slot->installed) check(replace_nt_import(slot->address, slot->saved), "restore diagnostic native import");
         }
@@ -595,13 +680,18 @@ static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
     BOOL spawned;
     DWORD code = 1;
     last_ntstatus_fn last_status = NULL;
+    set_last_error_fn reset_status = NULL;
     FARPROC address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetLastNtStatus");
+    FARPROC reset_address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlSetLastWin32ErrorAndNtStatusFromNtStatus");
     memcpy(&last_status, &address, sizeof(last_status));
+    memcpy(&reset_status, &reset_address, sizeof(reset_status));
     ZeroMemory(&startup, sizeof(startup));
     ZeroMemory(&process, sizeof(process));
     startup.cb = sizeof(startup);
     check(GetModuleFileNameW(NULL, executable, 32768) > 0, "find guest executable");
     swprintf_s(command, 32768, L"\"%ls\" %ls", executable, mode);
+    if (reset_status) reset_status(0);
+    SetLastError(ERROR_SUCCESS);
     spawned = CreateProcessW(executable, command, NULL, NULL, TRUE, flags, NULL, NULL, &startup, &process);
     if (expect_failure) {
         check(!spawned, "job breakaway denied");
@@ -610,9 +700,9 @@ static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
         if (!spawned) {
             DWORD original_error = GetLastError();
             LONG nt_status = last_status ? last_status() : 0;
-            printf("DESCENDANT_ERROR=%lu NTSTATUS_AVAILABLE=%d LAST_NTSTATUS=%08lX\n",
-                   original_error, last_status != NULL, (unsigned long)nt_status);
-            child_launch_diagnostics(executable, last_status);
+            printf("DESCENDANT_ERROR=%lu NTSTATUS_AVAILABLE=%d NTSTATUS_RESET=%d LAST_NTSTATUS=%08lX\n",
+                   original_error, last_status != NULL, reset_status != NULL, (unsigned long)nt_status);
+            child_launch_diagnostics(executable, last_status, reset_status);
             SetLastError(original_error);
         }
         check(spawned, "confined descendant starts");

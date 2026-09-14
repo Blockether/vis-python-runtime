@@ -289,14 +289,19 @@ Run 34891790772 installs all five KernelBase observers without error, but only
 native creation traverses them. No CSR, process/thread update or resume call is
 observed through those slots; this does not exclude calls from other modules.
 
-The failure-only probe now covers KernelBase and Kernel32 imports, including
-process/thread/token queries, token opens, handle duplication and memory transfer.
-It records native creation and subsequent calls, forwarding every argument and
-result unchanged, then restores the imports and page protection. CSR transport
-and message status remain separate; message interpretation requires matching x64
-header lengths and the requested API number. No host object ACLs, capabilities or
-production launch behavior change. The original descendant failure remains
-mandatory; Windows support is unverified.
+Run 34893563254 observes native creation and two successful process queries
+(command line and extended basic information), but no failing call through the
+expanded imports. All four Unix lanes and API documentation checks pass. Error 5
+still blocks Windows E2E. Earlier last-NT-status readings were not reset before
+launch and may include a previous error; they do not identify the failing call.
+
+The failure-only probe now resets both last-error fields before each launch and
+records error setters/converters and termination, including the caller's module
+and relative address. This distinguishes error propagation from cleanup without
+printing process memory or absolute addresses. Call arguments, output buffers and
+results remain unchanged, and the private import mappings are restored. No host
+object ACLs, capabilities or production launch behavior change. The original
+descendant failure remains mandatory; Windows support is unverified.
 
 `GetAppContainerFolderPath` returns local application data beneath the profile,
 not its root. Test cleanup validates the generated parent name and exact SID;
