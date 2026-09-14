@@ -33,12 +33,12 @@ public final class WindowsJailProbe {
     checks++;
   }
 
-  private static void stage(AssertionError failures, String name, Checked action) {
+  private static void stage(String name, Checked action) throws Exception {
     System.out.println("START WindowsJail " + name);
     try { action.run(); } catch (Exception | AssertionError failed) {
-      failures.addSuppressed(new AssertionError(name, failed));
       System.err.println("FAIL WindowsJail " + name);
       failed.printStackTrace(System.err);
+      throw failed;
     }
   }
 
@@ -632,24 +632,22 @@ public final class WindowsJailProbe {
     Path parent = Files.createTempDirectory("vj-").toRealPath();
     Throwable failure = null;
     try {
-      // Independent cases still run after a failure; the whole probe must remain red.
-      AssertionError failures = new AssertionError("Windows jail boundary checks failed");
-      stage(failures, "validation", () -> validation(parent, guest));
-      stage(failures, "staging stress", () -> passed(
+      // Report the first failure before a later native wait can hide its diagnostics.
+      stage("validation", () -> validation(parent, guest));
+      stage("staging stress", () -> passed(
           finish(new ProcessBuilder(self("--staging-child", parent, guest)).start(), new byte[0]), "bounded staging stress"));
-      stage(failures, "filesystem", () -> filesystem(parent, guest));
-      stage(failures, "streams", () -> argumentsAndStreams(parent, guest));
-      stage(failures, "network", () -> network(parent, guest));
-      stage(failures, "lifetime", () -> lifetime(parent, guest));
-      stage(failures, "terminal", () -> terminal(parent, guest));
-      stage(failures, "active ConPTY close", () -> passed(
+      stage("filesystem", () -> filesystem(parent, guest));
+      stage("streams", () -> argumentsAndStreams(parent, guest));
+      stage("network", () -> network(parent, guest));
+      stage("lifetime", () -> lifetime(parent, guest));
+      stage("terminal", () -> terminal(parent, guest));
+      stage("active ConPTY close", () -> passed(
           finish(new ProcessBuilder(self("--terminal-child", parent, guest)).start(), new byte[0]), "bounded active ConPTY close"));
-      stage(failures, "parent crash", () -> parentCrash(parent, guest));
-      stage(failures, "inherited handles and standard user", () -> restrictedHosts(parent, guest));
+      stage("parent crash", () -> parentCrash(parent, guest));
+      stage("inherited handles and standard user", () -> restrictedHosts(parent, guest));
       if (arguments.length == 2) {
-        stage(failures, "stock Python and native worker", () -> python(parent, guest, Path.of(arguments[1]).toRealPath()));
+        stage("stock Python and native worker", () -> python(parent, guest, Path.of(arguments[1]).toRealPath()));
       }
-      if (failures.getSuppressed().length != 0) throw failures;
     } catch (Throwable caught) {
       failure = caught;
       throw caught;
