@@ -263,10 +263,10 @@
         (throw (ex-info "Windows jail guest probe compilation failed" {:exit exit}))))
     (when-not (.isFile guest)
       (throw (ex-info "Windows jail guest build wrote no executable" {:path (.getPath guest)})))
+    ;; tools.build omits the project's compiled classes from this classpath.
     (b/javac {:src-dirs ["test/java"]
               :class-dir test-classes
-              :basis @basis
-              :javac-opts ["--release" "22" "-Xlint:all,-restricted"]})
+              :javac-opts ["--release" "22" "-Xlint:all,-restricted" "-classpath" class-dir]})
     (b/delete {:path (.getPath out)})
     (let [{:keys [exit]}
           (b/process {:command-args

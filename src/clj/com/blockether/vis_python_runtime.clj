@@ -185,9 +185,8 @@
 (defn spawn-windows-process!
   "Run a command in a [[windows-jail]], returning `java.lang.Process`.
    The executable must be absolute, inside its staged app or Windows System32.
-   `:directory` is relative to work (nil means its root). `:environment` replaces
-   the host environment; TEMP/TMP always point to the private tmp directory.
-   Use positive `:rows`/:columns with `:pty?`; otherwise pipes are used.
+   `:directory` is work-relative (nil means work); `:environment` replaces the host environment.
+   TEMP/TMP stay private. `:pty?` needs positive `:rows`/`:columns`; default is pipes.
    No network, host-path or credential options are supported; unknown keys throw.
    Both destroy methods terminate the process job and its descendants."
   ([jail command] (spawn-windows-process! jail command {}))

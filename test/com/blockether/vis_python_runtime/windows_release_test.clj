@@ -93,4 +93,6 @@
       (is (str/includes? test-script text) text))
     (doseq [text ["test/java" "target/test-classes" "target/windows-jail-probe.exe"
                   "com.blockether.vispython.WindowsJailProbe" "native/visjail/windows_probe.c"]]
-      (is (str/includes? build text) text))))
+      (is (str/includes? build text) text))
+    (is (re-find #":javac-opts\s+\[[^\]]*\"-classpath\"\s+class-dir\b" build)
+        "Probe compilation includes production classes; tools.build omits project paths")))
