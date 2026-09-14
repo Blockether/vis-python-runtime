@@ -22,7 +22,8 @@
    `.data` map contains available diagnostics such as symbol, status or path.
    Python errors from [[run-block]] instead appear in its JSON `error` field."
   (:import [com.blockether.vispython HostFunction Interpreter Jail JailPolicy JailPolicy$Egress
-            Locations Native Pip Trust]
+            Locations Native Pip Trust WindowsJail]
+           [java.nio.file Path]
            [java.util.function Consumer]))
 
 (def native-path-env
@@ -102,7 +103,8 @@
    `{:proxy <port>}` — the one loopback port sockets may reach — `:unix-connect`
    lists exact local control sockets, `:inbound` lists ports additionally exposed
    on every interface (loopback listeners are always allowed), and `:keychain?`
-   opens the OS credential store."
+   opens the OS credential store. This path-policy contract is for macOS/Linux;
+   Windows uses [[windows-jail]] and private copies instead of host-path grants."
   [{:keys [read-write read-only deny-read deny-write deny-exec unix-connect network inbound
            keychain?]}]
   (JailPolicy. (vec read-write)
@@ -117,7 +119,8 @@
 
 (defn jail-unsupported-reason
   "Why this host cannot confine a child — no Seatbelt or namespaces, WSL1, no
-   `libvisjail` beside the runtime — or nil when it can."
+   `libvisjail` beside the runtime — or nil when it can. Windows has a separate
+   [[windows-jail-unsupported-reason]] and workspace contract."
   []
   (Jail/unsupportedReason))
 
@@ -133,7 +136,8 @@
    on macOS, embedded bubblewrap on Linux, compiled by the runtime — and a spawn
    the host cannot enforce throws instead of running the child unconfined; no
    policy keeps only the process group and stream handling. `:environment` is
-   the COMPLETE child environment; a confined child also carries `Jail/MARKER`."
+   the COMPLETE child environment; a confined child also carries `Jail/MARKER`.
+   On Windows use [[spawn-windows-process!]]; this function always refuses it."
   ([command] (spawn-process! command {}))
   ([command {:keys [environment directory policy pty? merge-stderr? rows columns]}]
    (Jail/spawn (vec command)
@@ -145,6 +149,62 @@
                (boolean merge-stderr?)
                (int (or rows 0))
                (int (or columns 0)))))
+
+(defn windows-jail-unsupported-reason
+  "Why the Windows workspace backend is unavailable, or nil when its platform
+   archive is present. Creation still validates OS security prerequisites."
+  []
+  (WindowsJail/unsupportedReason))
+
+(defn windows-jail
+  "Create a new Windows LPAC workspace under an existing local parent directory.
+   Use `with-open` to terminate its jobs and release native resources. The app,
+   work and tmp directories remain afterward so you can inspect the outputs.
+   This grants no host-path access and enables no network capabilities."
+  ^WindowsJail [parent]
+  (when (nil? parent) (throw (IllegalArgumentException. "Windows jail parent is required")))
+  (WindowsJail/create (Path/of (str parent) (make-array String 0))))
+
+(defn windows-jail-directories
+  "Paths belonging to an open or closed Windows jail. Prepare writable inputs
+   in `:work`; [[stage-windows-jail!]] copies read-only inputs into `:application`."
+  [^WindowsJail jail]
+  {:directory (str (.directory jail))
+   :application (str (.applicationDirectory jail))
+   :work (str (.workDirectory jail))
+   :temporary (str (.temporaryDirectory jail))})
+
+(defn stage-windows-jail!
+  "Copy a local file/tree into a new relative destination under the jail's app
+   directory; return its absolute path. Refuse links, reparse points and unsafe
+   destinations. Source ACLs stay unchanged. Call before the first spawn."
+  [^WindowsJail jail source relative-destination]
+  (when (nil? source) (throw (IllegalArgumentException. "Windows jail source is required")))
+  (str (.stage jail (Path/of (str source) (make-array String 0)) relative-destination)))
+
+(defn spawn-windows-process!
+  "Run a command in a [[windows-jail]], returning `java.lang.Process`.
+   The executable must be absolute, inside its staged app or Windows System32.
+   `:directory` is relative to work (nil means its root). `:environment` replaces
+   the host environment; TEMP/TMP always point to the private tmp directory.
+   Use positive `:rows`/:columns with `:pty?`; otherwise pipes are used.
+   No network, host-path or credential options are supported; unknown keys throw.
+   Both destroy methods terminate the process job and its descendants."
+  ([jail command] (spawn-windows-process! jail command {}))
+  ([^WindowsJail jail command
+    {:keys [environment directory pty? merge-stderr? rows columns] :as options}]
+   (when-let [unknown (seq (remove #{:environment :directory :pty? :merge-stderr? :rows :columns}
+                             (keys options)))]
+     (throw (IllegalArgumentException. (str "Unsupported Windows jail options: "
+                                            (pr-str unknown)))))
+   (.spawn jail
+           (vec command)
+           (or environment {})
+           directory
+           (boolean pty?)
+           (boolean merge-stderr?)
+           (int (or rows 0))
+           (int (or columns 0)))))
 
 (defn initialize!
   "Start the embedded interpreter once per process and add `:source-paths` to

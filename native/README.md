@@ -33,7 +33,7 @@ new symbol versions even when the C source uses no new APIs.
 CPython remains a bundled shared library. Statically linking libpython would not
 remove glibc requirements from the bridge, worker or third-party extension modules;
 statically linking glibc is not a replacement for testing this dynamic-loading ABI.
-`visjail/build.sh` produces the second cdylib in every platform tree. On Linux
+`visjail/build.sh` produces the second cdylib in each macOS and Linux platform tree. On Linux
 it hash-pins bubblewrap and libcap, compiles the upstream bubblewrap sources into
 `libvisjail.so`, and statically links libcap; libc is the only host ABI and there
 is no `bwrap` executable or package lookup. On macOS the same ABI forks a child,
@@ -52,19 +52,24 @@ Use PowerShell 7.3 or newer in a Visual Studio x64 Native Tools environment:
 ./native/vispython/build.ps1
 clojure -T:build javac
 clojure -T:build worker-image
+clojure -T:build windows-jail-probe
 ./scripts/test-windows.ps1
 clojure -T:build platform-archive :platform windows-x64
 ./scripts/verify-platform-archive.ps1
 ```
 
-The archive contains `vispython.dll`, `vis-python-worker.exe`, a complete
+The archive contains `vispython.dll`, `visjail.dll`, `vis-python-worker.exe`, a complete
 `python/` tree and `python/Scripts/uv.exe`. CPython, uv and GraalVM CE downloads
 use checked-in SHA-256 pins. The build uses MSVC, not MinGW or a POSIX emulation
 layer. CI builds and executes the runtime on Windows Server 2022 x64, including
 the extracted archive; Windows 11 x64 is the desktop target.
 
-The Windows library implements the embedding API and interpreter-level filesystem
-confinement. It does not provide an OS process jail: the Jail API refuses requests
-rather than launching an unrestricted process. No `visjail.dll` is shipped.
+`visjail/build.ps1` builds the Windows process backend alongside the interpreter.
+`WindowsJail` uses LPAC, private copied application files and Job Objects, without
+network capabilities or permissions on the original source trees. It is not a
+translation of Unix `JailPolicy`; see the [Windows jail guide](../doc/windows-jail.md)
+and `visjail/visjail.h` for the Java/Clojure and C contracts. The Windows test script
+executes JVM and native-image jail launchers before and after archive extraction;
+the test probe executables are not shipped.
 Windows ARM64 is not a release target. This runtime support does not imply that
 all Vis gateway, terminal or workspace features run natively on Windows.

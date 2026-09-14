@@ -82,7 +82,7 @@
     (codox/generate-docs
       {:source-paths ["src/clj"]
        :namespaces '[com.blockether.vis-python-runtime]
-       :doc-files ["doc/getting-started.md" "doc/embedding.md"]
+       :doc-files ["doc/getting-started.md" "doc/embedding.md" "doc/windows-jail.md"]
        :output-path "target/docs/clojure"
        :metadata {:doc/format :markdown}
        :project {:name "vis-python-runtime"
@@ -91,17 +91,19 @@
        :source-uri
        "https://github.com/Blockether/vis-python-runtime/blob/{git-commit}/{filepath}#L{line}"})
     (io/copy (io/file "doc/index.html") (io/file "target/docs/index.html"))
-    (io/make-parents "target/docs/examples/Example.java")
-    (io/copy (io/file "doc/examples/Example.java") (io/file "target/docs/examples/Example.java"))
-    (io/make-parents "target/docs-examples/Example.class")
-    (when-not (zero? (.run compiler
-                           nil
-                           System/out
-                           System/err
-                           (into-array String
-                                       ["-encoding" "UTF-8" "-cp" "target/classes" "-d"
-                                        "target/docs-examples" "doc/examples/Example.java"])))
-      (throw (ex-info "Java documentation example failed to compile" {})))
+    (doseq [example ["Example" "WindowsJailExample"]]
+      (let [source (str "doc/examples/" example ".java")]
+        (io/make-parents (str "target/docs/examples/" example ".java"))
+        (io/copy (io/file source) (io/file (str "target/docs/examples/" example ".java")))
+        (io/make-parents (str "target/docs-examples/" example ".class"))
+        (when-not (zero? (.run compiler
+                               nil
+                               System/out
+                               System/err
+                               (into-array String
+                                           ["-encoding" "UTF-8" "-cp" "target/classes" "-d"
+                                            "target/docs-examples" source])))
+          (throw (ex-info "Java documentation example failed to compile" {:example example})))))
     (println "Checked local links in" (check-links! "target/docs") "HTML pages")
     (doseq [[directory archive]
             [["target/docs" (str "target/vis-python-runtime-api-docs-" version ".zip")]

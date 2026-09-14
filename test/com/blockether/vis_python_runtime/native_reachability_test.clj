@@ -13,7 +13,7 @@
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]])
-  (:import [com.blockether.vispython Interpreter Jail Sources]
+  (:import [com.blockether.vispython Interpreter Jail Sources WindowsJail]
            [java.lang.foreign FunctionDescriptor MemoryLayout]))
 
 (def ^:private metadata-file
@@ -61,6 +61,7 @@
                 (map (comp pr-str shape))
                 (concat (vals (boundary Interpreter "SIGNATURES"))
                         (vals (boundary Jail "SIGNATURES"))
+                        (vals (boundary WindowsJail "SIGNATURES"))
                         (vals (boundary (Class/forName "com.blockether.vispython.WindowsLibrary")
                                         "SIGNATURES"))))
 

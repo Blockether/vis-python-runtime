@@ -5,7 +5,8 @@
             [clojure.test :refer [deftest is]]
             [com.blockether.vis-python-runtime :as runtime]
             [com.blockether.vis-python-runtime.worker-test :as worker-test])
-  (:import [com.blockether.vispython Interpreter Jail Locations Native VisPythonException Worker]
+  (:import [com.blockether.vispython Interpreter Jail Locations Native VisPythonException
+            WindowsJail Worker]
            [java.nio.file Files Path]
            [java.nio.file.attribute FileAttribute]))
 
@@ -53,6 +54,42 @@
          (is (thrown? VisPythonException
                       (Jail/spawn ["cmd.exe" "/c" "echo must-not-run"] {} nil nil false false 0 0)))
          (finally (System/setProperty "os.name" old-os)))))
+
+(deftest windows-jail-library-layout-test
+  (let [directory
+        (temp-dir)
+
+        library
+        (.resolve directory "vispython.dll")
+
+        jail
+        (.resolve directory "visjail.dll")
+
+        old-os
+        (System/getProperty "os.name")
+
+        old-arch
+        (System/getProperty "os.arch")]
+
+    (try (System/setProperty "os.name" "Windows 11")
+         (System/setProperty "os.arch" "amd64")
+         (spit (str library) "fixture")
+         (Native/use (str directory))
+         (is (nil? (Locations/jail (str library))))
+         (is (false? (WindowsJail/supported)))
+         (is (str/includes? (WindowsJail/unsupportedReason) "visjail.dll"))
+         (spit (str jail) "fixture")
+         (is (= (str jail) (Locations/jail (str library))))
+         (is (WindowsJail/supported)
+             "Availability checks do not load a DLL or claim a runtime pass")
+         (is (false? (Jail/supported)) "The Unix path-policy contract must not silently change")
+         (is (thrown-with-msg? VisPythonException
+                               #"WindowsJail"
+                               (Jail/spawn ["cmd.exe"] {} nil nil false false 0 0)))
+         (finally (Native/use nil)
+                  (System/setProperty "os.name" old-os)
+                  (System/setProperty "os.arch" old-arch)
+                  (delete-tree! directory)))))
 
 (deftest windows-native-bridge-test
   (if-not (str/starts-with? (Native/platform) "windows-")

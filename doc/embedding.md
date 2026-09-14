@@ -122,9 +122,14 @@ thread and runtime-pool limits.
 
 **OS child-process policy:** `Jail.spawn` / `spawn-process!` uses Seatbelt on macOS
 and the bundled Linux namespace enforcer on Linux. Check `Jail.unsupportedReason`
-or `jail-unsupported-reason` before relying on it. Windows does not provide this
-jail backend yet: a jail request fails instead of launching an unconfined process.
-Do not treat an embedded Windows session as equivalent to an OS-confined worker.
+or `jail-unsupported-reason` before relying on that path-based policy.
+
+On Windows, use [`WindowsJail` / `windows-jail`](windows-jail.md). This separate
+contract uses a low-privilege AppContainer, copied read-only application files
+and private writable directories, with network capabilities disabled. It does
+not translate Unix path grants or deny lists into Windows ACL edits. Unsupported
+path-policy requests still fail rather than launch without enforcement. An
+embedded Windows session alone is not an OS-confined worker.
 
 The runtime is not a virtual machine, and a session name alone is not a security
 boundary. Review the native packages and host capabilities you expose. Do not

@@ -104,6 +104,7 @@ jobs:
           ./native/vispython/build.ps1
           clojure -T:build javac
           clojure -T:build worker-image
+          clojure -T:build windows-jail-probe
           ./scripts/test-windows.ps1
           clojure -T:build platform-archive :platform windows-x64
           ./scripts/verify-platform-archive.ps1

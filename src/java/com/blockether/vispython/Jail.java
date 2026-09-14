@@ -51,20 +51,25 @@ public final class Jail {
     return FunctionDescriptor.of(ValueLayout.JAVA_INT, arguments);
   }
 
+  static SymbolLookup libraryLookup() {
+    String path = Locations.jail(Native.library().path());
+    if (path == null) {
+      throw new VisPythonException("Runtime has no process-jail library",
+          Map.of("library", Native.library().path(), "expected", Native.platform()));
+    }
+    if (Native.platform().startsWith("windows-")) WindowsLibrary.load(Path.of(path));
+    return SymbolLookup.libraryLookup(path, Arena.global());
+  }
+
   private static synchronized Map<String, MethodHandle> handles() {
     if (handles == null) {
-      String path = Locations.jail(Native.library().path());
-      if (path == null) {
-        throw new VisPythonException("Runtime has no process-jail library",
-            Map.of("library", Native.library().path(), "expected", Native.platform()));
-      }
       Linker linker = Linker.nativeLinker();
-      SymbolLookup lookup = SymbolLookup.libraryLookup(path, Arena.global());
+      SymbolLookup lookup = libraryLookup();
       Map<String, MethodHandle> linked = new HashMap<>();
       for (Map.Entry<String, FunctionDescriptor> entry : SIGNATURES.entrySet()) {
         MemorySegment address = lookup.find(entry.getKey()).orElseThrow(() ->
             new VisPythonException("Process-jail library exports no " + entry.getKey(),
-                Map.of("symbol", entry.getKey(), "library", path)));
+                Map.of("symbol", entry.getKey())));
         linked.put(entry.getKey(), linker.downcallHandle(address, entry.getValue()));
       }
       handles = Map.copyOf(linked);
@@ -95,9 +100,9 @@ public final class Jail {
   /** Set in a confined child's environment; Seatbelt is inherited across exec and refuses a second profile. */
   public static final String MARKER = "VIS_SEATBELT_ACTIVE";
 
-  /** True inside a child this jail already confined: the policy is inherited, never applied twice. */
+  /** The Unix inheritance marker. Windows never treats an environment variable as confinement. */
   public static boolean inherited() {
-    return "1".equals(System.getenv(MARKER));
+    return !Native.platform().startsWith("windows-") && "1".equals(System.getenv(MARKER));
   }
 
   private static boolean wsl1() {
@@ -116,6 +121,9 @@ public final class Jail {
       platform = Native.platform();
     } catch (VisPythonException e) {
       return "the OS process jail is not available on this operating system";
+    }
+    if (platform.startsWith("windows-")) {
+      return "path-based JailPolicy is not available on Windows; use WindowsJail's private workspace";
     }
     if (!platform.startsWith("darwin-") && !platform.startsWith("linux-")) {
       return "the OS process jail is not available on this operating system";
@@ -143,7 +151,8 @@ public final class Jail {
    * the one policy value. A null policy applies no jail but keeps the process
    * group, PTY and stream handling. Inside a confined child the policy is
    * already the kernel's, so the child is spawned as it is, still marked. The
-   * environment is complete, not host additions.
+   * environment is complete, not host additions. Windows uses the separate
+   * {@link WindowsJail} workspace contract; this method rejects it, even with a null policy.
    */
   public static JailedProcess spawn(List<String> command, Map<String, String> environment,
       String directory, JailPolicy policy, boolean pty, boolean mergeError, int rows, int columns) {
@@ -151,7 +160,7 @@ public final class Jail {
       throw new IllegalArgumentException("command must not be empty");
     }
     if (Native.platform().startsWith("windows-")) {
-      throw new VisPythonException("Process denied: the OS process jail is not available on Windows",
+      throw new VisPythonException("Process denied: use WindowsJail on Windows; JailPolicy is not supported",
           Map.of("command", command.get(0), "platform", Native.platform()));
     }
     boolean confined = policy != null && !inherited();
@@ -184,11 +193,24 @@ public final class Jail {
       profile = Seatbelt.compile(policy);
     }
     actual.addAll(command);
-    List<String> pairs = env.entrySet().stream()
-        .map(entry -> entry.getKey() + "=" + entry.getValue()).toList();
-    byte[] argvBytes = blob(actual);
-    byte[] envBytes = blob(pairs);
     int flags = (pty ? PTY : 0) | (mergeError ? MERGE_STDERR : 0) | (confined ? CONFINED : 0);
+    return spawnNative(actual, env, directory, profile, flags, rows, columns, proxyPort, inboundPort);
+  }
+
+  static JailedProcess spawnWindows(List<String> command, Map<String, String> environment,
+      String directory, int context, boolean pty, boolean mergeError, int rows, int columns) {
+    int flags = CONFINED | (pty ? PTY : 0) | (mergeError ? MERGE_STDERR : 0);
+    return spawnNative(command, environment, directory, "windows:" + context, flags,
+        rows, columns, 0, 0);
+  }
+
+  private static JailedProcess spawnNative(List<String> command, Map<String, String> environment,
+      String directory, String profile, int flags, int rows, int columns,
+      int proxyPort, int inboundPort) {
+    List<String> pairs = environment.entrySet().stream()
+        .map(entry -> entry.getKey() + "=" + entry.getValue()).toList();
+    byte[] argvBytes = blob(command);
+    byte[] envBytes = blob(pairs);
     MethodHandle handle = handles().get("visjail_spawn");
     try (Arena arena = Arena.ofConfined()) {
       MemorySegment argv = arena.allocate(argvBytes.length);
@@ -205,11 +227,13 @@ public final class Jail {
         throw new VisPythonException("Could not spawn confined process: " + error.getString(0),
             Map.of("status", status, "command", command.get(0)));
       }
-      return new JailedProcess(
-          result.getAtIndex(ValueLayout.JAVA_INT, 0),
+      int process = result.getAtIndex(ValueLayout.JAVA_INT, 0);
+      boolean windows = Native.platform().startsWith("windows-");
+      long pid = windows ? WindowsJail.processId(process) : process;
+      return new JailedProcess(process,
           result.getAtIndex(ValueLayout.JAVA_INT, 1),
           result.getAtIndex(ValueLayout.JAVA_INT, 2),
-          result.getAtIndex(ValueLayout.JAVA_INT, 3), pty);
+          result.getAtIndex(ValueLayout.JAVA_INT, 3), (flags & PTY) != 0, pid, !windows);
     } catch (RuntimeException | Error exception) {
       throw exception;
     } catch (Throwable throwable) {

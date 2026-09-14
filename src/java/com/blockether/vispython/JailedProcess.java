@@ -12,18 +12,23 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** A {@link Process} backed by the descriptors and pid returned by libvisjail. */
+/** A {@link Process} backed by libvisjail descriptors and a native process reference. */
 public final class JailedProcess extends Process {
   private static final int SIGTERM = 15;
   private static final int SIGKILL = 9;
-  private final int pid;
+  private final int process;
+  private final long pid;
+  private final boolean normalTermination;
   private final NativeOutputStream stdin;
   private final InputStream stdout;
   private final InputStream stderr;
   private final CompletableFuture<Integer> exit = new CompletableFuture<>();
   private final AtomicBoolean masterOpen;
-  JailedProcess(int pid, int input, int output, int error, boolean pty) {
+  JailedProcess(int process, int input, int output, int error, boolean pty,
+      long pid, boolean normalTermination) {
+    this.process = process;
     this.pid = pid;
+    this.normalTermination = normalTermination;
     if (pty) {
       masterOpen = new AtomicBoolean(true);
       stdin = new NativeOutputStream(input, masterOpen, false);
@@ -51,11 +56,11 @@ public final class JailedProcess extends Process {
   private void reap() {
     try (Arena arena = Arena.ofConfined()) {
       MemorySegment code = arena.allocate(Integer.BYTES);
-      int status = Jail.waitFor(pid, false, code);
+      int status = Jail.waitFor(process, false, code);
       if (status == 1) {
         exit.complete(code.get(ValueLayout.JAVA_INT, 0));
       } else {
-        exit.completeExceptionally(new IOException("waitpid failed: " + status));
+        exit.completeExceptionally(new IOException("native process wait failed: " + status));
       }
     } catch (Throwable throwable) {
       exit.completeExceptionally(throwable);
@@ -127,9 +132,9 @@ public final class JailedProcess extends Process {
   @Override public ProcessHandle toHandle() {
     return ProcessHandle.of(pid).orElseThrow(() -> new IllegalStateException("no process " + pid));
   }
-  @Override public void destroy() { if (!exit.isDone()) Jail.kill(pid, SIGTERM); }
-  @Override public Process destroyForcibly() { if (!exit.isDone()) Jail.kill(pid, SIGKILL); return this; }
-  @Override public boolean supportsNormalTermination() { return true; }
+  @Override public void destroy() { if (!exit.isDone()) Jail.kill(process, SIGTERM); }
+  @Override public Process destroyForcibly() { if (!exit.isDone()) Jail.kill(process, SIGKILL); return this; }
+  @Override public boolean supportsNormalTermination() { return normalTermination; }
 
   private static RuntimeException failure(Throwable cause) {
     return new VisPythonException("Confined process wait failed: " + cause,

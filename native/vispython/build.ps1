@@ -66,6 +66,9 @@ try {
     $library = Join-Path $stage 'vispython.dll'
     & cl.exe /nologo /std:c11 /LD /MD /O2 /W4 /D_CRT_SECURE_NO_WARNINGS "/I$pythonHome/include" "/Fo$stage/vispython.obj" "/Fe$library" (Join-Path $PSScriptRoot 'vispython.c') /link "/LIBPATH:$pythonHome/libs" "python$minor.lib"
     if (-not (Test-Path -LiteralPath $library -PathType Leaf)) { throw 'MSVC produced no vispython.dll' }
+    & (Join-Path $repo 'native/visjail/build.ps1') -OutputDirectory $stage
+    $jail = Join-Path $stage 'visjail.dll'
+    if (-not (Test-Path -LiteralPath $jail -PathType Leaf)) { throw 'MSVC produced no visjail.dll' }
     Get-ChildItem -LiteralPath $pythonHome -Directory -Recurse -Filter '__pycache__' |
         Remove-Item -Recurse -Force
     $null = New-Item -ItemType Directory -Path (Split-Path $out) -Force
@@ -74,6 +77,7 @@ try {
     Move-Item -LiteralPath $pythonHome -Destination (Join-Path $out 'python')
     Move-Item -LiteralPath $licenses -Destination (Join-Path $out 'licenses')
     Move-Item -LiteralPath $library -Destination (Join-Path $out 'vispython.dll')
+    Move-Item -LiteralPath $jail -Destination (Join-Path $out 'visjail.dll')
     Write-Output (Join-Path $out 'vispython.dll')
 }
 finally {

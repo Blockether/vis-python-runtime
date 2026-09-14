@@ -20,7 +20,7 @@
    "linux-arm64" ["libvispython.so" "libvisjail.so"]
    "darwin-arm64" ["libvispython.dylib" "libvisjail.dylib"]
    "darwin-x64" ["libvispython.dylib" "libvisjail.dylib"]
-   "windows-x64" ["vispython.dll"]})
+   "windows-x64" ["vispython.dll" "visjail.dll"]})
 
 (def worker-platforms
   "Platforms whose archive carries `vis-python-worker`, the interpreter worker
@@ -236,13 +236,60 @@
       (println "Built:" (.getPath out) (format "(%.1f MB)" (/ (.length out) 1048576.0)))
       (.getPath out))))
 
+(defn windows-jail-probe
+  "Build the test-only Windows JVM/native-image jail launcher. Its classpath uses
+   the runtime's shipped FFM registrations, not extra reachability flags. The
+   executable stays in target/, outside every published platform archive."
+  [_]
+  (when-not (= (host-platform) "windows-x64")
+    (throw (ex-info "The Windows jail probe must be built on Windows x64" {})))
+  (javac nil)
+  (let [test-classes
+        "target/test-classes"
+
+        out
+        (io/file "target/windows-jail-probe.exe")
+
+        guest
+        (io/file "target/windows-jail-guest.exe")]
+
+    (b/delete {:path (.getPath guest)})
+    (let [{:keys [exit]} (b/process {:command-args ["cl.exe" "/nologo" "/std:c11" "/W4" "/WX" "/O2"
+                                                    "/MT" "/Fotarget/windows-jail-guest.obj"
+                                                    (str "/Fe" (.getPath guest))
+                                                    "native/visjail/windows_probe.c" "/link"
+                                                    "advapi32.lib" "ws2_32.lib"]})]
+      (when-not (zero? exit)
+        (throw (ex-info "Windows jail guest probe compilation failed" {:exit exit}))))
+    (when-not (.isFile guest)
+      (throw (ex-info "Windows jail guest build wrote no executable" {:path (.getPath guest)})))
+    (b/javac {:src-dirs ["test/java"]
+              :class-dir test-classes
+              :basis @basis
+              :javac-opts ["--release" "22" "-Xlint:all,-restricted"]})
+    (b/delete {:path (.getPath out)})
+    (let [{:keys [exit]}
+          (b/process {:command-args
+                      [(native-image-launcher) "-cp"
+                       (str/join java.io.File/pathSeparator [test-classes class-dir "resources"])
+                       "--enable-native-access=ALL-UNNAMED" "-H:+UnlockExperimentalVMOptions"
+                       "-R:StackSize=16777216" "-H:+ReportExceptionStackTraces"
+                       "-march=compatibility" "-Os" "-o" (.getPath out)
+                       "com.blockether.vispython.WindowsJailProbe"]})]
+      (when-not (zero? exit)
+        (throw (ex-info "Windows jail probe native-image failed" {:exit exit}))))
+    (when-not (.isFile out)
+      (throw (ex-info "Windows jail probe build wrote no executable" {:path (.getPath out)})))
+    (println "Built:" (.getPath out))
+    (.getPath out)))
+
 (defn platform-archive
   "Write the release asset for one platform: everything under
    `resources/prebuilds/<platform>/` — the embedding library, vendored interpreter
-   and native worker where available — as a gzipped tar. Linux and macOS also
-   include libvisjail; Windows does not provide OS process confinement and the
-   Jail API refuses it. Contents sit at the archive root, where Locations
-   resolves them. tar preserves Unix symlinks and executable bits."
+   and native worker where available — as a gzipped tar. Every platform includes
+   its process-jail library; Windows uses the explicit WindowsJail workspace API.
+   Contents sit at the archive root, where Locations resolves them. tar preserves
+   Unix symlinks and executable bits."
   [{:keys [platform]}]
   (let [platform (some-> platform
                          name)]

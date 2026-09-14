@@ -82,6 +82,16 @@
       {
         "returnType": "jint",
         "parameterTypes": [
+          "jint",
+          "void*",
+          "void*",
+          "void*",
+          "jint"
+        ]
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
           "void*",
           "jint",
           "void*",

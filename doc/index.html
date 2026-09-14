@@ -31,7 +31,7 @@
     <p>The <a href="clojure/getting-started.html">getting-started guide</a> covers the JVM jar, native archive, Java and Clojure setup, and expected output. You can also download the <a href="examples/Example.java">runnable Java example</a>.</p>
     <h2>Choose the right execution and isolation model</h2>
     <p>Sessions keep separate globals, but share one interpreter, imports, and the GIL. A session is not a process or a security boundary. Read <a href="clojure/embedding.html">embedding and confinement</a> before running untrusted code.</p>
-    <p>Windows x64 supports the embedded runtime. OS-level child-process confinement is not available on Windows; jail requests fail rather than run without enforcement.</p>
+    <p>To isolate Windows programs, use the <a href="clojure/windows-jail.html">private-workspace jail</a>. Its AppContainer and Job Objects are separate from the Unix path-policy API; unsupported policies fail rather than run without enforcement.</p>
   </main>
   <footer>
     <p>Generated with the JDK's Javadoc and Codox. <a href="https://github.com/Blockether/vis-python-runtime">Source repository</a> · <a href="https://github.com/Blockether/vis-python-runtime/releases">Releases</a></p>

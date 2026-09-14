@@ -41,13 +41,21 @@ final class WindowsLibrary {
       throw new VisPythonException("Windows runtime must contain exactly one versioned Python DLL",
           Map.of("directory", home.toString(), "matches", candidates.size()));
     }
-    // kernel32 is a Windows KnownDLL, not an application or PATH lookup. Both
-    // loaded modules remain referenced for the interpreter's process lifetime.
+    MethodHandle loader = loader();
+    load(loader, candidates.getFirst());
+    load(loader, bridge);
+  }
+
+  static void load(Path library) {
+    load(loader(), library.toAbsolutePath());
+  }
+
+  private static MethodHandle loader() {
+    // kernel32 is a Windows KnownDLL, not an application or PATH lookup.
+    // Modules remain referenced for the host process lifetime.
     SymbolLookup kernel = SymbolLookup.libraryLookup("kernel32.dll", Arena.global());
-    MethodHandle load = Linker.nativeLinker().downcallHandle(
+    return Linker.nativeLinker().downcallHandle(
         kernel.find("LoadLibraryExW").orElseThrow(), SIGNATURES.get("LoadLibraryExW"));
-    load(load, candidates.getFirst());
-    load(load, bridge);
   }
 
   private static void load(MethodHandle loader, Path path) {

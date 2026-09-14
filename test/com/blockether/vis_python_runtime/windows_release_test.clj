@@ -17,8 +17,8 @@
   (let [definitions (build-definitions)]
     (is (contains? (get definitions 'native-platforms) "windows-x64"))
     (is (contains? (get definitions 'worker-platforms) "windows-x64"))
-    (is (= ["vispython.dll"] (get-in definitions ['native-libs "windows-x64"]))
-        "Windows must not ship a pretend OS process enforcer"))
+    (is (= ["vispython.dll" "visjail.dll"] (get-in definitions ['native-libs "windows-x64"]))
+        "Windows must ship the AppContainer enforcer alongside the interpreter"))
   (testing "existing Unix archives retain their native enforcers"
     (doseq [[platform libraries]
             (get (build-definitions) 'native-libs)
@@ -36,9 +36,16 @@
 
     (is (str/includes? workflow "runs-on: windows-2022") path)
     (doseq [command ["./native/vispython/build.ps1" "clojure -T:build worker-image"
-                     "./scripts/verify-platform-archive.ps1" "target/archive-check-windows-x64"
-                     "./scripts/test-windows.ps1"]]
+                     "clojure -T:build windows-jail-probe" "./scripts/verify-platform-archive.ps1"
+                     "target/archive-check-windows-x64" "./scripts/test-windows.ps1"]]
       (is (str/includes? workflow command) (str path ": " command)))
+    (is (= 2 (count (re-seq #"\./scripts/test-windows\.ps1" workflow)))
+        (str path ": execute before and after archive extraction"))
+    (is
+      (re-find
+        #"(?s)\$env:VIS_PYTHON_NATIVE_PATH = \(Resolve-Path 'target/archive-check-windows-x64'\)\.Path\s+\./scripts/test-windows\.ps1"
+        workflow)
+      (str path ": rerun with the extracted native libraries"))
     (is (str/includes? workflow "clojure -X:docs") path)
     (is (str/includes? workflow "clojure -M:docs:test -d doc -n runtime-docs-test") path)
     (is (str/includes? workflow "target/vis-python-runtime-api-docs-*.zip") path)
@@ -54,9 +61,36 @@
 
 (deftest windows-test-diagnostics-gate-test
   (let [script (slurp "scripts/test-windows.ps1")]
-    (is (= 2 (count (re-seq #"-M:test:test-diagnostics" script)))
-        "Both the isolated native boundary and shared suites must retain the watchdog")
+    (is (= 3 (count (re-seq #"-M:test:test-diagnostics" script)))
+        "The OS jail, embedded native boundary and shared suites retain the watchdog")
     (doseq [namespace ["com.blockether.vis-python-runtime.asyncio-test"
-                       "com.blockether.vis-python-runtime.test-diagnostics-test"]]
+                       "com.blockether.vis-python-runtime.test-diagnostics-test"
+                       "com.blockether.vis-python-runtime.windows-jail-test"]]
       (is (str/includes? script namespace) namespace))
     (is (str/includes? (slurp "deps.edn") "com.blockether.vis-python-runtime.test-diagnostics"))))
+
+(deftest windows-jail-packaging-and-probe-gate-test
+  (let [native-script
+        (slurp "native/vispython/build.ps1")
+
+        test-script
+        (slurp "scripts/test-windows.ps1")
+
+        archive-script
+        (slurp "scripts/verify-platform-archive.ps1")
+
+        build
+        (slurp "build.clj")]
+
+    (is (str/includes? native-script "native/visjail/build.ps1"))
+    (is (str/includes? native-script "-OutputDirectory $stage"))
+    (is (< (str/index-of native-script "native/visjail/build.ps1")
+           (str/index-of native-script "Remove-Item -LiteralPath $out"))
+        "Build both libraries before replacing the published staging directory")
+    (is (str/includes? archive-script "'visjail.dll'"))
+    (doseq [text ["visjail.dll" "VIS_WINDOWS_JAIL_GUEST" "WindowsJailProbe"
+                  "Invoke-JailProbe -Executable $launcher" "WaitForExit(180000)"]]
+      (is (str/includes? test-script text) text))
+    (doseq [text ["test/java" "target/test-classes" "target/windows-jail-probe.exe"
+                  "com.blockether.vispython.WindowsJailProbe" "native/visjail/windows_probe.c"]]
+      (is (str/includes? build text) text))))

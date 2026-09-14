@@ -73,10 +73,8 @@ public final class Locations {
     }
     Path root = Path.of(libraryPath).toAbsolutePath().getParent();
     String platform = Native.platform();
-    if (platform.startsWith("windows-")) {
-      return null; // No Windows process enforcer is shipped; never resolve a Unix library.
-    }
-    String name = platform.startsWith("darwin-") ? "libvisjail.dylib" : "libvisjail.so";
+    String name = platform.startsWith("windows-") ? "visjail.dll"
+        : platform.startsWith("darwin-") ? "libvisjail.dylib" : "libvisjail.so";
     Path candidate = root.resolve(name);
     return Files.isRegularFile(candidate) ? candidate.toString() : null;
   }

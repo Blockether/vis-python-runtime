@@ -198,4 +198,68 @@ Windows archive contains the DLL, native worker, CPython and uv; the documentati
 ZIP contains both API references and 36 HTML pages. Java and Clojure quickstarts
 run against the downloaded JVM jar and macOS archive, including the Java host
 callback. The downloaded native worker passes seven tests and 183 assertions.
-Windows OS-level process confinement remains unavailable and fails closed.
+Windows OS-level process confinement remains unavailable and fails closed in
+v0.5.16.
+
+# Native Windows process isolation
+
+A small, documented launcher with an explicit Windows security contract.
+
+## Context
+
+`Jail` currently compiles path-based `JailPolicy` values to Seatbelt or bubblewrap.
+Windows does not provide equivalent unprivileged mount namespaces. Granting ACLs
+on arbitrary host trees would not enforce path denies across renames, hard links
+or newly created children. A VM, driver or global firewall configuration would
+change the installation and privilege requirements.
+
+Add a separate `WindowsJail` capability-workspace API. Each context owns a fresh
+private directory, a unique low-privilege AppContainer identity and Job Objects.
+Copy selected programs and inputs into a read-only application directory; provide
+separate writable work and temporary directories. Do not modify source ACLs or
+reinterpret unsupported `JailPolicy` fields. Network capabilities stay disabled.
+Outputs remain available to the host after closing the context.
+
+## Phases
+
+1. Native enforcement and lifecycle
+   - Rationale: arbitrary child programs need a kernel boundary, not Python hooks.
+   - Data: `native/visjail/visjail_windows.c`, `visjail.h` and `build.ps1`.
+   - Acceptance criteria: safe copied inputs, LPAC tokens, suspended launch into
+     jobs, explicit handle inheritance, pipes and ConPTY, fail-closed setup and
+     descendant cleanup. Native handles use logical IDs, never narrowed pointers.
+   - Unknowns: actual Windows ACL/token behavior and ConPTY teardown are runtime
+     test requirements, not assumptions proved by compilation.
+
+2. Public API and documentation
+   - Rationale: callers must understand what Windows can actually isolate.
+   - Data: `WindowsJail`, shared `Jail`/`JailedProcess`, the Clojure API and guides.
+   - Acceptance criteria: create, stage, spawn and close; complete environment
+     with private temporary paths; documented private-copy semantics and limits;
+     no environment marker bypass, implicit network permission or host ACL edits.
+   - Unknowns: compatibility of staged stock Python and the native worker.
+
+3. Adversarial and packaging verification
+   - Rationale: a Windows build and a native worker running as a guest do not
+     prove native-image launcher downcalls or confinement.
+   - Data: Windows guest and Java launcher probes, JVM tests, CI/release scripts,
+     shipped reachability metadata and extracted platform archives.
+   - Acceptance criteria: test filesystem/token/network boundaries, sibling and
+     descendant isolation, streams/PTY/cleanup, and copied application behavior
+     on Windows through both JVM and native-image launchers. Recheck Unix jail
+     behavior and keep unrelated changes outside the scoped commits.
+   - Unknowns: Windows CI findings. No consumer install or gateway restart.
+
+## Plan state
+
+The native backend, Java/Clojure interface, guide and Windows CI probes are
+implemented. Read-only review findings on source pinning and process/ConPTY
+lifetimes have been addressed; Windows execution is still required to validate
+them. A clean task-only source export passes 29 local JVM tests and 2158 assertions
+on macOS, plus the documentation test and link checks across 38 generated pages.
+The macOS jail library builds with the repository compiler settings, and all four
+Windows PowerShell scripts pass PSScriptAnalyzer.
+
+Windows MSVC, LPAC/ACL enforcement, network denial, ConPTY, native-image launcher
+downcalls and extracted-archive checks remain unverified. No Windows confinement
+support or release completion is claimed until those checks pass.
