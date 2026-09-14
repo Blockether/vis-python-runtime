@@ -1104,6 +1104,34 @@ static wchar_t *command_line(int argc, wchar_t **argv) {
     return command;
 }
 
+/* Only new objects of the test host get these defaults; existing host ACLs stay untouched. */
+static void standard_defaults(HANDLE token) {
+    BYTE data[4096];
+    DWORD size;
+    LPWSTR sid = NULL;
+    wchar_t sddl[512];
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    TOKEN_DEFAULT_DACL defaults = {0};
+    BOOL present = FALSE, defaulted = FALSE;
+    check(GetTokenInformation(token, TokenUser, data, sizeof(data), &size), "standard default ACL user");
+    if (failures) return;
+    check(ConvertSidToStringSidW(((TOKEN_USER *)data)->User.Sid, &sid), "standard default ACL identity");
+    if (!sid) return;
+    check(swprintf_s(sddl, 512, L"D:(A;;GA;;;%ls)(A;;GA;;;SY)", sid) > 0, "standard default ACL text");
+    if (failures) goto done;
+    check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, NULL),
+          "standard default security descriptor");
+    if (!descriptor) goto done;
+    check(GetSecurityDescriptorDacl(descriptor, &present, &defaults.DefaultDacl, &defaulted) &&
+          present && defaults.DefaultDacl != NULL, "standard explicit default ACL");
+    if (!failures)
+        check(SetTokenInformation(token, TokenDefaultDacl, &defaults, sizeof(defaults)),
+              "standard host owns newly created objects");
+done:
+    if (descriptor) LocalFree(descriptor);
+    LocalFree(sid);
+}
+
 static HANDLE standard_token(void) {
     HANDLE original = NULL, restricted = NULL;
     PSID administrators = NULL, medium = NULL;
@@ -1130,6 +1158,7 @@ static HANDLE standard_token(void) {
                                   (DWORD)sizeof(label) + GetLengthSid(medium)), "medium integrity parent");
         LocalFree(medium);
     } else check(0, "medium integrity SID");
+    if (restricted && !failures) standard_defaults(restricted);
     CloseHandle(original);
     return restricted;
 }
@@ -1172,25 +1201,29 @@ static void standard_check(void) {
         }
     } else check(0, "standard privilege query");
     if (GetTokenInformation(token, TokenOwner, data, sizeof(data), &size)) {
-        printf("STANDARD_OWNER_USER=%d\n", EqualSid(((TOKEN_OWNER *)data)->Owner, user));
+        check(EqualSid(((TOKEN_OWNER *)data)->Owner, user), "standard default owner is the user");
     } else check(0, "standard owner query");
     if (GetTokenInformation(token, TokenDefaultDacl, data, sizeof(data), &size)) {
         PACL acl = ((TOKEN_DEFAULT_DACL *)data)->DefaultDacl;
-        printf("STANDARD_DEFAULT_DACL_NULL=%d\n", acl == NULL);
+        check(acl && IsValidAcl(acl), "standard default DACL is explicit and valid");
         if (acl && IsValidAcl(acl)) {
+            DWORD user_aces = 0, system_aces = 0;
+            check(acl->AceCount == 2, "standard default DACL contains only user and system");
             for (i = 0; i < acl->AceCount; i++) {
                 void *raw = NULL;
                 if (!GetAce(acl, i, &raw)) { check(0, "standard default ACE query"); break; }
                 if (((ACE_HEADER *)raw)->AceType == ACCESS_ALLOWED_ACE_TYPE) {
                     ACCESS_ALLOWED_ACE *ace = (ACCESS_ALLOWED_ACE *)raw;
                     PSID sid = &ace->SidStart;
-                    const char *role = EqualSid(sid, user) ? "user" :
-                        IsWellKnownSid(sid, WinBuiltinAdministratorsSid) ? "administrators" :
-                        IsWellKnownSid(sid, WinLocalSystemSid) ? "system" : "other";
-                    printf("STANDARD_DEFAULT_ALLOW=%s:0x%08lX\n", role, ace->Mask);
-                } else printf("STANDARD_DEFAULT_ACE_TYPE=%u\n", (unsigned int)((ACE_HEADER *)raw)->AceType);
+                    BOOL is_user = EqualSid(sid, user), is_system = IsWellKnownSid(sid, WinLocalSystemSid);
+                    check((is_user || is_system) && ace->Mask == GENERIC_ALL && ace->Header.AceFlags == 0,
+                          "standard default ACE grants only the user or system");
+                    user_aces += is_user ? 1 : 0;
+                    system_aces += is_system ? 1 : 0;
+                } else check(0, "standard default ACL contains only allow entries");
             }
-        } else if (acl) check(0, "valid standard default DACL");
+            check(user_aces == 1 && system_aces == 1, "standard default DACL grants user and system self-access");
+        }
     } else check(0, "standard default DACL query");
     created = CreatePipe(&reader, &writer, NULL, 0);
     check(created, "standard host creates a default-security pipe");

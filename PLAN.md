@@ -338,17 +338,19 @@ accepts only `STATUS_INVALID_HANDLE` at that one query, not arbitrary crashes.
 All four Unix jobs and documentation checks pass again.
 
 Run 34906429094 confirms that requesting `TOKEN_ADJUST_DEFAULT` fixes lowering
-of the restricted test-host token: the medium-integrity Java host starts. Its
-first `ProcessBuilder` then fails with `CreatePipe` access denied, before any
-jail call. A copied administrator-oriented owner/default DACL is a hypothesis,
-not yet observed runner state.
+of the restricted test-host token. Run 34907694497 then reproduces its ordinary
+pipe failure directly in C, before Java or any jail call. The token owner is
+already the user. Its copied default DACL grants full access to Administrators
+and System plus read/execute to another SID, but has no user allow entry.
+Administrator membership is disabled and no privilege except traversal is
+enabled. `CreatePipe` with default security returns access denied.
 
-The suite now first launches the C standard-token probe directly under the same
-restricted primary token and inherited streams. It checks disabled administrator
-membership, integrity and enabled privileges; prints owner/default-ACL roles
-without account identifiers; and requires a real default-security pipe roundtrip.
-The original Java default-pipe launch and all jail checks remain mandatory. No
-production confinement or token defaults have been changed for this diagnosis.
+Only the newly constructed test-host token now receives a default DACL granting
+full access to its user and System. No existing host object ACL, production jail
+token, capability or enabled privilege is changed. The regression reads back the
+user owner and exact two-entry default DACL, then requires a real Win32 pipe
+roundtrip. The original Java default-pipe launch and all jail checks remain
+mandatory. Actual Windows verification of the correction is still pending.
 
 Nonadministrator-host checks, stock Python/native worker, native-image launcher
 execution and extracted-archive verification remain pending. No Windows release
