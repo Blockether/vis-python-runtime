@@ -69,9 +69,10 @@ async def library_call():
         return await result
     finally:
         thread.join()")
-    (try (runtime/network! false)
+    (try (runtime/confine! [] [(harness/temp-dir "vis-local-async")])
+         (runtime/network! false)
          (let [answer (harness/block session "print(await gather(library_call(), echo('host')))")]
            (is (nil? (:error answer)) (str (:error answer)))
            (is (= "['woken', '<host>']\n" (:stdout answer))))
          (is (= "refused" (attempt session makes-socket)))
-         (finally (runtime/network! true "") (harness/close-sessions!)))))
+         (finally (runtime/confine! [] []) (runtime/network! true "") (harness/close-sessions!)))))

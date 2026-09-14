@@ -52,7 +52,9 @@
                              (future (runtime/eval-str (str "windows-result-" n)
                                                        (str "'" n "' * 90000")))))]
         (doseq [[n answer] (map-indexed vector answers)]
-          (is (= (apply str (repeat 90000 (str n))) @answer)))))
+          (let [result (deref answer 30000 ::timeout)]
+            (is (not= ::timeout result) "native evaluation must release the GIL and return")
+            (when-not (= ::timeout result) (is (= (apply str (repeat 90000 (str n))) result)))))))
     (is (= "42" (runtime/eval-str "windows-unicode" "sum([19, 23])")))))
 
 (deftest windows-native-confinement-test
@@ -114,9 +116,12 @@
               (.start))
 
           output
-          (slurp (.getInputStream process))]
+          (do (when-not (.waitFor process 10 java.util.concurrent.TimeUnit/SECONDS)
+                (.destroyForcibly process)
+                (throw (ex-info "Junction creation timed out" {})))
+              (slurp (.getInputStream process)))]
 
-      (is (= 0 (.waitFor process)) output)
+      (is (= 0 (.exitValue process)) output)
       (spit (str secret) "private")
       (runtime/confine! [] [(str inside)])
       (is (thrown-with-msg? VisPythonException

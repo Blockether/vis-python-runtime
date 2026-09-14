@@ -1762,6 +1762,10 @@ static PyMethodDef vis_py_host_methods[] = {
      "par(thunks) -> list: run zero-argument thunks on the host's worker pool."},
     {"threads", vis_py_threads, METH_NOARGS,
      "threads() -> dict: the thread policy in force and what is alive under it."},
+#if defined(_WIN32)
+    {"wakeup_pipe", vis_py_win_wakeup_pipe, METH_NOARGS,
+     "wakeup_pipe() -> (read_handle, write_fd): create a local IOCP wakeup pipe."},
+#endif
     {NULL, NULL, 0, NULL}
 };
 

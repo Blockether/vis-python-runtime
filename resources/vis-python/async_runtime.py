@@ -1290,6 +1290,35 @@ def __vis_loop_factory__():
             if fd >= 0:
                 os.close(fd)
 
+    if os.name == "nt":
+        from asyncio.windows_events import IocpProactor
+        from asyncio.windows_utils import PipeHandle
+        from _vis_host import wakeup_pipe
+
+        class WindowsLoop(std_asyncio.ProactorEventLoop):
+            def __init__(self):
+                # The host owns signals. CPython's Proactor constructor installs a
+                # socket as its signal wakeup fd; network-off loops must not do so.
+                std_asyncio.BaseEventLoop.__init__(self)
+                self._proactor = self._selector = IocpProactor()
+                self._self_reading_future = None
+                self._accept_futures = {}
+                self._proactor.set_loop(self)
+                try:
+                    self._make_self_pipe()
+                except BaseException:
+                    self._proactor.close()
+                    std_asyncio.BaseEventLoop.close(self)
+                    raise
+
+            def _make_self_pipe(self):
+                reader, writer = wakeup_pipe()
+                self._ssock = PipeHandle(reader)
+                self._csock = WakeupPipe(writer)
+                self._internal_fds += 1
+
+        return WindowsLoop()
+
     class Loop(std_asyncio.SelectorEventLoop):
         def _make_self_pipe(self):
             reader, writer = os.pipe()

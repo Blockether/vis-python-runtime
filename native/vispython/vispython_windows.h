@@ -371,6 +371,61 @@ done:
     return result;
 }
 
+/* IOCP needs an overlapped read handle, not the CRT descriptor os.pipe returns.
+ * This creates only a connected, non-inheritable local pipe, never a caller-chosen
+ * path or network endpoint. No Python audit capability is temporarily widened. */
+static PyObject *vis_py_win_wakeup_pipe(PyObject *self, PyObject *args)
+{
+    static unsigned long long serial = 0;
+    wchar_t name[128];
+    LARGE_INTEGER tick = {0};
+    HANDLE reader = INVALID_HANDLE_VALUE, writer = INVALID_HANDLE_VALUE;
+    OVERLAPPED connect = {0};
+    DWORD mode = PIPE_NOWAIT, transferred;
+    PyObject *result = NULL;
+    int writer_fd;
+    (void)self; (void)args;
+    QueryPerformanceCounter(&tick);
+    swprintf(name, sizeof name / sizeof *name, L"\\\\.\\pipe\\vis-python-%lu-%llu-%lld",
+             GetCurrentProcessId(), ++serial, tick.QuadPart);
+    reader = CreateNamedPipeW(name, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED |
+                             FILE_FLAG_FIRST_PIPE_INSTANCE,
+                             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+                             1, 0, 65536, 0, NULL);
+    if (reader == INVALID_HANDLE_VALUE) goto windows_error;
+    writer = CreateFileW(name, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (writer == INVALID_HANDLE_VALUE) goto windows_error;
+    connect.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (connect.hEvent == NULL) goto windows_error;
+    if (!ConnectNamedPipe(reader, &connect)) {
+        DWORD error = GetLastError();
+        if (error == ERROR_IO_PENDING) {
+            if (!GetOverlappedResult(reader, &connect, &transferred, TRUE)) goto windows_error;
+        } else if (error != ERROR_PIPE_CONNECTED) {
+            SetLastError(error);
+            goto windows_error;
+        }
+    }
+    if (!SetNamedPipeHandleState(writer, &mode, NULL, NULL)) goto windows_error;
+    writer_fd = _open_osfhandle((intptr_t)writer, _O_WRONLY | _O_BINARY | _O_NOINHERIT);
+    if (writer_fd < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        goto done;
+    }
+    writer = INVALID_HANDLE_VALUE; /* The CRT descriptor owns it now. */
+    result = Py_BuildValue("Ki", (unsigned long long)(uintptr_t)reader, writer_fd);
+    if (result == NULL) _close(writer_fd);
+    else reader = INVALID_HANDLE_VALUE; /* The returned handle belongs to the loop. */
+    goto done;
+windows_error:
+    PyErr_SetFromWindowsErr(0);
+done:
+    if (connect.hEvent != NULL) CloseHandle(connect.hEvent);
+    if (reader != INVALID_HANDLE_VALUE) CloseHandle(reader);
+    if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+    return result;
+}
+
 /* The ABI is UTF-8 even when the Windows user's ANSI code page is not. */
 static PyStatus vis_py_win_config_string(PyConfig *config, wchar_t **field, const char *text)
 {
