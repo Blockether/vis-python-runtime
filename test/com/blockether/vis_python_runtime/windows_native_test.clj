@@ -194,6 +194,8 @@
 (deftest windows-console-constructor-is-confined-test
   ;; CI 34843998016 blocked in a console read: CPython's WindowsConsoleIO does
   ;; not emit the open audit event. Guard automatic dispatch and raw type calls.
+  ;; Confinement never hands the host console to guest code; interactive programs
+  ;; belong in their own child process, so keep these cases instead of relaxing them.
   (when windows?
     (let [session "windows-console-constructor"]
       (try (runtime/exec!
