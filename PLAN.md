@@ -321,14 +321,23 @@ Profile removal and private application-data writes also pass. All Windows
 builds, including the native-image launcher, succeed; its execution is not yet
 reached.
 
-The next failure is the network probe's assumption that it can create sockets:
-all eight attempts return `WSAEACCES` at creation, before connect/send. The probe
-now accepts only this explicit permission denial at either point. Other socket
-errors still fail. Host TCP/UDP positive controls for both IP families establish
-that the receivers work; the existing zero-connection/packet checks remain.
-No network capability or production policy is relaxed.
+Run 34902956037 also passes the first JVM network and lifetime stages. The
+network probe accepts only explicit `WSAEACCES` at socket creation or
+connect/send; host TCP/UDP controls and zero-connection/packet checks pass for
+both IP families. All four Unix jobs and documentation checks pass.
 
-Network completion, lifetime, ConPTY, crash cleanup, inherited-handle and
-nonadministrator-host checks, stock Python/native worker, native-image launcher
-execution and extracted-archive verification remain pending. No Windows release
-completion is claimed yet.
+The terminal stage exposes redirected host handles in the child instead of
+ConPTY console handles. Microsoft terminal issue #11276 documents this behavior
+and the fix: use `STARTF_USESTDHANDLES` with null standard handles for ConPTY.
+The candidate sets that flag for both launch paths; only ordinary pipes fill
+the explicit handle slots. ConPTY still disables general handle inheritance,
+and no capability or host ACL changes.
+
+The regression now always runs beneath a parent with redirected standard
+streams, not only on CI. It checks all three console handles, the exact LPAC
+token, dimensions, input roundtrip and captured output, followed by existing
+termination checks.
+
+ConPTY, crash cleanup, inherited-handle and nonadministrator-host checks, stock
+Python/native worker, native-image launcher execution and extracted-archive
+verification remain pending. No Windows release completion is claimed yet.

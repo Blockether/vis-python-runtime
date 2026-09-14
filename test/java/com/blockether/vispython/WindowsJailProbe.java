@@ -708,6 +708,11 @@ public final class WindowsJailProbe {
       stagingStress(Path.of(arguments[2]), Path.of(arguments[1]));
       return;
     }
+    if (arguments.length == 3 && arguments[0].equals("--terminal-roundtrip-child")) {
+      terminal(Path.of(arguments[2]), Path.of(arguments[1]));
+      System.out.println("PASS WindowsJail ConPTY with redirected host handles");
+      return;
+    }
     if (arguments.length == 3 && arguments[0].equals("--terminal-child")) {
       terminalBackpressure(Path.of(arguments[2]), Path.of(arguments[1]));
       System.out.println("PASS WindowsJail active ConPTY close");
@@ -742,7 +747,10 @@ public final class WindowsJailProbe {
       stage("streams", () -> argumentsAndStreams(parent, guest));
       stage("network", () -> network(parent, guest));
       stage("lifetime", () -> lifetime(parent, guest));
-      stage("terminal", () -> terminal(parent, guest));
+      // microsoft/terminal#11276: force redirected parent handles even outside CI.
+      stage("terminal", () -> passed(
+          finish(new ProcessBuilder(self("--terminal-roundtrip-child", parent, guest)).start(), new byte[0]),
+          "ConPTY with redirected host stdio"));
       stage("active ConPTY close", () -> passed(
           finish(new ProcessBuilder(self("--terminal-child", parent, guest)).start(), new byte[0]), "bounded active ConPTY close"));
       stage("parent crash", () -> parentCrash(parent, guest));

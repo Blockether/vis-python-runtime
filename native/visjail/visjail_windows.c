@@ -1050,6 +1050,8 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     }
     operation = "Configure Windows process security";
     startup.StartupInfo.cb = sizeof(startup);
+    /* NULL stdio lets ConPTY attach instead of duplicating redirected host pipes. */
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     InitializeProcThreadAttributeList(NULL, 3, 0, &attribute_size);
     startup.lpAttributeList = malloc(attribute_size);
     if (!startup.lpAttributeList) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto fail; }
@@ -1068,7 +1070,6 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
             console, sizeof(console), NULL, NULL)) goto fail;
     } else {
         inherit[0] = child_in; inherit[1] = child_out; inherit[2] = child_err ? child_err : child_out;
-        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         startup.StartupInfo.hStdInput = inherit[0]; startup.StartupInfo.hStdOutput = inherit[1];
         startup.StartupInfo.hStdError = inherit[2];
         if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,

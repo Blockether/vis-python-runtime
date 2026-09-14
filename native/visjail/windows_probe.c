@@ -1368,9 +1368,11 @@ int wmain(int argc, wchar_t **argv) {
         CONSOLE_SCREEN_BUFFER_INFO info = {0};
         DWORD mode, count = 0;
         char input[128];
+        token_check();
         check(GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info), "ConPTY console");
         check(info.dwSize.X == 97 && info.dwSize.Y == 31, "ConPTY dimensions");
         check(GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode), "ConPTY input console");
+        check(GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), &mode), "ConPTY error console");
         printf("PTY=31x97\n");
         fflush(stdout);
         check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), input, sizeof(input), &count, NULL) && count > 0,
