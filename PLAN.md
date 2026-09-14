@@ -184,3 +184,9 @@ The repair is pushed without loosening confinement or extending the job timeout.
 Pre-existing asynchronous-runtime changes and concurrent live-worker diagnostics
 remain outside its commits. No release tag, consumer installation or live gateway
 restart was performed; release publication remains a separate workflow.
+
+The Windows and generated API documentation release targets `v0.5.16`. It includes
+the verified Windows repair, without the separate uncommitted diagnostics or
+asynchronous-runtime changes. Final publication checks will build the JVM jar and
+versioned documentation, then verify all five platform archives in the release
+workflow. Consumer installation and live gateway restarts remain out of scope.
