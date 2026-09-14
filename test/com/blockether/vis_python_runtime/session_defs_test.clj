@@ -103,7 +103,7 @@
 
                          (testing "a restored helper is listed, and marked as restored"
                            (let [listed (ran fresh "print(defs())")]
-                             (is (str/includes? listed "widen(a, b=2)"))
+                             (is (str/includes? listed "widen(a, b=<int>)"))
                              (is (str/includes? listed "(restored)"))))))
 
 (harness/defbuilt-test
@@ -250,15 +250,15 @@
     (testing "an empty session says what would fill the list"
       (is (str/includes? empty "no functions defined by this session yet")))
     (testing "the listing carries the signature, and only definitions this session wrote"
-      (is (str/includes? listed "widen(a, b=2)"))
+      (is (str/includes? listed "widen(a, b=<int>)"))
       ;; An IMPORTED function is not this session's definition: a `def` is
       ;; recognized by the synthetic `<prog:N>` filename of its code object.
       (is (not (str/includes? listed "dumps"))))
     (testing "one name answers that helper's source"
       (is (str/includes? source "def widen(a, b=2):")))
-    (testing "a name this session never defined is refused, and names the ones it did"
+    (testing "a missing name suggests a bounded search instead of dumping the catalogue"
       (is (str/includes? missing "refused:"))
-      (is (str/includes? missing "widen")))))
+      (is (str/includes? missing "defs(pattern=")))))
 
 (harness/defbuilt-test
   defs-docstring-surface-test
@@ -296,6 +296,205 @@
       (is (= "" (get docs "quiet"))))
     (testing "every helper has a call line, documented or not"
       (is (= {"kebab_to_snake" "kebab_to_snake(text)" "quiet" "quiet(x)"} calls)))))
+
+(harness/defbuilt-test
+  defs-bounded-index-test
+  ;; Improve 4353: one large default inflated every aligned row, producing
+  ;; multi-megabyte catalogues. Discovery must never represent runtime values.
+  (let
+    [session
+     (harness/block-session)
+
+     setup
+     (block
+       session
+       (str
+         "payload = 'PRIVATE_DEFAULT_SENTINEL' * 10000\n" "class Opaque:\n"
+         "    def __repr__(self):\n" "        raise AssertionError('default repr must not run')\n"
+         "opaque = Opaque()\n"
+         "def typed(a: opaque, /, b=opaque, *args, c=payload, **kwargs) -> opaque:\n"
+         "    return a\n"
+         (str/join
+           "\n"
+           (for [i (range 240)]
+             (format
+               "def helper_%03d(x=payload):\n    \"\"\"Searchable marker %03d.\"\"\"\n    return x\n"
+               i
+               i)))))
+
+     answer
+     (block
+       session
+       (str/join
+         "\n"
+         ["listing = defs()" "assert len(listing) < 6500, len(listing)"
+          "assert len([line for line in listing.splitlines() if line.startswith('  ')]) == 20"
+          "assert '241 definitions' in listing and '241 matches' in listing"
+          "assert 'offset=20' in listing" "assert 'PRIVATE_DEFAULT_SENTINEL' not in listing"
+          "assert 'helper_000(x=<str>)' in listing" "assert 'helper_020(' not in listing"
+          "filtered = defs(pattern='^helper_02', limit=3, offset=2)"
+          "assert all(('helper_%03d(' % i) in filtered for i in [22, 23, 24])"
+          "assert 'helper_021(' not in filtered and 'helper_025(' not in filtered"
+          "assert '10 matches' in filtered and 'offset=5' in filtered"
+          "assert 'helper_239(' in defs(pattern='marker 239')"
+          "assert '0 matches' in defs(pattern='MARKER')" "assert '0 shown' in defs(offset=1000)"
+          "assert 'def helper_239(x=payload):' in defs('helper_239')" "calls = __vis_def_calls__()"
+          "assert calls['typed'] == 'typed(a, /, b=<Opaque>, *args, c=<str>, **kwargs)'"
+          "assert max(map(len, calls.values())) <= 120" "try:" "    defs('not_here')"
+          "except NameError as exc:" "    message = str(exc)"
+          "    assert len(message) < 300 and 'defs(pattern=' in message"
+          "    assert 'helper_239' not in message" "else:"
+          "    raise AssertionError('missing helper was accepted')" "print('bounded')"]))]
+
+    (is (nil? (:error setup)) (pr-str setup))
+    (is (nil? (:error answer)) (pr-str answer))
+    (is (= "bounded" (str/trim (:stdout answer))))))
+
+(harness/defbuilt-test
+  defs-field-and-dependency-bounds-test
+  (let [session
+        (harness/block-session)
+
+        setup
+        (block session
+               (str "def large("
+                    (str/join ", "
+                              (for [i (range 80)]
+                                (str "parameter_" i "=None")))
+                    "):\n    \"\"\""
+                    (apply str (repeat 500 "Long gist. "))
+                    "\"\"\"\n    return "
+                    (str/join " + "
+                              (for [i (range 25)]
+                                (format "dependency_%02d" i)))
+                    "\n"))
+
+        answer
+        (block session
+               (str/join
+                 "\n"
+                 ["call = __vis_def_calls__()['large']"
+                  "assert 100 < len(call) <= 120 and call.endswith('…'), len(call)"
+                  "listing = defs()" "assert len(listing) < 500"
+                  "gist = listing.splitlines()[1].rsplit(' | ', 1)[-1]"
+                  "assert 60 < len(gist) <= 72 and gist.endswith('…'), len(gist)"
+                  "details = defs('large', details=True)"
+                  "assert '20 shown of 25' in details and len(details) < 3000"
+                  "assert 'dependency_19 [missing]' in details and 'dependency_20 [' not in details"
+                  "assert len(defs('large')) > 5000" "print('field bounds')"]))]
+
+    (is (nil? (:error setup)) (pr-str setup))
+    (is (nil? (:error answer)) (pr-str answer))
+    (is (= "field bounds" (str/trim (:stdout answer))))))
+
+(harness/defbuilt-test
+  defs-index-validation-test
+  (let
+    [session
+     (harness/block-session)
+
+     answer
+     (block
+       session
+       (str/join
+         "\n"
+         ["def kept(x): return x"
+          "for options in [{'limit': 0}, {'limit': 101}, {'limit': True}, {'limit': 2.5}, {'offset': -1}, {'offset': True}, {'offset': '1'}, {'pattern': '['}, {'pattern': 3}, {'details': True}]:"
+          "    try:" "        defs(**options)" "    except (TypeError, ValueError):" "        pass"
+          "    else:" "        raise AssertionError('invalid listing options accepted')"
+          "for options in [{'pattern': 'kept'}, {'limit': 2}, {'offset': 1}]:" "    try:"
+          "        defs('kept', **options)" "    except ValueError:" "        pass" "    else:"
+          "        raise AssertionError('mixed source and listing options accepted')"
+          "assert 'kept(x)' in defs(limit=100)" "print('validated')"]))]
+
+    (is (nil? (:error answer)) (pr-str answer))
+    (is (= "validated" (str/trim (:stdout answer))))))
+
+(harness/defbuilt-test
+  defs-source-details-test
+  (let
+    [session
+     (harness/block-session)
+
+     answer
+     (block
+       session
+       (str/join
+         "\n"
+         ["class OpaqueMeta(type):" "    @property"
+          "    def __name__(cls): raise AssertionError('type name hook must not run')"
+          "class Opaque(metaclass=OpaqueMeta):"
+          "    def __repr__(self): raise AssertionError('state repr must not run')"
+          "state = Opaque()" "offset = 3" "def helper(value):" "    def nested(): return state"
+          "    return value + offset + missing_state + len([]) + nested()" "import hashlib"
+          "source = defs('helper')" "details = defs('helper', details=True)"
+          "assert hashlib.sha256(source.encode()).hexdigest() in details"
+          "assert 'offset [int, present]' in details" "assert 'state [Opaque, present]' in details"
+          "assert 'missing_state [missing]' in details" "assert 'liveness unknown' in details"
+          "assert 'value [' not in details and 'nested [' not in details and 'len [' not in details"
+          "assert '__vis_' not in details and 'return value' not in details" "def factory(seed):"
+          "    def inner(value): return value + seed + offset" "    return inner"
+          "captured = factory(2)" "captured_details = defs('captured', details=True)"
+          "assert 'seed [int, captured]' in captured_details"
+          "assert 'seed [missing]' not in captured_details"
+          "assert 'offset [int, present]' in captured_details" "del offset"
+          "assert 'offset [missing]' in defs('helper', details=True)"
+          "assert defs('helper') == source" "def defaulted(client=state): return client"
+          "default_source = defs('defaulted')"
+          "default_hash = hashlib.sha256(default_source.encode()).hexdigest()"
+          "before_defaults = defs('defaulted', details=True)" "defaulted.__defaults__ = (3,)"
+          "after_defaults = defs('defaulted', details=True)"
+          "assert default_hash in before_defaults and default_hash in after_defaults"
+          "assert 'state [' not in after_defaults and 'client [' not in after_defaults"
+          "assert 'defaulted(client=<int>)' in after_defaults"
+          "assert 'Default/decorator expressions are not analyzed' in after_defaults"
+          "print('details')"]))]
+
+    (is (nil? (:error answer)) (pr-str answer))
+    (is (= "details" (str/trim (:stdout answer))))))
+
+(harness/defbuilt-test
+  defs-refine-delete-restore-test
+  (let [session
+        (harness/block-session)
+
+        _
+        (block session "def calc(value):\n    return value + 1\n")
+
+        original
+        (ran session "print(defs('calc', details=True))")
+
+        _
+        (block session "def calc(value):\n    return value + 2\n\ndef obsolete():\n    return 0\n")
+
+        refined
+        (ran session "print(defs('calc', details=True))")
+
+        _
+        (block session "del obsolete")
+
+        text
+        (snapshot session)
+
+        fresh
+        (harness/block-session)
+
+        restored
+        (restore! fresh text)
+
+        details
+        (ran fresh "print(defs('calc', details=True))")
+
+        fingerprint
+        #(second (re-find #"Source SHA-256: ([a-f0-9]{64})" %))]
+
+    (is (some? (fingerprint original)))
+    (is (not= (fingerprint original) (fingerprint refined)))
+    (is (= (fingerprint refined) (fingerprint details)))
+    (is (= 1 restored))
+    (is (not (str/includes? text "obsolete")))
+    (is (str/includes? details "(restored)"))
+    (is (= "4" (ran fresh "print(calc(2))")))))
 
 (harness/defbuilt-test
   tool-shadow-refusal-test

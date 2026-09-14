@@ -3486,9 +3486,8 @@ def __vis_def_gist__(text, limit=72):
 def __vis_def_docs__():
     # The DOCSTRING of every helper this session defined, keyed by name, and ""
     # when it has none. The host reads this back as that helper's document: a
-    # documented helper owns a `doc(name)` page and is findable by `apropos`,
-    # while an undocumented one carries an EMPTY document, which is what keeps a
-    # bare handle (`where`, `vars`) out of a described search.
+    # documented helper owns a `doc(name)` page. Session-local helpers are found
+    # with `defs(pattern=...)`, not the host's `apropos` catalogue.
     import inspect
 
     out = {}
@@ -3500,19 +3499,46 @@ def __vis_def_docs__():
     return out
 
 
-def __vis_def_calls__():
-    # The CALL LINE of every helper this session defined — `widen(a, b=2)`. A page
-    # that never shows how to call what it documents is the one page nobody can
-    # act on, so a helper's page opens with its signature like every tool's does.
+def __vis_def_type__(value):
+    # Read the type name without invoking the value's repr or a metaclass hook.
+    return __vis_def_gist__(type.__dict__["__name__"].__get__(type(value)), 40)
+
+
+def __vis_def_call__(name, fn):
+    """A bounded call hint; defaults show types, never values or annotations."""
     import inspect
 
-    out = {}
-    for n, fn in __vis_user_defs__():
-        try:
-            out[n] = n + str(inspect.signature(fn))
-        except Exception:
-            out[n] = n + "(...)"
-    return out
+    try:
+        parameters = list(inspect.signature(fn, eval_str=False).parameters.values())
+        parts = []
+        keyword_separator = True
+        for i, p in enumerate(parameters):
+            if p.kind == p.KEYWORD_ONLY and keyword_separator:
+                parts.append("*")
+                keyword_separator = False
+            prefix = ""
+            if p.kind == p.VAR_POSITIONAL:
+                prefix = "*"
+                keyword_separator = False
+            elif p.kind == p.VAR_KEYWORD:
+                prefix = "**"
+            part = prefix + p.name
+            if p.default is not p.empty:
+                part += "=<" + __vis_def_type__(p.default) + ">"
+            parts.append(part)
+            if p.kind == p.POSITIONAL_ONLY and (
+                i + 1 == len(parameters) or parameters[i + 1].kind != p.POSITIONAL_ONLY
+            ):
+                parts.append("/")
+        call = name + "(" + ", ".join(parts) + ")"
+    except Exception:
+        call = name + "(...)"
+    return __vis_def_gist__(call, 120)
+
+
+def __vis_def_calls__():
+    # Helper doc pages share the index's safe hints, not expanded default values.
+    return {n: __vis_def_call__(n, fn) for n, fn in __vis_user_defs__()}
 
 
 def __vis_dotted_doc__(target):
@@ -3604,92 +3630,164 @@ def __vis_dotted_doc__(target):
     return "\n".join(out)
 
 
-def defs(name=None):
-    """The helpers THIS session defined, and their source — plain text.
-
-    `defs()` lists every function your blocks defined: name, signature, the
-    block it came from, its length, and the first line of its DOCSTRING — write
-    one and the listing says what each helper is FOR. `defs("name")` returns
-    that one's source, so a helper is REFINED by reading back what it already
-    says instead of being re-pasted from memory.
-
-    A `def` persists for the whole session across turns, and its definitions
-    are re-created automatically in a fresh sandbox after a restart — a
-    restored one is marked `(restored)`.
-    """
+def __vis_def_origin__(fn):
     import inspect
 
+    where = getattr(__vis_def_code__(fn), "co_filename", "?")
+    label = __vis_def_gist__(where, 48)
+    if where == globals().get("__vis_restored_block__"):
+        label += " (restored)"
+    try:
+        return label + " | " + str(len(inspect.getsourcelines(fn)[0])) + " lines"
+    except Exception:
+        return label + " | source unavailable"
+
+
+def __vis_def_details__(name, fn):
+    """Source identity and advisory dependency names; no state values are printed."""
+    import hashlib
+    import inspect
+    import symtable
+    import textwrap
+
+    rows = [__vis_def_call__(name, fn), __vis_def_origin__(fn)]
+    try:
+        fn = inspect.unwrap(fn)
+        source = inspect.getsource(fn)
+    except Exception:
+        return "\n".join(rows + ["Source and dependencies unavailable."])
+    rows.append("Source SHA-256: " + hashlib.sha256(source.encode()).hexdigest())
+    try:
+        table = symtable.symtable(textwrap.dedent(source), "<defs>", "exec")
+        pending = [t for t in table.get_children() if t.get_name() == fn.__name__]
+        if not pending:
+            raise ValueError("no function scope")
+        names = set()
+        while pending:
+            scope = pending.pop()
+            names.update(
+                s.get_name()
+                for s in scope.get_symbols()
+                if s.is_referenced() and s.is_global()
+            )
+            pending.extend(scope.get_children())
+        captured = dict(zip(fn.__code__.co_freevars, fn.__closure__ or ()))
+        bindings = fn.__globals__
+        names.update(captured)
+        names = sorted(
+            n
+            for n in names
+            if not n.startswith("__vis_")
+            and (n in captured or n in bindings or n not in fn.__builtins__)
+        )
+        rows.append(f"Source dependencies: {min(len(names), 20)} shown of {len(names)}")
+        for n in names[:20]:
+            if n in captured:
+                try:
+                    state = __vis_def_type__(captured[n].cell_contents) + ", captured"
+                except ValueError:
+                    state = "missing captured value"
+            elif n in bindings:
+                state = __vis_def_type__(bindings[n]) + ", present"
+            else:
+                state = "missing"
+            rows.append("  " + __vis_def_gist__(n, 80) + " [" + state + "]")
+    except Exception:
+        rows.append("Source dependencies unavailable; not a self-contained guarantee.")
+    rows.append(
+        "Advisory: source-derived names, liveness unknown; dynamic lookups are not "
+        "verified. Default/decorator expressions are not analyzed. The source "
+        "fingerprint does not cover global, default or captured state."
+    )
+    return "\n".join(rows)
+
+
+def defs(name=None, *, pattern=None, limit=20, offset=0, details=False):
+    """Find and refine the helpers this session defined.
+
+    `defs()` lists up to 20 helpers, sorted by name. `pattern` is a case-sensitive
+    regex over names and their first docstring line (the 72-character gist).
+    `limit` is an integer from 1 to 100; `offset` is a nonnegative integer into
+    the matches. Counts and a continuation hint make omitted rows explicit.
+    Call hints are capped at 120 characters, omit annotations and show only
+    default types (`=<str>`), never values. They are hints, not executable code.
+
+    `defs("name")` returns exact source. `defs("name", details=True)` instead
+    returns origin, source SHA-256 and up to 20 source-derived dependency names
+    with types and presence, including captured names. No state values appear.
+    This advisory view cannot prove dynamic dependencies or handle liveness;
+    default/decorator expressions are not analyzed. The fingerprint identifies
+    source, not the current global, default or captured state.
+    Named lookups cannot be combined with listing controls.
+
+    Read source before refining a stable name. At phase boundaries review your
+    helpers and explicitly `del` obsolete names after checking callers, aliases
+    and captured defaults. Nothing is automatically deleted or promoted.
+    Helpers persist across turns and are re-created after a restart, marked
+    `(restored)`; external resources and live state may need reinitializing.
+    """
+    import inspect
+    import re
+
+    if name is not None and not isinstance(name, str):
+        raise TypeError("defs: name must be a string")
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("defs: limit must be an integer from 1 to 100")
+    if type(offset) is not int or offset < 0:
+        raise ValueError("defs: offset must be a nonnegative integer")
+    if name is not None and (pattern is not None or limit != 20 or offset != 0):
+        raise ValueError("defs: named lookups cannot use pattern, limit or offset")
+    if details and name is None:
+        raise ValueError("defs: details requires an exact name")
+    if pattern is not None and not isinstance(pattern, str):
+        raise TypeError("defs: pattern must be a regex string")
+    try:
+        matcher = re.compile(pattern) if pattern is not None else None
+    except re.error as exc:
+        raise ValueError("defs: invalid regex pattern") from exc
     live = __vis_user_defs__()
     if name is not None:
         fn = dict(live).get(name)
         if fn is None:
-            known = ", ".join(n for n, _ in live) or "none"
             raise NameError(
                 "defs: this session defined no function named "
-                + repr(name)
-                + " — defined here: "
-                + known
+                + repr(name[:80])
+                + ' — search with defs(pattern="...").'
             )
+        if details:
+            return __vis_def_details__(name, fn)
         try:
             return inspect.getsource(fn)
-        except Exception as exc:
-            return "# source unavailable for " + name + ": " + str(exc)
-    if not live:
-        return (
-            "no functions defined by this session yet — a `def` in any block joins this "
-            "list, persists across turns, and is restored into a fresh sandbox after a "
-            "gateway restart"
-        )
-    restored = globals().get("__vis_restored_block__")
+        except Exception:
+            return "# source unavailable for " + __vis_def_gist__(name, 80)
     docs = __vis_def_docs__()
-    rows = []
+    matches = []
     for n, fn in live:
-        try:
-            sig = str(inspect.signature(fn))
-        except Exception:
-            sig = "(...)"
-        where = getattr(__vis_def_code__(fn), "co_filename", "?")
-        if where == restored:
-            where += " (restored)"
-        try:
-            size = str(len(inspect.getsourcelines(fn)[0])) + " lines"
-        except Exception:
-            size = "source unavailable"
-        rows.append((n + sig, where, size, __vis_def_gist__(docs.get(n))))
-    width = max(len(r[0]) for r in rows)
-    place = max(len(r[1]) for r in rows)
-    span = max(len(r[2]) for r in rows)
-    body = "\n".join(
-        (
-            "  "
-            + r[0].ljust(width)
-            + "  "
-            + r[1].ljust(place)
-            + "  "
-            + r[2].ljust(span)
-            + "  "
-            + r[3]
-        ).rstrip()
-        for r in rows
-    )
-    head = (
-        str(len(rows))
-        + (" definition" if len(rows) == 1 else " definitions")
-        + " in this sandbox"
-    )
-    # The nudge belongs where the gap SHOWS: an undocumented helper is a row with
-    # an empty last column, and one line would give it a page.
-    bare = sum(1 for r in rows if not r[3])
-    tail = 'defs("name") returns one\'s source.'
-    if bare:
-        tail += (
-            " "
-            + str(bare)
-            + (" has" if bare == 1 else " have")
-            + " no docstring — one line of it would be the gist above, the whole"
-            + " of it a doc(name) page the next turn can read."
+        gist = __vis_def_gist__(docs.get(n))
+        if matcher is None or matcher.search(n) or matcher.search(gist):
+            matches.append((n, fn, gist))
+    page = matches[offset : offset + limit]
+    rows = [
+        f"{len(live)} definition{'s' if len(live) != 1 else ''} in this sandbox"
+        f" | {len(matches)} matches | {len(page)} shown (offset={offset})"
+    ]
+    if not live:
+        rows.append(
+            "no functions defined by this session yet — define a helper to reuse it."
         )
-    return head + "\n" + body + "\n" + tail
+    for n, fn, gist in page:
+        row = "  " + __vis_def_call__(n, fn) + " | " + __vis_def_origin__(fn)
+        rows.append(row + (" | " + gist if gist else ""))
+    tail = 'defs("name") returns source; defs("name", details=True) shows dependencies.'
+    bare = sum(1 for _, _, gist in page if not gist)
+    if bare:
+        tail += f" {bare} {'has' if bare == 1 else 'have'} no docstring in this page."
+    rows.append(tail)
+    if offset + len(page) < len(matches):
+        rows.append(
+            f"More: repeat this search with offset={offset + len(page)}, limit={limit}."
+        )
+    return "\n".join(rows)
 
 
 def __vis_bound_name__(src):
