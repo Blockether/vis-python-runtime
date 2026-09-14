@@ -280,6 +280,27 @@ static int private_directory(Context *c, const wchar_t *path, DWORD rights) {
     return pin_handle(&c->pins, handle);
 }
 
+/* Windows redirects AppContainer LOCALAPPDATA and TEMP into this private subtree. */
+static int private_temporary_directories(Context *c, const wchar_t *tmp) {
+    const wchar_t *parts[] = {L"Packages", c->profile, L"AC", L"Temp"};
+    wchar_t *path = NULL;
+    DWORD error;
+    int ok = 0;
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); ++i) {
+        wchar_t *next = join(path ? path : tmp, parts[i]);
+        free(path);
+        path = next;
+        if (!path || !private_directory(c, path,
+                FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | FILE_DELETE_CHILD)) goto done;
+    }
+    ok = 1;
+done:
+    error = GetLastError();
+    free(path);
+    SetLastError(error);
+    return ok;
+}
+
 static int delete_profile(const wchar_t *name, char *error, int error_cap) {
     HRESULT hr = DeleteAppContainerProfile(name);
     char operation[160];
@@ -334,6 +355,7 @@ int visjail_windows_create(const char *directory, char *error, int error_cap) {
     if (!app || !work || !tmp || !private_directory(c, app, 0) ||
         !private_directory(c, work, FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | FILE_DELETE_CHILD) ||
         !private_directory(c, tmp, FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | FILE_DELETE_CHILD)) goto fail;
+    if (!private_temporary_directories(c, tmp)) goto fail;
     c->job = new_job();
     if (!c->job || !(c->id = allocate_id())) goto fail;
     c->next = contexts; contexts = c; result = c->id;

@@ -154,7 +154,10 @@ public final class WindowsJail implements AutoCloseable {
   /** The writable task directory. The host may prepare inputs here before launching the guest. */
   public Path workDirectory() { return directory.resolve("work"); }
 
-  /** The private writable directory used for every child's TEMP, TMP and LOCALAPPDATA. */
+  /**
+   * Root of the private temporary and application-data tree. Each child's TEMP,
+   * TMP and LOCALAPPDATA point to pre-created per-profile subdirectories here.
+   */
   public Path temporaryDirectory() { return directory.resolve("tmp"); }
 
   /**
@@ -194,8 +197,9 @@ public final class WindowsJail implements AutoCloseable {
    * app or Windows System32; no PATH search is performed. The working directory
    * is relative to work (null or empty means its root) and must already exist.
    * Environment entries replace, rather than extend, the host environment.
-   * TEMP/TMP/LOCALAPPDATA always use the private temporary directory; SystemRoot
-   * uses the OS-derived Windows directory. These override caller values.
+   * TEMP/TMP/LOCALAPPDATA use private per-profile subdirectories beneath
+   * {@link #temporaryDirectory()}; SystemRoot uses the OS-derived Windows
+   * directory. These override caller values.
    *
    * <p>Pipes preserve separate stdout/stderr unless {@code mergeError} is true.
    * ConPTY combines them and uses positive {@code rows}/{@code columns}. Consume

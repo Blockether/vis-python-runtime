@@ -635,11 +635,24 @@ int wmain(int argc, wchar_t **argv) {
                 FreeEnvironmentStringsW(environment);
             }
         }
-        check(GetCurrentDirectoryW(32768, value) > 0 && argc == 4 && _wcsicmp(value, argv[2]) == 0,
+        check(GetCurrentDirectoryW(32768, value) > 0 && argc == 5 && _wcsicmp(value, argv[2]) == 0,
               "private working directory");
         check(GetEnvironmentVariableW(L"TEMP", value, 32768) && _wcsicmp(value, argv[3]) == 0, "private TEMP");
         check(GetEnvironmentVariableW(L"TMP", value, 32768) && _wcsicmp(value, argv[3]) == 0, "private TMP");
-        check(GetEnvironmentVariableW(L"LOCALAPPDATA", value, 32768) && _wcsicmp(value, argv[3]) == 0, "private LOCALAPPDATA");
+        check(GetEnvironmentVariableW(L"LOCALAPPDATA", value, 32768) && _wcsicmp(value, argv[4]) == 0, "private LOCALAPPDATA");
+        {
+            wchar_t path[32768];
+            HANDLE file;
+            swprintf_s(path, 32768, L"%ls\\application-data.txt", value);
+            file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+            check(file != INVALID_HANDLE_VALUE, "create private application data");
+            if (file != INVALID_HANDLE_VALUE) {
+                DWORD written;
+                check(WriteFile(file, "data", 4, &written, NULL) && written == 4, "write private application data");
+                CloseHandle(file);
+                check(DeleteFileW(path), "delete private application data");
+            }
+        }
     } else if (wcscmp(argv[1], L"pty") == 0) {
         CONSOLE_SCREEN_BUFFER_INFO info = {0};
         DWORD mode, count = 0;

@@ -26,13 +26,13 @@ untrusted task or use it to grant arbitrary project trees permissions.
 
 ## Create, stage, run, close
 
-Each context creates three directories:
+Each context creates three top-level directories:
 
 | Directory | Guest access | What you put there |
 |---|---|---|
 | `app` | Read and execute after sealing | Copies of programs and read-only inputs |
 | `work` | Read and write | Task inputs that may change, plus results |
-| `tmp` | Read and write | Private temporary files and application data (`TEMP`, `TMP`, `LOCALAPPDATA`) |
+| `tmp` | Read and write | Root of private temporary files and Windows application data |
 
 `stage` copies contents, not security descriptors. It leaves the source files and
 ACLs unchanged, rejects links and reparse points, and never overwrites a staged
@@ -95,13 +95,18 @@ application while guests are running.
 ## Environment, streams and lifetime
 
 The environment is **complete**, not additions to the host environment. Pass
-only the values the program needs; an empty map is valid. The launcher supplies
-four reserved values: `TEMP`, `TMP` and `LOCALAPPDATA` point to the private
-temporary directory, and `SystemRoot` comes from Windows itself. Windows needs
-`LOCALAPPDATA` and `SystemRoot` to initialize the confined process. Caller values
-cannot override these, even with different capitalization. No other host
-environment values are copied, and an environment marker cannot bypass Windows
-confinement.
+only the values the program needs; an empty map is valid. Four values are
+reserved: `TEMP`, `TMP` and `LOCALAPPDATA` stay inside the private `tmp` tree,
+and `SystemRoot` comes from Windows itself. Caller values cannot override these,
+even with different capitalization. No other host environment values are copied,
+and an environment marker cannot bypass Windows confinement.
+
+Windows expands the application-data path for the context's unique profile.
+The launcher creates `tmp\Packages\<profile>\AC` before spawning. Inside the
+guest, `LOCALAPPDATA` points there; `TEMP` and `TMP` point to its `Temp`
+subdirectory. Use those environment values rather than constructing the paths.
+The directories remain private to the context and are writable without changing
+permissions on any existing host files.
 
 The working directory is relative to `work`; null/nil or an empty string means
 its root. It must exist. Dot components, device names and reparse-point paths

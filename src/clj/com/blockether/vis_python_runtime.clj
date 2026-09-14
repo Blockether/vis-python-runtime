@@ -166,8 +166,9 @@
   (WindowsJail/create (Path/of (str parent) (make-array String 0))))
 
 (defn windows-jail-directories
-  "Paths belonging to an open or closed Windows jail. Prepare writable inputs
-   in `:work`; [[stage-windows-jail!]] copies read-only inputs into `:application`."
+  "Root directories belonging to an open or closed Windows jail. Prepare writable inputs
+   in `:work`; [[stage-windows-jail!]] copies read-only inputs into `:application`.
+   `:temporary` contains the child's per-profile TEMP/TMP and application-data directories."
   [^WindowsJail jail]
   {:directory (str (.directory jail))
    :application (str (.applicationDirectory jail))

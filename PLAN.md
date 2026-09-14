@@ -259,16 +259,20 @@ the documentation checks. Local formatting, lint and PowerShell analysis pass;
 read-only review findings on source pinning and process/ConPTY lifetimes have
 been addressed.
 
-Windows CI run 34869727586 verifies minimal process launch and the effective
+Windows CI run 34876244765 verifies minimal process launch and the effective
 LPAC access mask (`2`). Validation, staging stress, unique owned profiles,
 sibling-profile denial, staged read-only inputs, host/sibling file denial and
-private work-file writes execute successfully. Creating a file under the child's
-`TEMP` fails with Windows error 3; the effective path has not yet been diagnosed.
+private work-file writes execute successfully. The fail-fast probe reproduces
+Windows error 3 and identifies its cause: Windows expands `LOCALAPPDATA` to
+`tmp\Packages\<profile>\AC`, and `TEMP`/`TMP` to its missing `Temp` subdirectory.
+The backend now creates and pins that private subtree before launch. Regression
+coverage checks the exact effective paths, actual temporary/application-data
+writes and sibling temporary-file denial; Windows verification is pending.
+
 Diagnostic run 34870999620 was cancelled without a downloadable Windows job log.
-Separate CI/release steps now expose successful native-library, Java, worker and
-native-image probe builds. Run 34874803619 reaches the Windows runtime test phase,
-which has not returned. The probes now stop at the first failure and print its
-diagnostics before cleanup, rather than allowing a later wait to obscure it.
+Separate CI/release steps expose native-library, Java, worker, native-image and
+runtime-test phases. Probes stop at the first failure and report it before the
+outer workspace cleanup, rather than allowing later stages to obscure it.
 Complete environment, network, ConPTY, native-image launcher and extracted-archive
-verification remain pending.
-No Windows confinement support or release completion is claimed yet.
+verification remain pending. No Windows confinement support or release
+completion is claimed yet.

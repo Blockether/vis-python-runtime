@@ -122,12 +122,23 @@ public final class WindowsJailProbe {
     return Path.of(path.toString());
   }
 
+  private static Path privateAppData(WindowsJail jail, Path profile) {
+    return jail.temporaryDirectory().resolve("Packages").resolve(profile.getFileName()).resolve("AC");
+  }
+
   private static void validation(Path parent, Path guest) throws Exception {
     Path source = Files.writeString(parent.resolve("input.txt"), "source-data");
     var sourceAcl = Files.getFileAttributeView(source, AclFileAttributeView.class).getAcl();
     try (WindowsJail jail = prepare(parent, guest)) {
       check(Files.isDirectory(jail.directory()), "private root exists");
       check(!jail.directory().equals(parent), "context creates a new root");
+      // CI 34876244765: the profile-expanded temporary path must exist before any spawn.
+      try (var profiles = Files.list(jail.temporaryDirectory().resolve("Packages"))) {
+        List<Path> paths = profiles.toList();
+        check(paths.size() == 1, "one private application-data profile");
+        check(Files.isDirectory(paths.getFirst().resolve("AC/Temp")),
+            "Windows-required temporary directory is created before launch");
+      }
       Path stagedGuest = jail.applicationDirectory().resolve("guest.exe");
       check(Files.isRegularFile(stagedGuest) && Files.size(stagedGuest) == Files.size(guest),
           "guest executable is staged completely");
@@ -183,13 +194,20 @@ public final class WindowsJailProbe {
       check(!profile1.equals(profile2), "contexts have separate profile storage");
       Path profileSecret = Files.writeString(profile2.resolve("sibling-private.txt"), "profile-private");
       passed(run(first, "denied-file", profileSecret.toString()), "sibling profile read and write denied");
+      // CI 34876244765: Windows rewrites TEMP/TMP/LOCALAPPDATA into this profile subtree.
+      Path data1 = privateAppData(first, profile1);
+      Path data2 = privateAppData(second, profile2);
+      check(Files.isDirectory(data1.resolve("Temp")) && Files.isDirectory(data2.resolve("Temp")),
+          "effective private temporary directories exist");
+      Path temporarySecret = Files.writeString(data2.resolve("Temp/sibling-private.txt"), "temporary-private");
+      passed(run(first, "denied-file", temporarySecret.toString()), "sibling temporary read and write denied");
       Path junction = Files.createDirectory(first.workDirectory().resolve("outside-junction"));
       try {
         passed(finish(new ProcessBuilder(guest.toString(), "junction", junction.toString(), parent.toString()).start(), new byte[0]),
             "mandatory real junction fixture");
         passed(run(first, "security", secret.toString(), first.applicationDirectory().resolve("readonly.txt").toString(),
             sibling.toString(), first.applicationDirectory().toString(), junction.resolve("private-host.txt").toString(),
-            first.temporaryDirectory().toString()),
+            data1.resolve("Temp").toString()),
             "filesystem kernel boundary");
       } finally { Files.deleteIfExists(junction); }
       passed(run(first, "descendant"), "descendant confinement and breakaway denial");
@@ -224,8 +242,11 @@ public final class WindowsJailProbe {
       String expected = values.stream().map(WindowsJailProbe::encoded).reduce("", String::concat) + "PASS\n";
       check(args.out().equals(expected), "UTF-16 arguments, empty strings, quotes and trailing backslashes roundtrip");
       Path nested = Files.createDirectory(jail.workDirectory().resolve("nested"));
+      Result token = run(jail, "token");
+      passed(token, "environment token");
+      Path data = privateAppData(jail, profilePath(guest, field(token.out(), "SID")));
       command = List.of(jail.applicationDirectory().resolve("guest.exe").toString(), "environment",
-          nested.toString(), jail.temporaryDirectory().toString());
+          nested.toString(), data.resolve("Temp").toString(), data.toString());
       passed(finish(jail.spawn(command, Map.of("VIS_JAIL_TEST", "expected", "TEMP", parent.toString(),
           "TMP", parent.toString(), "sYsTeMrOoT", parent.toString(), "localappdata", parent.toString()),
           "nested", false, false, 0, 0), new byte[0]), "environment, forced private values and cwd");
