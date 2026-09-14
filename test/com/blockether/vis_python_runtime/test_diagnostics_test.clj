@@ -18,15 +18,18 @@
         process
         (.start (doto (ProcessBuilder. ^java.util.List
                                        [java "--enable-native-access=ALL-UNNAMED" "-cp"
-                                        (System/getProperty "java.class.path") "clojure.main" "-e"
-                                        code])
+                                        (System/getProperty "java.class.path") "clojure.main" "-"])
                   (.redirectErrorStream true)
                   (.redirectOutput log)))]
 
-    (try (is (.waitFor process 20 TimeUnit/SECONDS) "the diagnostic probe must terminate")
-         (when (.isAlive process) (.destroyForcibly process) (.waitFor process 5 TimeUnit/SECONDS))
-         {:exit (.exitValue process) :out (slurp log)}
-         (finally (when (.isAlive process) (.destroyForcibly process)) (.delete log)))))
+    (try
+      ;; Windows command-line parsing must not reinterpret quoted Clojure forms.
+      (with-open [writer (io/writer (.getOutputStream process) :encoding "UTF-8")]
+        (.write writer ^String code))
+      (is (.waitFor process 20 TimeUnit/SECONDS) "the diagnostic probe must terminate")
+      (when (.isAlive process) (.destroyForcibly process) (.waitFor process 5 TimeUnit/SECONDS))
+      {:exit (.exitValue process) :out (slurp log)}
+      (finally (when (.isAlive process) (.destroyForcibly process)) (.delete log)))))
 
 (defn- diagnostic-probe
   [form]
@@ -38,6 +41,17 @@
                 '[com.blockether.vis-python-runtime.test-diagnostics :as diagnostics]
                 '[clojure.test :as test])
               form)))))
+
+(deftest probe-preserves-quoted-script-test
+  ;; CI 34846427998 truncated -e arguments on Windows before executing the probe.
+  (let [value
+        "a \"quoted\" value\\path\nnext line"
+
+        {:keys [exit out]}
+        (run-probe (pr-str (list 'print value)))]
+
+    (is (= 0 exit) out)
+    (is (= value out) out)))
 
 (deftest progress-and-watchdog-cleanup-test
   (let

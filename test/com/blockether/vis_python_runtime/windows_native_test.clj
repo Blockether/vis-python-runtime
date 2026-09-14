@@ -38,7 +38,7 @@
         (doto (ProcessBuilder. ^java.util.List
                                [(str (io/file (System/getProperty "java.home") "bin" "java"))
                                 "--enable-native-access=ALL-UNNAMED" "-cp"
-                                (System/getProperty "java.class.path") "clojure.main" "-e" code])
+                                (System/getProperty "java.class.path") "clojure.main" "-"])
           (.redirectErrorStream true)
           (.redirectOutput log))]
 
@@ -47,6 +47,9 @@
     (.put (.environment builder) "PYTHONDONTWRITEBYTECODE" "1")
     (let [process (.start builder)]
       (try
+        ;; Windows command-line parsing must not reinterpret quoted Clojure forms.
+        (with-open [writer (io/writer (.getOutputStream process) :encoding "UTF-8")]
+          (.write writer ^String code))
         (is (.waitFor process 30 TimeUnit/SECONDS) "console startup must not hang")
         (when (.isAlive process) (.destroyForcibly process) (.waitFor process 5 TimeUnit/SECONDS))
         {:exit (.exitValue process) :out (slurp log)}
@@ -279,13 +282,15 @@
     (runtime/network! false)
     (is (thrown-with-msg? VisPythonException
                           #"vis sandbox"
-                          (runtime/eval-str "windows-policy" "__import__('socket').socket()")))
-    (runtime/logging! :debug)
-    (is (= "42" (runtime/eval-str "windows-policy" "6 * 7")))
-    (let [records (map json/read-str (str/split-lines (runtime/drain-log!)))]
-      (is (seq records))
-      (is (every? #(number? (get % "ts")) records)))
-    (is (= "" (runtime/drain-log!)))))
+                          (runtime/eval-str "windows-policy" "__import__('socket').socket()"))))
+  (runtime/logging! :debug)
+  ;; Only run/block calls produce evaluation records; eval-str is a raw ABI probe.
+  (is (= "42" (runtime/run "windows-policy" "6 * 7")))
+  (let [records (map json/read-str (str/split-lines (runtime/drain-log!)))]
+    (is (seq records))
+    (is (some #(= "run" (get % "event")) records))
+    (is (every? #(number? (get % "ts")) records)))
+  (is (= "" (runtime/drain-log!))))
 
 (deftest windows-native-filesystem-errors-test
   ;; The Windows CI DLL link must not depend on the CRT's private error mapper.
