@@ -267,47 +267,123 @@ static void network_check(int argc, wchar_t **argv) {
 
 typedef LONG (__stdcall *last_ntstatus_fn)(void);
 
-/* Compare creation APIs and images without granting capabilities or changing ACLs. */
+typedef LONG (__stdcall *nt_create_fn)(
+    PHANDLE, PHANDLE, ACCESS_MASK, ACCESS_MASK, const void *, const void *,
+    ULONG, ULONG, PVOID, PVOID, PVOID);
+
+static nt_create_fn original_nt_create;
+static volatile LONG nt_create_calls;
+static struct {
+    LONG status;
+    ULONG state, process_flags, thread_flags;
+} nt_create_steps[4];
+
+/* Observe the actual call; never replace its arguments, create-info output or result. */
+static LONG __stdcall observe_nt_create(
+    PHANDLE process, PHANDLE thread, ACCESS_MASK process_access, ACCESS_MASK thread_access,
+    const void *process_attributes, const void *thread_attributes, ULONG process_flags,
+    ULONG thread_flags, PVOID parameters, PVOID create_info, PVOID attributes) {
+    LONG status = original_nt_create(process, thread, process_access, thread_access,
+                                     process_attributes, thread_attributes, process_flags,
+                                     thread_flags, parameters, create_info, attributes);
+    ULONG index = (ULONG)InterlockedIncrement(&nt_create_calls) - 1;
+    if (index < 4) {
+        SIZE_T size = 0;
+        nt_create_steps[index].status = status;
+        nt_create_steps[index].state = MAXDWORD;
+        nt_create_steps[index].process_flags = process_flags;
+        nt_create_steps[index].thread_flags = thread_flags;
+        /* PS_CREATE_INFO begins with SIZE_T Size and a 32-bit PS_CREATE_STATE. */
+        if (create_info) memcpy(&size, create_info, sizeof(size));
+        if (size >= sizeof(size) + sizeof(ULONG))
+            memcpy(&nt_create_steps[index].state, (const BYTE *)create_info + sizeof(size), sizeof(ULONG));
+    }
+    return status;
+}
+
+/* Search only the loaded OS module's bounded x64 import-address table. */
+static ULONGLONG *nt_create_import(void) {
+    BYTE *module = (BYTE *)GetModuleHandleW(L"KernelBase.dll");
+    FARPROC address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateUserProcess");
+    IMAGE_DOS_HEADER *dos;
+    IMAGE_NT_HEADERS64 *headers;
+    IMAGE_DATA_DIRECTORY table;
+    ULONGLONG expected, *slots;
+    if (!module || !address) return NULL;
+    dos = (IMAGE_DOS_HEADER *)module;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew >= 4096) return NULL;
+    headers = (IMAGE_NT_HEADERS64 *)(module + dos->e_lfanew);
+    if (headers->Signature != IMAGE_NT_SIGNATURE || headers->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        headers->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IAT) return NULL;
+    table = headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT];
+    if (!table.VirtualAddress || table.VirtualAddress % sizeof(ULONGLONG) ||
+        table.VirtualAddress >= headers->OptionalHeader.SizeOfImage ||
+        table.Size > headers->OptionalHeader.SizeOfImage - table.VirtualAddress ||
+        table.Size % sizeof(ULONGLONG)) return NULL;
+    memcpy(&expected, &address, sizeof(expected));
+    slots = (ULONGLONG *)(module + table.VirtualAddress);
+    for (SIZE_T i = 0; i < table.Size / sizeof(ULONGLONG); i++)
+        if (slots[i] == expected) return &slots[i];
+    return NULL;
+}
+
+/* This changes only the diagnostic guest's private import-page mapping. */
+static BOOL replace_nt_import(ULONGLONG *slot, ULONGLONG value) {
+    DWORD protection, unused;
+    if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &protection)) return FALSE;
+    *slot = value;
+    check(VirtualProtect(slot, sizeof(*slot), protection, &unused), "restore diagnostic import page protection");
+    return TRUE;
+}
+
 static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn last_status) {
-    static const char *const variants[] = {"null-application", "current-primary-token", "system-command"};
-    wchar_t system_executable[32768] = {0}, command[32768];
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    static const char *const variants[] = {
+        "ordinary-traced", "current-token-inherited-desktop", "current-token-empty-desktop"
+    };
+    wchar_t command[32768], desktop[] = L"";
     HANDLE token = NULL;
-    DWORD error;
-    UINT system_length;
-    BOOL queried, system_available;
-    SetLastError(ERROR_SUCCESS);
-    queried = QueryInformationJobObject(NULL, JobObjectExtendedLimitInformation, &limits, sizeof(limits), NULL);
-    error = GetLastError();
-    printf("DESCENDANT_JOB_QUERY=%d LIMIT_FLAGS=%08lX ACTIVE_LIMIT=%lu ERROR=%lu\n", queried,
-           limits.BasicLimitInformation.LimitFlags, limits.BasicLimitInformation.ActiveProcessLimit, error);
-    SetLastError(ERROR_SUCCESS);
-    queried = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &token);
-    error = GetLastError();
-    printf("DESCENDANT_TOKEN_ASSIGN_ACCESS=%d ERROR=%lu\n", queried, error);
-    system_length = GetSystemDirectoryW(system_executable, 32768);
-    system_available = system_length > 0 && system_length < 32768 - 8;
-    if (system_available) wcscat_s(system_executable, 32768, L"\\cmd.exe");
+    ULONGLONG *slot = nt_create_import(), saved = 0, replacement;
+    nt_create_fn observer = observe_nt_create;
+    BOOL installed = FALSE;
+    DWORD trace_error = ERROR_SUCCESS;
+    if (slot) {
+        saved = *slot;
+        memcpy(&original_nt_create, &saved, sizeof(original_nt_create));
+        memcpy(&replacement, &observer, sizeof(replacement));
+        SetLastError(ERROR_SUCCESS);
+        installed = replace_nt_import(slot, replacement);
+        if (!installed) trace_error = GetLastError();
+    }
+    printf("DESCENDANT_NT_IMPORT_FOUND=%d TRACE_INSTALLED=%d ERROR=%lu\n",
+           slot != NULL, installed, trace_error);
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &token))
+        printf("DESCENDANT_TOKEN_ASSIGN_ACCESS=0 ERROR=%lu\n", GetLastError());
     for (int i = 0; i < 3; i++) {
-        const wchar_t *program = i == 2 ? system_executable : executable;
         STARTUPINFOW startup = {0};
         PROCESS_INFORMATION process = {0};
-        DWORD code = STILL_ACTIVE, waited = WAIT_FAILED;
+        DWORD error = ERROR_INVALID_PARAMETER, code = STILL_ACTIVE, waited = WAIT_FAILED;
         LONG nt_status = 0;
-        BOOL configured = i == 1 ? token != NULL : i != 2 || system_available;
+        BOOL configured = i == 0 || token != NULL;
         BOOL started = FALSE;
         startup.cb = sizeof(startup);
-        error = ERROR_INVALID_PARAMETER;
+        startup.lpDesktop = i == 2 ? desktop : NULL;
+        nt_create_calls = 0;
         if (configured) {
-            swprintf_s(command, 32768, i == 2 ? L"\"%ls\" /d /c exit 0" : L"\"%ls\" token", program);
+            swprintf_s(command, 32768, L"\"%ls\" token", executable);
             SetLastError(ERROR_SUCCESS);
-            if (i == 1) started = CreateProcessAsUserW(token, program, command, NULL, NULL, TRUE,
+            if (i != 0) started = CreateProcessAsUserW(token, executable, command, NULL, NULL, TRUE,
                                                        0, NULL, NULL, &startup, &process);
-            else started = CreateProcessW(i == 0 ? NULL : program, command, NULL, NULL, TRUE,
+            else started = CreateProcessW(executable, command, NULL, NULL, TRUE,
                                           0, NULL, NULL, &startup, &process);
             error = GetLastError();
             if (!started && last_status) nt_status = last_status();
         }
+        printf("DESCENDANT_VARIANT=%s CONFIGURED=%d STARTED=%d ERROR=%lu LAST_NTSTATUS=%08lX NT_CALLS=%ld\n",
+               variants[i], configured, started, error, (unsigned long)nt_status, nt_create_calls);
+        for (LONG j = 0; j < nt_create_calls && j < 4; j++)
+            printf("DESCENDANT_NT_STEP=%ld RESULT=%08lX STATE=%lu PROCESS_FLAGS=%08lX THREAD_FLAGS=%08lX\n",
+                   j, (unsigned long)nt_create_steps[j].status, nt_create_steps[j].state,
+                   nt_create_steps[j].process_flags, nt_create_steps[j].thread_flags);
         if (started) {
             waited = WaitForSingleObject(process.hProcess, 10000);
             if (waited != WAIT_OBJECT_0) {
@@ -317,9 +393,9 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
             GetExitCodeProcess(process.hProcess, &code);
             CloseHandle(process.hThread); CloseHandle(process.hProcess);
         }
-        printf("DESCENDANT_VARIANT=%s CONFIGURED=%d STARTED=%d ERROR=%lu LAST_NTSTATUS=%08lX WAIT=%lu EXIT=%lu\n",
-               variants[i], configured, started, error, (unsigned long)nt_status, waited, code);
+        printf("DESCENDANT_VARIANT=%s WAIT=%lu EXIT=%lu\n", variants[i], waited, code);
     }
+    if (installed) check(replace_nt_import(slot, saved), "restore diagnostic native-create import");
     if (token) CloseHandle(token);
 }
 

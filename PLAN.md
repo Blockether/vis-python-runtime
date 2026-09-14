@@ -275,10 +275,18 @@ explicit same-container startup attributes and the guest application-data base.
 Self-thread access, token query/duplicate/assign access and directory traversal
 succeed. All four Unix lanes and API documentation checks pass.
 
-Failure-only probes now record the last NT status and effective job limits,
-then compare a null application name, the current primary token and a System32
-command. They preserve the original mandatory failure and add no capabilities or
-host ACL grants. Windows descendant support is still unverified.
+Run 34887357608 reports `STATUS_ACCESS_DENIED` (`C0000022`) for ordinary
+creation, a null application name, the current primary token and a System32
+command. The effective job has only kill-on-close enabled and no active-process
+limit. No descendant runs in these comparisons.
+
+The next failure-only probe observes the diagnostic guest's own KernelBase
+`NtCreateUserProcess` import, forwarding every argument and result unchanged.
+It records whether that entry is called and its native result/create-info state,
+then restores the import and page protection. A current-token comparison changes
+only the desktop from inherited (`NULL`) to connection selection (empty string).
+No host object ACLs, capabilities or production launch behavior change. The
+original descendant failure remains mandatory; Windows support is unverified.
 
 `GetAppContainerFolderPath` returns local application data beneath the profile,
 not its root. Test cleanup validates the generated parent name and exact SID;
