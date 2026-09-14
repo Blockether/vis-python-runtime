@@ -182,11 +182,20 @@ assertions, with clean Clojure formatting, lint/reflection and diff checks.
 
 The repair is pushed without loosening confinement or extending the job timeout.
 Pre-existing asynchronous-runtime changes and concurrent live-worker diagnostics
-remain outside its commits. No release tag, consumer installation or live gateway
-restart was performed; release publication remains a separate workflow.
+remain outside its commits. No consumer installation or live gateway restart was
+performed.
 
-The Windows and generated API documentation release targets `v0.5.16`. It includes
-the verified Windows repair, without the separate uncommitted diagnostics or
-asynchronous-runtime changes. Final publication checks will build the JVM jar and
-versioned documentation, then verify all five platform archives in the release
-workflow. Consumer installation and live gateway restarts remain out of scope.
+[Release v0.5.16](https://github.com/Blockether/vis-python-runtime/releases/tag/v0.5.16)
+is published at `44c3831e336e2e6138cbaea070c3da59820ca154`. Exact-commit CI
+`34849010340` passed all six jobs; the macOS x64 job required one retry after a
+Maven Central HTTP 502. Release workflow `34850817074` passed all seven jobs,
+including the real Windows JVM, native-worker and extracted-archive suites.
+
+All eight release assets are available: five platform archives, the JVM jar, the
+combined Javadoc/Codox ZIP and a standard Javadoc jar. Downloaded Windows, macOS
+ARM64, JVM and documentation assets match their published SHA-256 digests. The
+Windows archive contains the DLL, native worker, CPython and uv; the documentation
+ZIP contains both API references and 36 HTML pages. Java and Clojure quickstarts
+run against the downloaded JVM jar and macOS archive, including the Java host
+callback. The downloaded native worker passes seven tests and 183 assertions.
+Windows OS-level process confinement remains unavailable and fails closed.
