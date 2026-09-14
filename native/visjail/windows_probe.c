@@ -271,25 +271,40 @@ typedef LONG (__stdcall *nt_create_fn)(
     PHANDLE, PHANDLE, ACCESS_MASK, ACCESS_MASK, const void *, const void *,
     ULONG, ULONG, PVOID, PVOID, PVOID);
 typedef LONG (__stdcall *nt_info_fn)(HANDLE, int, PVOID, ULONG);
+typedef LONG (__stdcall *nt_query_fn)(HANDLE, int, PVOID, ULONG, PULONG);
+typedef LONG (__stdcall *nt_memory_fn)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
+typedef LONG (__stdcall *nt_open_token_fn)(HANDLE, ACCESS_MASK, PHANDLE);
+typedef LONG (__stdcall *nt_open_token_ex_fn)(HANDLE, ACCESS_MASK, ULONG, PHANDLE);
+typedef LONG (__stdcall *nt_duplicate_fn)(HANDLE, HANDLE, HANDLE, PHANDLE, ACCESS_MASK, ULONG, ULONG);
 typedef LONG (__stdcall *nt_resume_fn)(HANDLE, PULONG);
 typedef LONG (__stdcall *csr_call_fn)(PVOID, PVOID, ULONG, ULONG);
 
 static nt_create_fn original_nt_create;
 static nt_info_fn original_process_info, original_thread_info;
+static nt_query_fn original_process_query, original_thread_query, original_token_query;
+static nt_memory_fn original_read_memory, original_write_memory;
+static nt_open_token_fn original_open_token;
+static nt_open_token_ex_fn original_open_token_ex;
+static nt_duplicate_fn original_duplicate;
 static nt_resume_fn original_resume;
 static csr_call_fn original_csr_call;
 static volatile LONG native_calls;
+static BOOL native_started;
 static struct native_step {
     const char *operation;
     LONG status, message_status;
     ULONG state, process_flags, thread_flags, info_class, length;
-    ULONG api_number, message_api, message_data, message_total;
+    ULONG api_number, message_api, message_data, message_total, access_mask, options;
+    SIZE_T memory_size;
     BOOL message_valid;
-} native_steps[32];
+} native_steps[128];
 
 static struct native_step *record_native_step(const char *operation, LONG status) {
-    ULONG index = (ULONG)InterlockedIncrement(&native_calls) - 1;
-    if (index >= 32) return NULL;
+    ULONG index;
+    /* This controlled launch traces native creation onward, not earlier setup. */
+    if (!native_started) return NULL;
+    index = (ULONG)InterlockedIncrement(&native_calls) - 1;
+    if (index >= 128) return NULL;
     native_steps[index].operation = operation;
     native_steps[index].status = status;
     return &native_steps[index];
@@ -303,7 +318,9 @@ static LONG __stdcall observe_nt_create(
     LONG status = original_nt_create(process, thread, process_access, thread_access,
                                      process_attributes, thread_attributes, process_flags,
                                      thread_flags, parameters, create_info, attributes);
-    struct native_step *step = record_native_step("NtCreateUserProcess", status);
+    struct native_step *step;
+    native_started = TRUE;
+    step = record_native_step("NtCreateUserProcess", status);
     if (step) {
         SIZE_T size = 0;
         step->state = MAXDWORD;
@@ -328,6 +345,63 @@ static LONG __stdcall observe_thread_info(HANDLE thread, int info_class, PVOID i
     LONG status = original_thread_info(thread, info_class, info, length);
     struct native_step *step = record_native_step("NtSetInformationThread", status);
     if (step) { step->info_class = (ULONG)info_class; step->length = length; }
+    return status;
+}
+
+static LONG __stdcall observe_process_query(HANDLE process, int info_class, PVOID info, ULONG length, PULONG returned) {
+    LONG status = original_process_query(process, info_class, info, length, returned);
+    struct native_step *step = record_native_step("NtQueryInformationProcess", status);
+    if (step) { step->info_class = (ULONG)info_class; step->length = length; }
+    return status;
+}
+
+static LONG __stdcall observe_thread_query(HANDLE thread, int info_class, PVOID info, ULONG length, PULONG returned) {
+    LONG status = original_thread_query(thread, info_class, info, length, returned);
+    struct native_step *step = record_native_step("NtQueryInformationThread", status);
+    if (step) { step->info_class = (ULONG)info_class; step->length = length; }
+    return status;
+}
+
+static LONG __stdcall observe_token_query(HANDLE token, int info_class, PVOID info, ULONG length, PULONG returned) {
+    LONG status = original_token_query(token, info_class, info, length, returned);
+    struct native_step *step = record_native_step("NtQueryInformationToken", status);
+    if (step) { step->info_class = (ULONG)info_class; step->length = length; }
+    return status;
+}
+
+static LONG __stdcall observe_read_memory(HANDLE process, PVOID address, PVOID buffer, SIZE_T size, PSIZE_T returned) {
+    LONG status = original_read_memory(process, address, buffer, size, returned);
+    struct native_step *step = record_native_step("NtReadVirtualMemory", status);
+    if (step) step->memory_size = size;
+    return status;
+}
+
+static LONG __stdcall observe_write_memory(HANDLE process, PVOID address, PVOID buffer, SIZE_T size, PSIZE_T returned) {
+    LONG status = original_write_memory(process, address, buffer, size, returned);
+    struct native_step *step = record_native_step("NtWriteVirtualMemory", status);
+    if (step) step->memory_size = size;
+    return status;
+}
+
+static LONG __stdcall observe_open_token(HANDLE process, ACCESS_MASK access, PHANDLE token) {
+    LONG status = original_open_token(process, access, token);
+    struct native_step *step = record_native_step("NtOpenProcessToken", status);
+    if (step) step->access_mask = access;
+    return status;
+}
+
+static LONG __stdcall observe_open_token_ex(HANDLE process, ACCESS_MASK access, ULONG attributes, PHANDLE token) {
+    LONG status = original_open_token_ex(process, access, attributes, token);
+    struct native_step *step = record_native_step("NtOpenProcessTokenEx", status);
+    if (step) step->access_mask = access;
+    return status;
+}
+
+static LONG __stdcall observe_duplicate(HANDLE source_process, HANDLE source, HANDLE target_process,
+                                        PHANDLE target, ACCESS_MASK access, ULONG attributes, ULONG options) {
+    LONG status = original_duplicate(source_process, source, target_process, target, access, attributes, options);
+    struct native_step *step = record_native_step("NtDuplicateObject", status);
+    if (step) { step->access_mask = access; step->options = options; }
     return status;
 }
 
@@ -361,8 +435,8 @@ static LONG __stdcall observe_csr_call(PVOID message, PVOID capture, ULONG api_n
 }
 
 /* Search only the loaded OS module's bounded x64 import-address table. */
-static ULONGLONG *native_import(const char *name) {
-    BYTE *module = (BYTE *)GetModuleHandleW(L"KernelBase.dll");
+static ULONGLONG *native_import(const wchar_t *module_name, const char *name) {
+    BYTE *module = (BYTE *)GetModuleHandleW(module_name);
     FARPROC address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), name);
     IMAGE_DOS_HEADER *dos;
     IMAGE_NT_HEADERS64 *headers;
@@ -399,41 +473,63 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
     static const char *const variants[] = {
         "ordinary-traced", "current-token-inherited-desktop", "current-token-empty-desktop"
     };
+    static const wchar_t *const modules[] = {L"KernelBase.dll", L"kernel32.dll"};
     wchar_t command[32768], desktop[] = L"";
     HANDLE token = NULL;
     nt_create_fn create_observer = observe_nt_create;
     nt_info_fn process_observer = observe_process_info, thread_observer = observe_thread_info;
+    nt_query_fn process_query_observer = observe_process_query, thread_query_observer = observe_thread_query;
+    nt_query_fn token_query_observer = observe_token_query;
+    nt_memory_fn read_observer = observe_read_memory, write_observer = observe_write_memory;
+    nt_open_token_fn open_token_observer = observe_open_token;
+    nt_open_token_ex_fn open_token_ex_observer = observe_open_token_ex;
+    nt_duplicate_fn duplicate_observer = observe_duplicate;
     nt_resume_fn resume_observer = observe_resume;
     csr_call_fn csr_observer = observe_csr_call;
+    struct native_import_slot {
+        ULONGLONG *address, saved;
+        BOOL installed;
+    };
     struct {
         const char *name;
         void *original;
         const void *observer;
-        ULONGLONG *slot, saved;
-        BOOL installed;
+        struct native_import_slot slots[2];
     } imports[] = {
-        {"NtCreateUserProcess", &original_nt_create, &create_observer, NULL, 0, FALSE},
-        {"NtSetInformationProcess", &original_process_info, &process_observer, NULL, 0, FALSE},
-        {"NtSetInformationThread", &original_thread_info, &thread_observer, NULL, 0, FALSE},
-        {"NtResumeThread", &original_resume, &resume_observer, NULL, 0, FALSE},
-        {"CsrClientCallServer", &original_csr_call, &csr_observer, NULL, 0, FALSE}
+        {"NtCreateUserProcess", &original_nt_create, &create_observer, {{0}}},
+        {"NtSetInformationProcess", &original_process_info, &process_observer, {{0}}},
+        {"NtSetInformationThread", &original_thread_info, &thread_observer, {{0}}},
+        {"NtQueryInformationProcess", &original_process_query, &process_query_observer, {{0}}},
+        {"NtQueryInformationThread", &original_thread_query, &thread_query_observer, {{0}}},
+        {"NtQueryInformationToken", &original_token_query, &token_query_observer, {{0}}},
+        {"NtReadVirtualMemory", &original_read_memory, &read_observer, {{0}}},
+        {"NtWriteVirtualMemory", &original_write_memory, &write_observer, {{0}}},
+        {"NtOpenProcessToken", &original_open_token, &open_token_observer, {{0}}},
+        {"NtOpenProcessTokenEx", &original_open_token_ex, &open_token_ex_observer, {{0}}},
+        {"NtDuplicateObject", &original_duplicate, &duplicate_observer, {{0}}},
+        {"NtResumeThread", &original_resume, &resume_observer, {{0}}},
+        {"CsrClientCallServer", &original_csr_call, &csr_observer, {{0}}}
     };
-    C_ASSERT(sizeof(nt_create_fn) == 8 && sizeof(nt_info_fn) == 8 &&
-             sizeof(nt_resume_fn) == 8 && sizeof(csr_call_fn) == 8);
+    C_ASSERT(sizeof(nt_create_fn) == 8 && sizeof(nt_info_fn) == 8 && sizeof(nt_query_fn) == 8 &&
+             sizeof(nt_memory_fn) == 8 && sizeof(nt_open_token_fn) == 8 && sizeof(nt_open_token_ex_fn) == 8 &&
+             sizeof(nt_duplicate_fn) == 8 && sizeof(nt_resume_fn) == 8 && sizeof(csr_call_fn) == 8);
     for (SIZE_T i = 0; i < sizeof(imports) / sizeof(imports[0]); i++) {
-        ULONGLONG replacement;
-        DWORD trace_error = ERROR_SUCCESS;
-        imports[i].slot = native_import(imports[i].name);
-        if (imports[i].slot) {
-            imports[i].saved = *imports[i].slot;
-            memcpy(imports[i].original, &imports[i].saved, sizeof(ULONGLONG));
-            memcpy(&replacement, imports[i].observer, sizeof(replacement));
-            SetLastError(ERROR_SUCCESS);
-            imports[i].installed = replace_nt_import(imports[i].slot, replacement);
-            if (!imports[i].installed) trace_error = GetLastError();
+        for (SIZE_T j = 0; j < sizeof(modules) / sizeof(modules[0]); j++) {
+            struct native_import_slot *slot = &imports[i].slots[j];
+            ULONGLONG replacement;
+            DWORD trace_error = ERROR_SUCCESS;
+            slot->address = native_import(modules[j], imports[i].name);
+            if (slot->address) {
+                slot->saved = *slot->address;
+                memcpy(imports[i].original, &slot->saved, sizeof(ULONGLONG));
+                memcpy(&replacement, imports[i].observer, sizeof(replacement));
+                SetLastError(ERROR_SUCCESS);
+                slot->installed = replace_nt_import(slot->address, replacement);
+                if (!slot->installed) trace_error = GetLastError();
+            }
+            printf("DESCENDANT_IMPORT=%s MODULE=%ls FOUND=%d INSTALLED=%d ERROR=%lu\n",
+                   imports[i].name, modules[j], slot->address != NULL, slot->installed, trace_error);
         }
-        printf("DESCENDANT_IMPORT=%s FOUND=%d INSTALLED=%d ERROR=%lu\n",
-               imports[i].name, imports[i].slot != NULL, imports[i].installed, trace_error);
     }
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &token))
         printf("DESCENDANT_TOKEN_ASSIGN_ACCESS=0 ERROR=%lu\n", GetLastError());
@@ -446,6 +542,7 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
         BOOL started = FALSE;
         startup.cb = sizeof(startup);
         startup.lpDesktop = i == 2 ? desktop : NULL;
+        native_started = FALSE;
         native_calls = 0;
         ZeroMemory(native_steps, sizeof(native_steps));
         if (configured) {
@@ -458,15 +555,16 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
             error = GetLastError();
             if (!started && last_status) nt_status = last_status();
         }
-        printf("DESCENDANT_VARIANT=%s CONFIGURED=%d STARTED=%d ERROR=%lu LAST_NTSTATUS=%08lX NATIVE_CALLS=%ld\n",
+        printf("DESCENDANT_VARIANT=%s CONFIGURED=%d STARTED=%d ERROR=%lu LAST_NTSTATUS=%08lX CREATE_AND_POST_CALLS=%ld\n",
                variants[i], configured, started, error, (unsigned long)nt_status, native_calls);
-        for (LONG j = 0; j < native_calls && j < 32; j++) {
+        for (LONG j = 0; j < native_calls && j < 128; j++) {
             const struct native_step *step = &native_steps[j];
             printf("DESCENDANT_NATIVE_STEP=%ld API=%s RESULT=%08lX STATE=%lu PROCESS_FLAGS=%08lX THREAD_FLAGS=%08lX "
-                   "CLASS=%lu LENGTH=%lu CSR_API=%08lX CSR_LAYOUT=%d CSR_MESSAGE_API=%08lX "
+                   "CLASS=%lu LENGTH=%lu ACCESS=%08lX OPTIONS=%08lX MEMORY_SIZE=%zu CSR_API=%08lX CSR_LAYOUT=%d CSR_MESSAGE_API=%08lX "
                    "CSR_MESSAGE_STATUS=%08lX CSR_LENGTHS=%lu/%lu\n",
                    j, step->operation, (unsigned long)step->status, step->state,
                    step->process_flags, step->thread_flags, step->info_class, step->length,
+                   step->access_mask, step->options, step->memory_size,
                    step->api_number, step->message_valid, step->message_api,
                    (unsigned long)step->message_status, step->message_data, step->message_total);
         }
@@ -481,9 +579,12 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
         }
         printf("DESCENDANT_VARIANT=%s WAIT=%lu EXIT=%lu\n", variants[i], waited, code);
     }
-    for (SIZE_T i = sizeof(imports) / sizeof(imports[0]); i > 0; i--)
-        if (imports[i - 1].installed)
-            check(replace_nt_import(imports[i - 1].slot, imports[i - 1].saved), "restore diagnostic native import");
+    for (SIZE_T i = sizeof(imports) / sizeof(imports[0]); i > 0; i--) {
+        for (SIZE_T j = sizeof(modules) / sizeof(modules[0]); j > 0; j--) {
+            struct native_import_slot *slot = &imports[i - 1].slots[j - 1];
+            if (slot->installed) check(replace_nt_import(slot->address, slot->saved), "restore diagnostic native import");
+        }
+    }
     if (token) CloseHandle(token);
 }
 

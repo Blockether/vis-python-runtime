@@ -285,11 +285,15 @@ Run 34889232808 observes `NtCreateUserProcess` returning `STATUS_SUCCESS` with
 creation fails afterward with error 5; the child never runs. All native builds,
 four Unix lanes and API documentation checks pass, but Windows E2E does not.
 
-The failure-only probe now also observes the diagnostic guest's KernelBase imports
-for CSR registration, process/thread information updates and thread resumption.
-It forwards every argument and result unchanged, records call order and native
-statuses, then restores the imports and page protection. CSR transport and message
-status are recorded separately; message interpretation requires matching x64
+Run 34891790772 installs all five KernelBase observers without error, but only
+native creation traverses them. No CSR, process/thread update or resume call is
+observed through those slots; this does not exclude calls from other modules.
+
+The failure-only probe now covers KernelBase and Kernel32 imports, including
+process/thread/token queries, token opens, handle duplication and memory transfer.
+It records native creation and subsequent calls, forwarding every argument and
+result unchanged, then restores the imports and page protection. CSR transport
+and message status remain separate; message interpretation requires matching x64
 header lengths and the requested API number. No host object ACLs, capabilities or
 production launch behavior change. The original descendant failure remains
 mandatory; Windows support is unverified.
