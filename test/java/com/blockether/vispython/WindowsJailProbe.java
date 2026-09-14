@@ -33,6 +33,14 @@ public final class WindowsJailProbe {
     checks++;
   }
 
+  private static void stage(AssertionError failures, String name, Checked action) {
+    System.out.println("START WindowsJail " + name);
+    try { action.run(); } catch (Exception | AssertionError failed) {
+      failures.addSuppressed(new AssertionError(name, failed));
+      System.err.println("FAIL WindowsJail " + name);
+    }
+  }
+
   private static void denied(Checked action, String message) throws Exception {
     try { action.run(); } catch (Exception expected) { checks++; return; }
     throw new AssertionError(message);
@@ -179,7 +187,8 @@ public final class WindowsJailProbe {
         passed(finish(new ProcessBuilder(guest.toString(), "junction", junction.toString(), parent.toString()).start(), new byte[0]),
             "mandatory real junction fixture");
         passed(run(first, "security", secret.toString(), first.applicationDirectory().resolve("readonly.txt").toString(),
-            sibling.toString(), first.applicationDirectory().toString(), junction.resolve("private-host.txt").toString()),
+            sibling.toString(), first.applicationDirectory().toString(), junction.resolve("private-host.txt").toString(),
+            first.temporaryDirectory().toString()),
             "filesystem kernel boundary");
       } finally { Files.deleteIfExists(junction); }
       passed(run(first, "descendant"), "descendant confinement and breakaway denial");
@@ -622,29 +631,24 @@ public final class WindowsJailProbe {
     Path parent = Files.createTempDirectory("vj-").toRealPath();
     Throwable failure = null;
     try {
-      System.out.println("START WindowsJail validation");
-      validation(parent, guest);
-      System.out.println("START WindowsJail staging stress");
-      passed(finish(new ProcessBuilder(self("--staging-child", parent, guest)).start(), new byte[0]), "bounded staging stress");
-      System.out.println("START WindowsJail filesystem");
-      filesystem(parent, guest);
-      System.out.println("START WindowsJail streams");
-      argumentsAndStreams(parent, guest);
-      System.out.println("START WindowsJail network");
-      network(parent, guest);
-      System.out.println("START WindowsJail lifetime");
-      lifetime(parent, guest);
-      System.out.println("START WindowsJail terminal");
-      terminal(parent, guest);
-      passed(finish(new ProcessBuilder(self("--terminal-child", parent, guest)).start(), new byte[0]), "bounded active ConPTY close");
-      System.out.println("START WindowsJail parent crash");
-      parentCrash(parent, guest);
-      System.out.println("START WindowsJail inherited handles and standard user");
-      restrictedHosts(parent, guest);
+      // Independent cases still run after a failure; the whole probe must remain red.
+      AssertionError failures = new AssertionError("Windows jail boundary checks failed");
+      stage(failures, "validation", () -> validation(parent, guest));
+      stage(failures, "staging stress", () -> passed(
+          finish(new ProcessBuilder(self("--staging-child", parent, guest)).start(), new byte[0]), "bounded staging stress"));
+      stage(failures, "filesystem", () -> filesystem(parent, guest));
+      stage(failures, "streams", () -> argumentsAndStreams(parent, guest));
+      stage(failures, "network", () -> network(parent, guest));
+      stage(failures, "lifetime", () -> lifetime(parent, guest));
+      stage(failures, "terminal", () -> terminal(parent, guest));
+      stage(failures, "active ConPTY close", () -> passed(
+          finish(new ProcessBuilder(self("--terminal-child", parent, guest)).start(), new byte[0]), "bounded active ConPTY close"));
+      stage(failures, "parent crash", () -> parentCrash(parent, guest));
+      stage(failures, "inherited handles and standard user", () -> restrictedHosts(parent, guest));
       if (arguments.length == 2) {
-        System.out.println("START WindowsJail stock Python and native worker");
-        python(parent, guest, Path.of(arguments[1]).toRealPath());
+        stage(failures, "stock Python and native worker", () -> python(parent, guest, Path.of(arguments[1]).toRealPath()));
       }
+      if (failures.getSuppressed().length != 0) throw failures;
     } catch (Throwable caught) {
       failure = caught;
       throw caught;

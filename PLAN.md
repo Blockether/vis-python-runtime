@@ -259,12 +259,12 @@ the documentation checks. Local formatting, lint and PowerShell analysis pass;
 read-only review findings on source pinning and process/ConPTY lifetimes have
 been addressed.
 
-Windows CI run 34867914035 executes the guest when `LOCALAPPDATA` is supplied,
-including when it points to the private temporary directory. The launcher now
-reserves that private value instead of copying the host folder. AppContainer,
-low-integrity, capability and job checks ran; the combined LPAC token query
-assertion failed. Its replacement tests the kernel access distinction between
-all-application and restricted-application package grants, rather than inferring
-confinement from a query failure. Full Windows LPAC/ACL, network, ConPTY,
-native-image launcher and extracted-archive verification remains pending.
+Windows CI run 34869727586 verifies minimal process launch and the effective
+LPAC access mask (`2`). Validation, staging stress, unique owned profiles,
+sibling-profile denial, staged read-only inputs, host/sibling file denial and
+private work-file writes execute successfully. Creating a file under the child's
+`TEMP` fails with Windows error 3; the effective path has not yet been diagnosed.
+The probes now report the exact temporary paths and continue independent cases
+without accepting a partial pass. Complete environment, network, ConPTY,
+native-image launcher and extracted-archive verification remain pending.
 No Windows confinement support or release completion is claimed yet.

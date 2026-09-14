@@ -27,6 +27,12 @@ static void check(int ok, const char *name) {
     }
 }
 
+static void report_path(const char *name, const wchar_t *value) {
+    printf("%s=", name);
+    while (*value) printf("%04X", (unsigned int)*value++);
+    printf("\n");
+}
+
 static void denied(const wchar_t *path, DWORD access, const char *name) {
     HANDLE file = CreateFileW(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -117,8 +123,8 @@ static void security_check(int argc, wchar_t **argv) {
     wchar_t path[32768], extended[32768], work[32768];
     HANDLE file;
     DWORD written = 0;
-    check(argc == 7, "security arguments");
-    if (argc != 7) return;
+    check(argc == 8, "security arguments");
+    if (argc != 8) return;
     token_check();
     denied(argv[2], GENERIC_READ, "private host read denied");
     denied(argv[2], GENERIC_WRITE, "private host write denied");
@@ -157,8 +163,31 @@ static void security_check(int argc, wchar_t **argv) {
         DWORD length = GetEnvironmentVariableW(L"TEMP", extended, 32768);
         check(length > 0 && length < 32768, "private temporary directory is set");
         if (length > 0 && length < 32768) {
+            DWORD create_error;
+            int expected = _wcsicmp(extended, argv[7]) == 0;
+            check(expected, "TEMP matches the private temporary directory");
             swprintf_s(path, 32768, L"%ls\\temporary-file.txt", extended);
             file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+            create_error = GetLastError();
+            if (file == INVALID_HANDLE_VALUE || !expected) {
+                const wchar_t *keys[] = {L"TEMP", L"TMP", L"LOCALAPPDATA"};
+                const char *labels[] = {"TEMP", "TMP", "LOCALAPPDATA"};
+                /* CI 34869727586: distinguish effective environment changes from missing paths. */
+                report_path("TEMP_EXPECTED", argv[7]);
+                report_path("TEMP_CREATE_PATH", path);
+                for (int i = 0; i < 3; i++) {
+                    DWORD attributes;
+                    SetLastError(ERROR_SUCCESS);
+                    length = GetEnvironmentVariableW(keys[i], extended, 32768);
+                    printf("%s_LENGTH=%lu ERROR=%lu\n", labels[i], length, GetLastError());
+                    if (!length || length >= 32768) continue;
+                    report_path(labels[i], extended);
+                    SetLastError(ERROR_SUCCESS);
+                    attributes = GetFileAttributesW(extended);
+                    printf("%s_ATTRIBUTES=%lu ERROR=%lu\n", labels[i], attributes, GetLastError());
+                }
+            }
+            SetLastError(create_error);
             check(file != INVALID_HANDLE_VALUE, "create low-integrity temporary file");
             if (file != INVALID_HANDLE_VALUE) {
                 check(WriteFile(file, "tmp", 3, &written, NULL) && written == 3, "write private temporary file");
