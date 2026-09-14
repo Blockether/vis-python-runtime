@@ -279,6 +279,8 @@ typedef LONG (__stdcall *nt_query_fn)(HANDLE, int, PVOID, ULONG, PULONG);
 typedef LONG (__stdcall *nt_memory_fn)(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
 typedef LONG (__stdcall *nt_open_token_fn)(HANDLE, ACCESS_MASK, PHANDLE);
 typedef LONG (__stdcall *nt_open_token_ex_fn)(HANDLE, ACCESS_MASK, ULONG, PHANDLE);
+typedef LONG (__stdcall *nt_open_key_fn)(PHANDLE, ACCESS_MASK, PVOID);
+typedef LONG (__stdcall *nt_query_value_fn)(HANDLE, const void *, int, PVOID, ULONG, PULONG);
 typedef LONG (__stdcall *nt_duplicate_fn)(HANDLE, HANDLE, HANDLE, PHANDLE, ACCESS_MASK, ULONG, ULONG);
 typedef LONG (__stdcall *nt_terminate_fn)(HANDLE, LONG);
 typedef ULONG (__stdcall *nt_error_fn)(LONG);
@@ -291,6 +293,8 @@ static nt_query_fn original_process_query, original_thread_query, original_token
 static nt_memory_fn original_read_memory, original_write_memory;
 static nt_open_token_fn original_open_token;
 static nt_open_token_ex_fn original_open_token_ex;
+static nt_open_key_fn original_open_key, original_open_key_alias;
+static nt_query_value_fn original_query_value, original_query_value_alias;
 static nt_duplicate_fn original_duplicate;
 static nt_terminate_fn original_terminate;
 static nt_error_fn original_error_conversion, original_error_conversion_no_teb;
@@ -331,12 +335,9 @@ static struct native_step *record_native_step(const char *operation, LONG status
     return &native_steps[index];
 }
 
-static void record_error_step(const char *operation, LONG result, LONG input, BOOL no_result, const void *caller) {
-    struct native_step *step = record_native_step(operation, result);
+static void record_native_caller(struct native_step *step, const void *caller) {
     uintptr_t address = (uintptr_t)caller;
     if (!step) return;
-    step->input_status = input;
-    step->no_result = no_result;
     step->caller_module = L"unresolved";
     for (SIZE_T i = 0; i < sizeof(native_modules) / sizeof(native_modules[0]); i++) {
         if (address >= native_modules[i].base && address - native_modules[i].base < native_modules[i].size) {
@@ -345,6 +346,14 @@ static void record_error_step(const char *operation, LONG result, LONG input, BO
             break;
         }
     }
+}
+
+static void record_error_step(const char *operation, LONG result, LONG input, BOOL no_result, const void *caller) {
+    struct native_step *step = record_native_step(operation, result);
+    if (!step) return;
+    step->input_status = input;
+    step->no_result = no_result;
+    record_native_caller(step, caller);
 }
 
 /* Observe actual calls; never replace their arguments, output buffers or results. */
@@ -388,6 +397,7 @@ static LONG __stdcall observe_thread_info(HANDLE thread, int info_class, PVOID i
 static LONG __stdcall observe_process_query(HANDLE process, int info_class, PVOID info, ULONG length, PULONG returned) {
     LONG status = original_process_query(process, info_class, info, length, returned);
     struct native_step *step = record_native_step("NtQueryInformationProcess", status);
+    record_native_caller(step, _ReturnAddress());
     if (step) { step->info_class = (ULONG)info_class; step->length = length; }
     return status;
 }
@@ -431,6 +441,40 @@ static LONG __stdcall observe_open_token_ex(HANDLE process, ACCESS_MASK access, 
     LONG status = original_open_token_ex(process, access, attributes, token);
     struct native_step *step = record_native_step("NtOpenProcessTokenEx", status);
     if (step) step->access_mask = access;
+    return status;
+}
+
+static LONG __stdcall observe_open_key(PHANDLE key, ACCESS_MASK access, PVOID attributes) {
+    LONG status = original_open_key(key, access, attributes);
+    struct native_step *step = record_native_step("NtOpenKey", status);
+    record_native_caller(step, _ReturnAddress());
+    if (step) step->access_mask = access;
+    return status;
+}
+
+static LONG __stdcall observe_open_key_alias(PHANDLE key, ACCESS_MASK access, PVOID attributes) {
+    LONG status = original_open_key_alias(key, access, attributes);
+    struct native_step *step = record_native_step("ZwOpenKey", status);
+    record_native_caller(step, _ReturnAddress());
+    if (step) step->access_mask = access;
+    return status;
+}
+
+static LONG __stdcall observe_query_value(HANDLE key, const void *name, int info_class,
+                                         PVOID info, ULONG length, PULONG returned) {
+    LONG status = original_query_value(key, name, info_class, info, length, returned);
+    struct native_step *step = record_native_step("NtQueryValueKey", status);
+    record_native_caller(step, _ReturnAddress());
+    if (step) { step->info_class = (ULONG)info_class; step->length = length; }
+    return status;
+}
+
+static LONG __stdcall observe_query_value_alias(HANDLE key, const void *name, int info_class,
+                                               PVOID info, ULONG length, PULONG returned) {
+    LONG status = original_query_value_alias(key, name, info_class, info, length, returned);
+    struct native_step *step = record_native_step("ZwQueryValueKey", status);
+    record_native_caller(step, _ReturnAddress());
+    if (step) { step->info_class = (ULONG)info_class; step->length = length; }
     return status;
 }
 
@@ -551,6 +595,8 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
     nt_memory_fn read_observer = observe_read_memory, write_observer = observe_write_memory;
     nt_open_token_fn open_token_observer = observe_open_token;
     nt_open_token_ex_fn open_token_ex_observer = observe_open_token_ex;
+    nt_open_key_fn open_key_observer = observe_open_key, open_key_alias_observer = observe_open_key_alias;
+    nt_query_value_fn query_value_observer = observe_query_value, query_value_alias_observer = observe_query_value_alias;
     nt_duplicate_fn duplicate_observer = observe_duplicate;
     nt_terminate_fn terminate_observer = observe_terminate;
     nt_error_fn error_observer = observe_error_conversion, no_teb_observer = observe_error_conversion_no_teb;
@@ -577,6 +623,11 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
         {"NtWriteVirtualMemory", &original_write_memory, &write_observer, {{0}}},
         {"NtOpenProcessToken", &original_open_token, &open_token_observer, {{0}}},
         {"NtOpenProcessTokenEx", &original_open_token_ex, &open_token_ex_observer, {{0}}},
+        /* Nt/Zw aliases can occupy distinct import slots; observe both. */
+        {"NtOpenKey", &original_open_key, &open_key_observer, {{0}}},
+        {"ZwOpenKey", &original_open_key_alias, &open_key_alias_observer, {{0}}},
+        {"NtQueryValueKey", &original_query_value, &query_value_observer, {{0}}},
+        {"ZwQueryValueKey", &original_query_value_alias, &query_value_alias_observer, {{0}}},
         {"NtDuplicateObject", &original_duplicate, &duplicate_observer, {{0}}},
         {"NtTerminateProcess", &original_terminate, &terminate_observer, {{0}}},
         {"RtlNtStatusToDosError", &original_error_conversion, &error_observer, {{0}}},
@@ -589,7 +640,8 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
     C_ASSERT(sizeof(nt_create_fn) == 8 && sizeof(nt_info_fn) == 8 && sizeof(nt_query_fn) == 8 &&
              sizeof(nt_memory_fn) == 8 && sizeof(nt_open_token_fn) == 8 && sizeof(nt_open_token_ex_fn) == 8 &&
              sizeof(nt_duplicate_fn) == 8 && sizeof(nt_resume_fn) == 8 && sizeof(csr_call_fn) == 8 &&
-             sizeof(nt_terminate_fn) == 8 && sizeof(nt_error_fn) == 8 && sizeof(set_last_error_fn) == 8);
+             sizeof(nt_terminate_fn) == 8 && sizeof(nt_error_fn) == 8 && sizeof(set_last_error_fn) == 8 &&
+             sizeof(nt_open_key_fn) == 8 && sizeof(nt_query_value_fn) == 8);
     for (SIZE_T i = 0; i < sizeof(imports) / sizeof(imports[0]); i++) {
         for (SIZE_T j = 0; j < sizeof(native_modules) / sizeof(native_modules[0]); j++) {
             struct native_import_slot *slot = &imports[i].slots[j];

@@ -295,13 +295,22 @@ expanded imports. All four Unix lanes and API documentation checks pass. Error 5
 still blocks Windows E2E. Earlier last-NT-status readings were not reset before
 launch and may include a previous error; they do not identify the failing call.
 
-The failure-only probe now resets both last-error fields before each launch and
-records error setters/converters and termination, including the caller's module
-and relative address. This distinguishes error propagation from cleanup without
-printing process memory or absolute addresses. Call arguments, output buffers and
-results remain unchanged, and the private import mappings are restored. No host
-object ACLs, capabilities or production launch behavior change. The original
-descendant failure remains mandatory; Windows support is unverified.
+Run 34896088686 resets both last-error fields and observes KernelBase converting
+`STATUS_ACCESS_DENIED` to error 5 before terminating the suspended child. All
+native builds, four Unix lanes and API documentation checks pass; Windows E2E
+still stops at descendant creation.
+
+Matching Microsoft symbol-server binaries identify a possible failing SxS step:
+Kernel32 queries extended process information, then reads the SideBySide registry
+key's `PreferExternalManifest` setting. Access denied propagates; a missing key or
+path does not. This static path is a hypothesis, not an observed failing call.
+
+The failure-only probe now observes registry opens and value queries through both
+Nt/Zw import aliases, plus the process-query caller. It records status, access mask
+and relative caller address, not registry names or values. Call arguments, output
+buffers and results remain unchanged, and the private import mappings are
+restored. No host object ACLs, capabilities or production launch behavior change.
+The original descendant failure remains mandatory; Windows support is unverified.
 
 `GetAppContainerFolderPath` returns local application data beneath the profile,
 not its root. Test cleanup validates the generated parent name and exact SID;
