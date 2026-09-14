@@ -387,6 +387,18 @@ class _BlockCapture(io.StringIO):
         return written
 
 
+def _capture_block(source, namespace, runner):
+    """Capture either block runner without changing its execution context."""
+    stream = _BlockCapture(namespace.get("__vis_capture_stdout__"))
+    error = None
+    with contextlib.redirect_stdout(stream):
+        try:
+            runner(source)
+        except BaseException as exc:
+            error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    return {"stdout": stream.getvalue(), "error": error}
+
+
 def run_block(source, namespace):
     """Run `source` the way `python_execution` runs a BLOCK.
 
@@ -409,15 +421,29 @@ def run_block(source, namespace):
         runner = namespace.get("__vis_run_async__")
     if runner is None:
         raise RuntimeError("session is not equipped: install(namespace) first")
-    source = rewrite_imports(source, namespace)
-    stream = _BlockCapture(namespace.get("__vis_capture_stdout__"))
-    error = None
-    with contextlib.redirect_stdout(stream):
+    return _capture_block(rewrite_imports(source, namespace), namespace, runner)
+
+
+def run_sync_block(source, namespace):
+    """Run module-style source with the same stdout/error capture as `run_block`.
+
+    Call through the synchronous `run` transport, not inside an async block.
+    Execution stays on the calling interpreter thread, so module code can own
+    an asyncio event loop. Unlike an async block, imports and module statements
+    are not rewritten and a trailing expression is discarded. Process policy,
+    host callbacks and write flushing remain in force.
+    """
+    if namespace.get("__vis_run_async__") is None:
+        install(namespace)
+    flush = namespace["__vis_flush_writes__"]
+
+    def execute(source):
         try:
-            runner(source)
-        except BaseException as exc:
-            error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-    return {"stdout": stream.getvalue(), "error": error}
+            exec(compile(source, "<vis>", "exec"), namespace)
+        finally:
+            flush()
+
+    return _capture_block(source, namespace, execute)
 
 
 def close_session(name):

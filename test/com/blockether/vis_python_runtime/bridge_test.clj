@@ -4,7 +4,8 @@
    data. Requires `native/vispython/build.sh` to have run — `resources/prebuilds/`
    is build output, so a checkout without it has no library to bind and the
    suite says so instead of pretending to pass."
-  (:require [clojure.string :as str]
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [com.blockether.vis-python-runtime :as runtime])
   (:import [com.blockether.vispython VisPythonException]))
@@ -98,3 +99,91 @@
         (testing "the kept answer is handed over once, never served to the next call"
           (is (= "\"ok\"" (runtime/run "big-session" "'ok'")))
           (is (= "3" (runtime/run "big-session" "1 + 2")))))))
+
+(defn- sync-block
+  [session source]
+  (json/read-str
+    (runtime/run session
+                 (str "__import__('vis_runtime').run_sync_block(" (pr-str source) ", globals())"))))
+
+(deftest synchronous-block-test
+  ;; JVM/SDK dogfooding: modules using asyncio.run must own their event loop.
+  (if-not built?
+    (println "SKIP synchronous-block-test - no cdylib")
+    (do (runtime/initialize!)
+        (let [session "sync-block-session"]
+          (runtime/install-runtime! session)
+          (try (runtime/exec! session "import threading\nexpected_thread = threading.get_ident()")
+               (testing "module code owns asyncio on the same interpreter thread"
+                 (let [source (str "import asyncio, threading\n"
+                                   "async def compute():\n" "    await asyncio.sleep(0)\n"
+                                   "    return threading.get_ident() == expected_thread\n"
+                                   "print('module-result', asyncio.run(compute()))\n")
+                       answer (sync-block session (str "exec(" (pr-str source) ", globals())"))]
+
+                   (is (nil? (get answer "error")) (pr-str answer))
+                   (is (= "module-result True\n" (get answer "stdout")))))
+               (testing "printed output survives a failure and errors stay data"
+                 (is (= {"stdout" "before-error\n" "error" "ValueError: sync failure"}
+                        (sync-block session
+                                    "print('before-error')\nraise ValueError('sync failure')"))))
+               (testing "ordinary top-level await still works afterward"
+                 (let [answer (json/read-str
+                                (runtime/run-block
+                                  session
+                                  "import asyncio\nawait asyncio.sleep(0)\nprint('async-ok')"))]
+                   (is (nil? (get answer "error")) (pr-str answer))
+                   (is (= "async-ok\n" (get answer "stdout")))))
+               (finally (runtime/close-session! session)))))))
+
+(deftest synchronous-block-boundary-test
+  (if-not built?
+    (println "SKIP synchronous-block-boundary-test - no cdylib")
+    (do
+      (runtime/initialize!)
+      (let [session
+            "sync-block-boundary-session"
+
+            calls
+            (atom [])
+
+            file
+            (java.io.File/createTempFile "vis-sync-block-" ".txt")]
+
+        (runtime/install-runtime! session)
+        (runtime/bind-host! (fn [caller name _payload]
+                              (swap! calls conj [caller name])
+                              (json/write-str {"value" "host-ok"})))
+        (try (runtime/install-sync-tool! session "sync_probe")
+             (testing "callbacks retain the calling session"
+               (is (= {"stdout" "host-ok\n" "error" nil}
+                      (sync-block session "print(sync_probe())")))
+               (is (= [[session "sync_probe"]] @calls)))
+             (testing "the optional stdout sink sees the same writes"
+               (runtime/exec! session
+                              "capture_events = []\n__vis_capture_stdout__ = capture_events.append")
+               (is (= {"stdout" "captured\n" "error" nil} (sync-block session "print('captured')")))
+               (is (= "captured\n" (json/read-str (runtime/run session "''.join(capture_events)"))))
+               (runtime/exec! session "del __vis_capture_stdout__"))
+             (testing "an unclosed writer flushes even after a failure"
+               (let [answer (sync-block session
+                                        (str "held_writer = open("
+                                             (pr-str (.getPath file))
+                                             ", 'w')\n"
+                                             "held_writer.write('flushed')\n"
+                                             "raise ValueError('after-write')"))]
+                 (is (= "ValueError: after-write" (get answer "error")))
+                 (is (= "flushed" (slurp file)))))
+             (testing "syntax errors and SystemExit use the same captured error shape"
+               (is (str/starts-with? (get (sync-block session "if") "error") "SyntaxError:"))
+               (is (= {"stdout" "before-exit\n" "error" "SystemExit: 7"}
+                      (sync-block session "print('before-exit')\nraise SystemExit(7)"))))
+             (testing "only printed output crosses, including output larger than the ABI buffer"
+               (is (= {"stdout" "" "error" nil} (sync-block session "1234")))
+               (let [answer (sync-block session "print('x' * 12000)")]
+                 (is (nil? (get answer "error")))
+                 (is (= (str (apply str (repeat 12000 "x")) "\n") (get answer "stdout")))))
+             (finally (runtime/exec! session "globals().get('held_writer') and held_writer.close()")
+                      (runtime/close-session! session)
+                      (runtime/bind-host! nil)
+                      (.delete file)))))))
