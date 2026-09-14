@@ -265,6 +265,51 @@ static void network_check(int argc, wchar_t **argv) {
     WSACleanup();
 }
 
+/* Failure-only inspection; never changes process policy, tokens or file permissions. */
+static void child_diagnostics(const wchar_t *executable) {
+    PROCESS_MITIGATION_CHILD_PROCESS_POLICY policy = {0};
+    HANDLE image, mapping, self, token = NULL;
+    BOOL queried;
+    DWORD size = 0;
+    TOKEN_DEFAULT_DACL *dacl = NULL;
+    SetLastError(ERROR_SUCCESS);
+    queried = GetProcessMitigationPolicy(GetCurrentProcess(), ProcessChildProcessPolicy, &policy, sizeof(policy));
+    printf("DESCENDANT_POLICY_QUERY=%d FLAGS=%lu ERROR=%lu\n", queried, policy.Flags, GetLastError());
+    SetLastError(ERROR_SUCCESS);
+    self = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
+    printf("DESCENDANT_SELF_ALL_ACCESS=%d ERROR=%lu\n", self != NULL, GetLastError());
+    if (self) CloseHandle(self);
+    SetLastError(ERROR_SUCCESS);
+    image = CreateFileW(executable, GENERIC_READ | GENERIC_EXECUTE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    printf("DESCENDANT_IMAGE_OPEN=%d ERROR=%lu\n", image != INVALID_HANDLE_VALUE, GetLastError());
+    if (image != INVALID_HANDLE_VALUE) {
+        SetLastError(ERROR_SUCCESS);
+        mapping = CreateFileMappingW(image, NULL, PAGE_EXECUTE_READ | SEC_IMAGE, 0, 0, NULL);
+        printf("DESCENDANT_IMAGE_MAPPING=%d ERROR=%lu\n", mapping != NULL, GetLastError());
+        if (mapping) CloseHandle(mapping);
+        CloseHandle(image);
+    }
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        GetTokenInformation(token, TokenDefaultDacl, NULL, 0, &size);
+        dacl = malloc(size);
+        if (dacl && GetTokenInformation(token, TokenDefaultDacl, dacl, size, &size)) {
+            SECURITY_DESCRIPTOR descriptor;
+            LPWSTR text = NULL;
+            if (InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) &&
+                SetSecurityDescriptorDacl(&descriptor, TRUE, dacl->DefaultDacl, FALSE) &&
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(&descriptor, SDDL_REVISION_1,
+                                                                      DACL_SECURITY_INFORMATION, &text, NULL)) {
+                printf("DESCENDANT_DEFAULT_DACL=%ls\n", text);
+                LocalFree(text);
+            } else printf("DESCENDANT_DEFAULT_DACL_ERROR=%lu\n", GetLastError());
+        } else printf("DESCENDANT_DEFAULT_DACL_QUERY_ERROR=%lu\n", GetLastError());
+        free(dacl);
+        CloseHandle(token);
+    } else printf("DESCENDANT_TOKEN_OPEN_ERROR=%lu\n", GetLastError());
+}
+
 static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
     wchar_t executable[32768], command[32768];
     STARTUPINFOW startup;
@@ -282,42 +327,9 @@ static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
         if (spawned) TerminateProcess(process.hProcess, 99);
     } else {
         if (!spawned) {
-            /* CI 34878855420: preserve the failure while distinguishing launch prerequisites. */
+            /* CI 34880164527 ruled out console flags and handle inheritance. */
             DWORD original_error = GetLastError();
-            const DWORD access[] = {PROCESS_CREATE_PROCESS, PROCESS_DUP_HANDLE};
-            for (int i = 0; i < 2; i++) {
-                HANDLE self;
-                SetLastError(ERROR_SUCCESS);
-                self = OpenProcess(access[i], FALSE, GetCurrentProcessId());
-                printf("DESCENDANT_SELF_ACCESS=%lu OPEN=%d ERROR=%lu\n", access[i], self != NULL, GetLastError());
-                if (self) CloseHandle(self);
-            }
-            for (int i = 0; i < 3; i++) {
-                STARTUPINFOW diagnostic_startup = {0};
-                PROCESS_INFORMATION diagnostic_process = {0};
-                DWORD diagnostic_flags = flags | (i == 1 ? 0 : CREATE_NO_WINDOW);
-                BOOL inherit = i == 0;
-                DWORD error, result = STILL_ACTIVE, waited = WAIT_FAILED;
-                BOOL started;
-                diagnostic_startup.cb = sizeof(diagnostic_startup);
-                swprintf_s(command, 32768, L"\"%ls\" token", executable);
-                SetLastError(ERROR_SUCCESS);
-                started = CreateProcessW(executable, command, NULL, NULL, inherit, diagnostic_flags,
-                                        NULL, NULL, &diagnostic_startup, &diagnostic_process);
-                error = GetLastError();
-                if (started) {
-                    waited = WaitForSingleObject(diagnostic_process.hProcess, 10000);
-                    if (waited != WAIT_OBJECT_0) {
-                        TerminateProcess(diagnostic_process.hProcess, 99);
-                        WaitForSingleObject(diagnostic_process.hProcess, 1000);
-                    }
-                    GetExitCodeProcess(diagnostic_process.hProcess, &result);
-                    CloseHandle(diagnostic_process.hThread);
-                    CloseHandle(diagnostic_process.hProcess);
-                }
-                printf("DESCENDANT_CREATE_FLAGS=%lu INHERIT=%d STARTED=%d ERROR=%lu WAIT=%lu EXIT=%lu\n",
-                       diagnostic_flags, inherit, started, error, waited, result);
-            }
+            child_diagnostics(executable);
             SetLastError(original_error);
         }
         check(spawned, "confined descendant starts");

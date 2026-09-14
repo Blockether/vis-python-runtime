@@ -263,11 +263,12 @@ Windows CI run 34878855420 verifies minimal process launch, the effective LPAC
 access mask (`2`), validation and staging stress. The private profile subtree
 exists before launch; the corrected profile-path checks, temporary-file
 create/write/delete, staged read-only inputs and host/sibling/profile/temporary
-file denials pass. The next failure is ordinary descendant creation:
-`CreateProcessW` returns Windows error 5. A failure-only comparison now checks
-self-process creation/duplication rights, handle inheritance and console
-creation flags while retaining the original failure. No process, token, pipe,
-network or host-file permissions have been loosened.
+file denials pass. Ordinary descendant creation still returns Windows error 5.
+Run 34880164527 confirms self-process creation/duplication rights are available;
+console and handle-inheritance variants fail identically. The next failure-only
+inspection checks child mitigation policy, staged image read/execute and mapping,
+and the default token DACL. The original failure remains mandatory. No process,
+token, pipe, network or host-file permissions have been loosened.
 
 `GetAppContainerFolderPath` returns local application data beneath the profile,
 not its root. Test cleanup validates the generated parent name and exact SID;
