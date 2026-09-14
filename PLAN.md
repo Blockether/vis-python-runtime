@@ -259,12 +259,12 @@ the documentation checks. Local formatting, lint and PowerShell analysis pass;
 read-only review findings on source pinning and process/ConPTY lifetimes have
 been addressed.
 
-Windows CI run 34866779569 still reports missing environment data (error 203)
-at the first `CreateProcessW` call. Profile registration and OS-derived
-`SystemRoot` alone are insufficient. A failure-only probe now compares the
-AppContainer-required `LOCALAPPDATA` using the host known-folder value and the
-private temporary directory, without inheriting the whole host environment or
-accepting a diagnostic success as a passing suite. Windows execution remains
-pending. LPAC/ACL enforcement, network denial, ConPTY, native-image launcher
-downcalls and extracted-archive checks remain unverified. No Windows confinement
-support or release completion is claimed until those checks pass.
+Windows CI run 34867914035 executes the guest when `LOCALAPPDATA` is supplied,
+including when it points to the private temporary directory. The launcher now
+reserves that private value instead of copying the host folder. AppContainer,
+low-integrity, capability and job checks ran; the combined LPAC token query
+assertion failed. Its replacement tests the kernel access distinction between
+all-application and restricted-application package grants, rather than inferring
+confinement from a query failure. Full Windows LPAC/ACL, network, ConPTY,
+native-image launcher and extracted-archive verification remains pending.
+No Windows confinement support or release completion is claimed yet.

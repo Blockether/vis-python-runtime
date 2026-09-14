@@ -32,7 +32,7 @@ Each context creates three directories:
 |---|---|---|
 | `app` | Read and execute after sealing | Copies of programs and read-only inputs |
 | `work` | Read and write | Task inputs that may change, plus results |
-| `tmp` | Read and write | Private temporary files; used for `TEMP` and `TMP` |
+| `tmp` | Read and write | Private temporary files and application data (`TEMP`, `TMP`, `LOCALAPPDATA`) |
 
 `stage` copies contents, not security descriptors. It leaves the source files and
 ACLs unchanged, rejects links and reparse points, and never overwrites a staged
@@ -96,11 +96,12 @@ application while guests are running.
 
 The environment is **complete**, not additions to the host environment. Pass
 only the values the program needs; an empty map is valid. The launcher supplies
-three reserved values: `TEMP` and `TMP` point to the private temporary directory,
-and `SystemRoot` comes from Windows itself so the OS can initialize the process.
-Caller values cannot override these, even with different capitalization. No
-other host environment values are copied, and an environment marker cannot
-bypass Windows confinement.
+four reserved values: `TEMP`, `TMP` and `LOCALAPPDATA` point to the private
+temporary directory, and `SystemRoot` comes from Windows itself. Windows needs
+`LOCALAPPDATA` and `SystemRoot` to initialize the confined process. Caller values
+cannot override these, even with different capitalization. No other host
+environment values are copied, and an environment marker cannot bypass Windows
+confinement.
 
 The working directory is relative to `work`; null/nil or an empty string means
 its root. It must exist. Dot components, device names and reparse-point paths

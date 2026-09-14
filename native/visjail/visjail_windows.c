@@ -942,8 +942,8 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     app = join(c->path, L"app"); work = join(c->path, L"work"); tmp = join(c->path, L"tmp");
     if (!app || !work || !tmp) goto fail;
     {
-        const wchar_t *keys[3] = {L"TEMP=", L"TMP=", L"SystemRoot="};
-        const wchar_t *values[3] = {tmp, tmp, system_root};
+        const wchar_t *keys[4] = {L"TEMP=", L"TMP=", L"SystemRoot=", L"LOCALAPPDATA="};
+        const wchar_t *values[4] = {tmp, tmp, system_root, tmp};
         wchar_t **expanded;
         UINT windows_length;
         operation = "Read Windows directory for process environment";
@@ -951,10 +951,10 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
         if (!windows_length) goto fail;
         if (windows_length > MAX_PATH) { SetLastError(ERROR_INSUFFICIENT_BUFFER); goto fail; }
         operation = "Prepare private Windows environment";
-        expanded = realloc(env, ((size_t)envc + 3) * sizeof(*env));
+        expanded = realloc(env, ((size_t)envc + 4) * sizeof(*env));
         if (!expanded) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto fail; }
         env = expanded;
-        for (int k = 0; k < 3; k++) {
+        for (int k = 0; k < 4; k++) {
             size_t key_length = wcslen(keys[k]), value_length = wcslen(values[k]);
             int at;
             wchar_t *value = calloc(key_length + value_length + 1, sizeof(wchar_t));

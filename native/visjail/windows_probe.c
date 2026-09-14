@@ -51,18 +51,49 @@ static void system_root_check(void) {
           "SystemRoot is the OS-derived Windows directory");
 }
 
+/* Check effective LPAC access to both package groups, not just a token-information flag. */
+static void lpac_check(HANDLE token) {
+    HANDLE impersonation = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    GENERIC_MAPPING mapping = {0};
+    PRIVILEGE_SET initial = {0}, *privileges = &initial;
+    DWORD size = sizeof(initial), granted = 0;
+    BOOL allowed = FALSE, checked;
+    check(DuplicateToken(token, SecurityImpersonation, &impersonation), "duplicate LPAC token for access check");
+    if (!impersonation) return;
+    check(ConvertStringSecurityDescriptorToSecurityDescriptorW(
+              L"O:SYG:SYD:(A;;0x3;;;WD)(A;;0x1;;;S-1-15-2-1)(A;;0x2;;;S-1-15-2-2)",
+              SDDL_REVISION_1, &descriptor, NULL), "LPAC package access descriptor");
+    if (descriptor) {
+        checked = AccessCheck(descriptor, impersonation, MAXIMUM_ALLOWED, &mapping,
+            privileges, &size, &granted, &allowed);
+        if (!checked && GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+            privileges = malloc(size);
+            check(privileges != NULL, "LPAC access-check privilege buffer");
+            if (privileges) checked = AccessCheck(descriptor, impersonation, MAXIMUM_ALLOWED, &mapping,
+                privileges, &size, &granted, &allowed);
+        }
+        check(checked, "kernel LPAC access check");
+        if (checked) {
+            printf("LPAC_ACCESS=%lu\n", granted);
+            check(allowed && granted == 0x2, "LPAC allows restricted packages, not all application packages");
+        }
+        LocalFree(descriptor);
+    }
+    if (privileges != &initial) free(privileges);
+    CloseHandle(impersonation);
+}
+
 static void token_check(void) {
     HANDLE token = NULL;
     DWORD size = 0, value = 0;
     unsigned char data[4096];
     BOOL in_job = FALSE;
-    check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "open token");
+    check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &token), "open token");
     if (!token) return;
     check(GetTokenInformation(token, TokenIsAppContainer, &value, sizeof(value), &size)
           && value == 1, "AppContainer token");
-    value = 0;
-    check(GetTokenInformation(token, TokenIsLessPrivilegedAppContainer, &value, sizeof(value), &size)
-          && value == 1, "LPAC token");
+    lpac_check(token);
     if (GetTokenInformation(token, TokenIntegrityLevel, data, sizeof(data), &size)) {
         PSID integrity = ((TOKEN_MANDATORY_LABEL *)data)->Label.Sid;
         DWORD rid = *GetSidSubAuthority(integrity, (DWORD)*GetSidSubAuthorityCount(integrity) - 1);
@@ -566,11 +597,12 @@ int wmain(int argc, wchar_t **argv) {
             if (environment) {
                 for (const wchar_t *entry = environment; *entry; entry += wcslen(entry) + 1) {
                     check(!_wcsnicmp(entry, L"VIS_JAIL_TEST=", 14) || !_wcsnicmp(entry, L"TEMP=", 5) ||
-                          !_wcsnicmp(entry, L"TMP=", 4) || !_wcsnicmp(entry, L"SystemRoot=", 11),
+                          !_wcsnicmp(entry, L"TMP=", 4) || !_wcsnicmp(entry, L"SystemRoot=", 11) ||
+                          !_wcsnicmp(entry, L"LOCALAPPDATA=", 13),
                           "no unrelated environment entries");
                     count++;
                 }
-                check(count == 4, "explicit entry plus three reserved environment entries");
+                check(count == 5, "explicit entry plus four reserved environment entries");
                 FreeEnvironmentStringsW(environment);
             }
         }
@@ -578,6 +610,7 @@ int wmain(int argc, wchar_t **argv) {
               "private working directory");
         check(GetEnvironmentVariableW(L"TEMP", value, 32768) && _wcsicmp(value, argv[3]) == 0, "private TEMP");
         check(GetEnvironmentVariableW(L"TMP", value, 32768) && _wcsicmp(value, argv[3]) == 0, "private TMP");
+        check(GetEnvironmentVariableW(L"LOCALAPPDATA", value, 32768) && _wcsicmp(value, argv[3]) == 0, "private LOCALAPPDATA");
     } else if (wcscmp(argv[1], L"pty") == 0) {
         CONSOLE_SCREEN_BUFFER_INFO info = {0};
         DWORD mode, count = 0;
