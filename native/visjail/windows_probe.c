@@ -5,6 +5,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <winternl.h>
 #include <aclapi.h>
 #include <sddl.h>
 #include <userenv.h>
@@ -108,8 +109,29 @@ static void token_check(void) {
         DWORD rid = *GetSidSubAuthority(integrity, (DWORD)*GetSidSubAuthorityCount(integrity) - 1);
         check(rid == SECURITY_MANDATORY_LOW_RID, "low mandatory integrity");
     } else check(0, "query mandatory integrity");
-    check(GetTokenInformation(token, TokenCapabilities, data, sizeof(data), &size)
-          && ((TOKEN_GROUPS *)data)->GroupCount == 0, "no network or ambient capabilities");
+    {
+        PSID *groups = NULL, *capabilities = NULL;
+        DWORD group_count = 0, capability_count = 0;
+        BOOL derived = DeriveCapabilitySidsFromName(L"registryRead", &groups, &group_count,
+                                                   &capabilities, &capability_count);
+        BOOL expected = derived && capability_count == 1 && capabilities && capabilities[0]
+                        && IsValidSid(capabilities[0]);
+        check(expected, "derive exact registryRead capability");
+        if (expected) {
+            BOOL queried = GetTokenInformation(token, TokenCapabilities, data, sizeof(data), &size);
+            TOKEN_GROUPS *actual = (TOKEN_GROUPS *)data;
+            BOOL exact = queried && actual->GroupCount == 1
+                         && actual->Groups[0].Attributes == SE_GROUP_ENABLED
+                         && EqualSid(actual->Groups[0].Sid, capabilities[0]);
+            if (queried && !exact) printf("CAPABILITY_COUNT=%lu ATTRIBUTES=%08lx\n", actual->GroupCount,
+                                         actual->GroupCount ? actual->Groups[0].Attributes : 0UL);
+            check(exact, "only enabled registryRead capability, no network or ambient capabilities");
+        }
+        if (groups) for (DWORD i = 0; i < group_count; i++) LocalFree(groups[i]);
+        if (capabilities) for (DWORD i = 0; i < capability_count; i++) LocalFree(capabilities[i]);
+        LocalFree(groups);
+        LocalFree(capabilities);
+    }
     if (GetTokenInformation(token, TokenAppContainerSid, data, sizeof(data), &size)) {
         LPWSTR sid = NULL;
         if (ConvertSidToStringSidW(((TOKEN_APPCONTAINER_INFORMATION *)data)->TokenAppContainer, &sid)) {
@@ -820,6 +842,203 @@ static void protected_file(const wchar_t *path) {
     CloseHandle(token);
 }
 
+/* Absolute native names bypass predefined Win32 handles and HKCU redirection. */
+static void registry_native(HKEY root, const wchar_t *path, ACCESS_MASK access, LONG expected, const char *label) {
+    wchar_t absolute[560];
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attributes;
+    HANDLE key = NULL;
+    nt_open_key_fn open_key = NULL;
+    LONG (__stdcall *close_key)(HANDLE) = NULL;
+    HMODULE module = GetModuleHandleW(L"ntdll.dll");
+    FARPROC address = module ? GetProcAddress(module, "NtOpenKey") : NULL;
+    FARPROC close_address = module ? GetProcAddress(module, "NtClose") : NULL;
+    LONG status;
+    int length = _snwprintf_s(absolute, 560, _TRUNCATE, L"\\Registry\\%ls\\%ls",
+                             root == HKEY_LOCAL_MACHINE ? L"Machine" : L"User", path);
+    check(address && close_address, "native registry interfaces available");
+    check(length >= 0, "bounded absolute native registry path");
+    if (!address || !close_address || length < 0) return;
+    memcpy(&open_key, &address, sizeof(open_key));
+    memcpy(&close_key, &close_address, sizeof(close_key));
+    name.Length = (USHORT)((size_t)length * sizeof(wchar_t));
+    name.MaximumLength = (USHORT)sizeof(absolute);
+    name.Buffer = absolute;
+    ZeroMemory(&attributes, sizeof(attributes));
+    attributes.Length = sizeof(attributes);
+    attributes.ObjectName = &name;
+    attributes.Attributes = OBJ_CASE_INSENSITIVE;
+    status = open_key(&key, access, &attributes);
+    if (status != expected) printf("NATIVE_REGISTRY_STATUS=%08lx ACCESS=%08lx\n", (unsigned long)status, access);
+    check(status == expected, label);
+    check(status != 0 || key != NULL, "native registry open returns a handle on success");
+    if (key) check(close_key(key) == 0, "close native registry handle");
+}
+
+/* Host handles retain ownership until the Java driver finishes, including failures. */
+typedef struct RegistryFixture {
+    HKEY root, key;
+    wchar_t path[512];
+    DWORD expected;
+    int owned;
+} RegistryFixture;
+
+static void registry_unchanged(HKEY key, DWORD expected) {
+    DWORD value = 0, type = 0, size = sizeof(value), subkeys = 0, values = 0;
+    check(RegQueryValueExW(key, L"sentinel", NULL, &type, (BYTE *)&value, &size) == ERROR_SUCCESS
+          && type == REG_DWORD && size == sizeof(value) && value == expected,
+          "private registry fixture value unchanged");
+    check(RegQueryInfoKeyW(key, NULL, NULL, NULL, &subkeys, NULL, NULL, &values,
+                          NULL, NULL, NULL, NULL) == ERROR_SUCCESS && subkeys == 0 && values == 1,
+          "private registry fixture contains only its original value");
+}
+
+static void registry_host(int machine) {
+    RegistryFixture fixtures[3] = {0};
+    HANDLE token = NULL;
+    BYTE data[4096];
+    DWORD size = 0, appcontainer = 1;
+    GUID guid;
+    wchar_t unique[40], sddl[512];
+    LPWSTR sid = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    SECURITY_ATTRIBUTES attributes = {sizeof(attributes), NULL, FALSE};
+    int count = machine ? 3 : 2;
+    check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "registry fixture host token");
+    if (!token) goto done;
+    check(GetTokenInformation(token, TokenIsAppContainer, &appcontainer, sizeof(appcontainer), &size)
+          && appcontainer == 0, "registry fixture setup is host-only");
+    if (failures) goto done;
+    check(GetTokenInformation(token, TokenUser, data, sizeof(data), &size), "registry fixture host user");
+    if (failures) goto done;
+    check(ConvertSidToStringSidW(((TOKEN_USER *)data)->User.Sid, &sid), "registry fixture user identity");
+    check(SUCCEEDED(CoCreateGuid(&guid)) && StringFromGUID2(&guid, unique, 40) > 0,
+          "unique registry fixture name");
+    if (failures) goto done;
+    swprintf_s(sddl, 512, L"D:P(A;;KA;;;%ls)(A;;KA;;;SY)", sid);
+    check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, NULL),
+          "private registry fixture descriptor");
+    if (failures) goto done;
+    attributes.lpSecurityDescriptor = descriptor;
+    for (int i = 0; i < count; i++) {
+        DWORD disposition = 0;
+        LSTATUS status;
+        HKEY parent = NULL;
+        wchar_t parent_path[256], leaf[80];
+        RegistryFixture *fixture = &fixtures[i];
+        fixture->root = i == 2 ? HKEY_LOCAL_MACHINE : HKEY_USERS;
+        if (i == 2) wcscpy_s(parent_path, 256, L"Software");
+        else swprintf_s(parent_path, 256, L"%ls\\Software", sid);
+        swprintf_s(leaf, 80, L"visjail.registry.%ls-%d", unique, i);
+        swprintf_s(fixture->path, 512, L"%ls\\%ls", parent_path, leaf);
+        check(RegOpenKeyExW(fixture->root, parent_path, 0, KEY_CREATE_SUB_KEY | KEY_WOW64_64KEY,
+                            &parent) == ERROR_SUCCESS, "open existing registry fixture parent");
+        if (!parent) goto done;
+        status = RegCreateKeyExW(parent, leaf, 0, NULL, REG_OPTION_VOLATILE,
+                                KEY_ALL_ACCESS | KEY_WOW64_64KEY, i == 0 ? NULL : &attributes,
+                                &fixture->key, &disposition);
+        RegCloseKey(parent);
+        fixture->owned = status == ERROR_SUCCESS && disposition == REG_CREATED_NEW_KEY;
+        check(fixture->owned, "create a new registry fixture, never reuse a collision");
+        if (!fixture->owned) goto done;
+        fixture->expected = 0x51a17u + (DWORD)i;
+        check(RegSetValueExW(fixture->key, L"sentinel", 0, REG_DWORD,
+                            (const BYTE *)&fixture->expected, sizeof(fixture->expected)) == ERROR_SUCCESS,
+              "initialize synthetic registry fixture");
+        if (failures) goto done;
+        registry_native(fixture->root, fixture->path, KEY_READ, 0, "host opens the exact native registry fixture");
+        if (failures) goto done;
+    }
+    /* The guest uses these exact HKU paths, not its redirected HKCU view. */
+    for (int i = 0; i < count; i++) printf("REGISTRY_PATH=%ls\n", fixtures[i].path);
+    printf("REGISTRY_READY\n");
+    fflush(stdout);
+    {
+        HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+        ULONGLONG deadline = GetTickCount64() + 60000;
+        DWORD available = 0, read = 0;
+        char signal = 0;
+        BOOL signaled = FALSE;
+        while (GetTickCount64() < deadline) {
+            if (!PeekNamedPipe(input, NULL, 0, NULL, &available, NULL)) break;
+            if (available) {
+                signaled = ReadFile(input, &signal, 1, &read, NULL) && read == 1 && signal == 'q';
+                break;
+            }
+            Sleep(10);
+        }
+        check(signaled, "registry fixture driver completed within watchdog");
+    }
+done:
+    for (int i = 0; i < count; i++) {
+        RegistryFixture *fixture = &fixtures[i];
+        if (fixture->owned) {
+            HKEY reopened = NULL;
+            registry_unchanged(fixture->key, fixture->expected);
+            check(RegOpenKeyExW(fixture->root, fixture->path, 0, KEY_READ | KEY_WOW64_64KEY,
+                                &reopened) == ERROR_SUCCESS,
+                  "host reopens the exact existing key targeted by the guest");
+            if (reopened) { registry_unchanged(reopened, fixture->expected); RegCloseKey(reopened); }
+            check(RegDeleteKeyExW(fixture->root, fixture->path, KEY_WOW64_64KEY, 0) == ERROR_SUCCESS,
+                  "remove only the registry leaf created by this test");
+        }
+        if (fixture->key) RegCloseKey(fixture->key);
+        if (fixture->owned) {
+            HKEY absent = NULL;
+            check(RegOpenKeyExW(fixture->root, fixture->path, 0, KEY_READ | KEY_WOW64_64KEY,
+                                &absent) == ERROR_FILE_NOT_FOUND, "owned registry fixture deletion completed");
+            if (absent) RegCloseKey(absent);
+        }
+    }
+    LocalFree(descriptor);
+    LocalFree(sid);
+    if (token) CloseHandle(token);
+}
+
+static void registry_denied(HKEY root, const wchar_t *path, REGSAM access, const char *label) {
+    HKEY key = NULL;
+    LSTATUS status = RegOpenKeyExW(root, path, 0, access | KEY_WOW64_64KEY, &key);
+    if (status != ERROR_ACCESS_DENIED) printf("REGISTRY_OPEN_STATUS=%ld\n", status);
+    check(status == ERROR_ACCESS_DENIED, label);
+    if (key) RegCloseKey(key);
+    registry_native(root, path, access, (LONG)0xc0000022UL, label);
+}
+
+static void registry_check(int argc, wchar_t **argv) {
+    const wchar_t *sxs = L"Software\\Microsoft\\Windows\\CurrentVersion\\SideBySide";
+    HKEY key = NULL;
+    LSTATUS open_status;
+    check(argc == 4 || argc == 5, "registry guest arguments");
+    if (argc != 4 && argc != 5) return;
+    token_check();
+    registry_native(HKEY_LOCAL_MACHINE, sxs, KEY_READ, 0, "native SxS initialization key read");
+    open_status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, sxs, 0, KEY_READ | KEY_WOW64_64KEY, &key);
+    if (open_status != ERROR_SUCCESS) printf("SXS_OPEN_STATUS=%ld\n", open_status);
+    check(open_status == ERROR_SUCCESS, "registryRead allows actual SxS initialization key read");
+    if (key) {
+        DWORD size = 0;
+        LSTATUS status = RegQueryValueExW(key, L"PreferExternalManifest", NULL, NULL, NULL, &size);
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) printf("SXS_QUERY_STATUS=%ld\n", status);
+        check(status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND,
+              "SxS setting query succeeds or the optional value is absent");
+        RegCloseKey(key);
+    }
+    registry_denied(HKEY_LOCAL_MACHINE, sxs, KEY_SET_VALUE, "system registry value write denied");
+    registry_denied(HKEY_LOCAL_MACHINE, sxs, KEY_CREATE_SUB_KEY, "system registry subkey creation denied");
+    for (int i = 2; i < argc; i++) {
+        HKEY root = i == 4 ? HKEY_LOCAL_MACHINE : HKEY_USERS;
+        printf("REGISTRY_FIXTURE=%d\n", i - 2);
+        registry_denied(root, argv[i], KEY_READ, "private host registry read denied, not missing");
+        registry_denied(root, argv[i], KEY_QUERY_VALUE, "private host registry value query denied");
+        registry_denied(root, argv[i], KEY_ENUMERATE_SUB_KEYS, "private host registry enumeration denied");
+        registry_denied(root, argv[i], KEY_SET_VALUE, "private host registry value write denied");
+        registry_denied(root, argv[i], KEY_CREATE_SUB_KEY, "private host registry subkey creation denied");
+        registry_denied(root, argv[i], WRITE_DAC, "private host registry DACL replacement denied");
+        registry_denied(root, argv[i], WRITE_OWNER, "private host registry ownership change denied");
+        registry_denied(root, argv[i], DELETE, "private host registry deletion denied");
+    }
+}
+
 static void junction(const wchar_t *path, const wchar_t *target) {
     struct {
         DWORD tag;
@@ -1062,6 +1281,10 @@ int wmain(int argc, wchar_t **argv) {
     else if (wcscmp(argv[1], L"secret-handle") == 0) handle_check(argc, argv, 0);
     else if (wcscmp(argv[1], L"profile-path") == 0 && argc == 3) profile_check(argv[2], 0);
     else if (wcscmp(argv[1], L"profile-delete") == 0 && argc == 3) profile_check(argv[2], 1);
+    else if (wcscmp(argv[1], L"registry-host") == 0 && argc == 3 &&
+             (wcscmp(argv[2], L"machine") == 0 || wcscmp(argv[2], L"user") == 0))
+        registry_host(wcscmp(argv[2], L"machine") == 0);
+    else if (wcscmp(argv[1], L"registry") == 0) registry_check(argc, argv);
     else if (wcscmp(argv[1], L"token") == 0) token_check();
     else if (wcscmp(argv[1], L"security") == 0) security_check(argc, argv);
     else if (wcscmp(argv[1], L"denied-file") == 0 && argc == 3) {

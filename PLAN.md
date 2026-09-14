@@ -300,17 +300,26 @@ Run 34896088686 resets both last-error fields and observes KernelBase converting
 native builds, four Unix lanes and API documentation checks pass; Windows E2E
 still stops at descendant creation.
 
-Matching Microsoft symbol-server binaries identify a possible failing SxS step:
-Kernel32 queries extended process information, then reads the SideBySide registry
-key's `PreferExternalManifest` setting. Access denied propagates; a missing key or
-path does not. This static path is a hypothesis, not an observed failing call.
+Run 34898378805 observes the actual failing `NtOpenKey(KEY_READ)` call in
+Kernel32. Matching Microsoft symbol-server binaries map its caller to the
+SideBySide registry lookup during Win32 child initialization. Native process
+creation succeeds first; access denied from this lookup causes the later error 5
+and cleanup. All four Unix lanes and API documentation checks pass.
 
-The failure-only probe now observes registry opens and value queries through both
-Nt/Zw import aliases, plus the process-query caller. It records status, access mask
-and relative caller address, not registry names or values. Call arguments, output
-buffers and results remain unchanged, and the private import mappings are
-restored. No host object ACLs, capabilities or production launch behavior change.
-The original descendant failure remains mandatory; Windows support is unverified.
+The production candidate adds exactly the supported `registryRead` capability to
+each launch. Its SID is derived once per context and released on failure or
+successful close. Profile creation retains its separate private identity without
+adding shared capability grants. No network capability or existing host ACL is
+changed. This is not a SideBySide-only grant or an intrinsic read-only filter;
+the documentation describes the broader Windows ACL-based boundary.
+
+Regression coverage must verify the exact token SID and attributes, successful
+system initialization reads, denied system writes, and denied reads/writes of
+owned synthetic private host registry keys through both Win32 and native opens.
+Host controls verify the exact native names before guest execution. The existing
+untraced descendant, breakaway, sibling, filesystem and network checks remain
+mandatory. Windows execution of this candidate and the later E2E stages is still
+pending.
 
 `GetAppContainerFolderPath` returns local application data beneath the profile,
 not its root. Test cleanup validates the generated parent name and exact SID;

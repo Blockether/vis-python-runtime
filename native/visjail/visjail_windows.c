@@ -30,7 +30,7 @@ typedef struct Context {
     int id, sealed, poisoned;
     wchar_t *path;
     wchar_t profile[80];
-    PSID sid;
+    PSID sid, registry_read;
     HANDLE job;
     Pin *pins;
     struct Context *next;
@@ -313,6 +313,23 @@ static int delete_profile(const wchar_t *name, char *error, int error_cap) {
     return failure(error, error_cap, operation);
 }
 
+/* LPAC Win32 child initialization reads the system SideBySide registry key. */
+static PSID registry_read_capability(void) {
+    PSID *groups = NULL, *capabilities = NULL;
+    PSID result = NULL;
+    DWORD group_count = 0, count = 0, error = ERROR_SUCCESS;
+    if (!DeriveCapabilitySidsFromName(L"registryRead", &groups, &group_count, &capabilities, &count))
+        error = GetLastError();
+    else if (count != 1 || !capabilities || !capabilities[0] || !IsValidSid(capabilities[0]))
+        error = ERROR_INVALID_SID;
+    else { result = capabilities[0]; capabilities[0] = NULL; }
+    for (DWORD i = 0; groups && i < group_count; ++i) LocalFree(groups[i]);
+    for (DWORD i = 0; capabilities && i < count; ++i) LocalFree(capabilities[i]);
+    LocalFree(groups); LocalFree(capabilities);
+    if (!result) SetLastError(error ? error : ERROR_INVALID_SID);
+    return result;
+}
+
 int visjail_windows_create(const char *directory, char *error, int error_cap) {
     Context *c = calloc(1, sizeof(*c));
     wchar_t name[80], *app = NULL, *work = NULL, *tmp = NULL;
@@ -331,6 +348,8 @@ int visjail_windows_create(const char *directory, char *error, int error_cap) {
         FILE_SHARE_READ, 1);
     if (handle == INVALID_HANDLE_VALUE) goto fail;
     if (!empty_directory(c->path)) { SetLastError(ERROR_DIR_NOT_EMPTY); goto fail; }
+    c->registry_read = registry_read_capability();
+    if (!c->registry_read) { operation = "Derive registryRead capability"; goto fail; }
     if (BCryptGenRandom(NULL, random, sizeof(random), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
         SetLastError(ERROR_GEN_FAILURE); goto fail;
     }
@@ -369,7 +388,8 @@ fail:
             int cleanup = delete_profile(c->profile, error, error_cap);
             if (cleanup) result = cleanup;
         }
-        if (c->sid) FreeSid(c->sid); free(c->path); free(c);
+        if (c->sid) FreeSid(c->sid);
+        LocalFree(c->registry_read); free(c->path); free(c);
     }
 done:
     free(app); free(work); free(tmp);
@@ -830,7 +850,7 @@ int visjail_windows_destroy(int id) {
         AcquireSRWLockExclusive(&lock); c->next = contexts; contexts = c;
         ReleaseSRWLockExclusive(&lock); return result;
     }
-    FreeSid(c->sid); free(c->path); free(c);
+    FreeSid(c->sid); LocalFree(c->registry_read); free(c->path); free(c);
     return 0;
 }
 
@@ -939,6 +959,7 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     STARTUPINFOEXW startup;
     PROCESS_INFORMATION info;
     SECURITY_CAPABILITIES capabilities;
+    SID_AND_ATTRIBUTES registry_read;
     DWORD policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
     HPCON console = NULL;
     HRESULT hr;
@@ -1035,7 +1056,9 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     if (!InitializeProcThreadAttributeList(startup.lpAttributeList, 3, 0, &attribute_size)) {
         free(startup.lpAttributeList); startup.lpAttributeList = NULL; goto fail;
     }
+    registry_read.Sid = c->registry_read; registry_read.Attributes = SE_GROUP_ENABLED;
     ZeroMemory(&capabilities, sizeof(capabilities)); capabilities.AppContainerSid = c->sid;
+    capabilities.Capabilities = &registry_read; capabilities.CapabilityCount = 1;
     if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
             &capabilities, sizeof(capabilities), NULL, NULL) ||
         !UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,

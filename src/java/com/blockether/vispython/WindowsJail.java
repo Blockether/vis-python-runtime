@@ -25,9 +25,12 @@ import java.util.TreeMap;
  * low-privilege AppContainer identity can read and execute staged copies in
  * {@link #applicationDirectory()}, and write in {@link #workDirectory()} and
  * {@link #temporaryDirectory()}. Windows supplies its LPAC-accessible system
- * resources. No access is granted to the original input objects, and no host
- * tree is mounted or recursively granted permissions. The kernel enforces
- * access checks for child programs and their descendants.
+ * resources. The only capability is {@code registryRead}, needed for Win32 child
+ * initialization. Registry access follows existing Windows ACLs, not a per-key
+ * allowlist. The capability name does not prohibit writes granted by an object's
+ * ACL. Staging grants no access to the original input objects, and no host tree
+ * is mounted or recursively granted permissions. The kernel enforces access
+ * checks for child programs and their descendants.
  *
  * <p>Create a context, {@link #stage stage} programs and read-only inputs, then
  * {@link #spawn spawn} processes. The first spawn seals the application tree;

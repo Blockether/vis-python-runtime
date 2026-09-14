@@ -27,7 +27,7 @@ try {
     $library = Join-Path $out 'visjail.dll'
     & cl.exe /nologo /std:c11 /LD /MD /O2 /W4 /WX /D_CRT_SECURE_NO_WARNINGS `
         "/Fo$stage/visjail.obj" "/Fe$library" (Join-Path $PSScriptRoot 'visjail_windows.c') `
-        /link "/IMPLIB:$stage/visjail.lib" @exports advapi32.lib userenv.lib bcrypt.lib
+        /link "/IMPLIB:$stage/visjail.lib" @exports advapi32.lib userenv.lib bcrypt.lib onecoreuap.lib
     if (-not (Test-Path -LiteralPath $library -PathType Leaf)) { throw 'MSVC produced no visjail.dll' }
     Write-Output $library
 }

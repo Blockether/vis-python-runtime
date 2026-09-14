@@ -60,7 +60,10 @@ public final class WindowsJailProbe {
   }
 
   private static Result finish(Process process, byte[] input) throws Exception {
-    CompletableFuture<byte[]> out = drain(process.getInputStream());
+    return finish(process, input, drain(process.getInputStream()));
+  }
+
+  private static Result finish(Process process, byte[] input, CompletableFuture<byte[]> out) throws Exception {
     CompletableFuture<byte[]> err = drain(process.getErrorStream());
     CompletableFuture<Void> sent = new CompletableFuture<>();
     Thread.ofPlatform().daemon().start(() -> {
@@ -508,11 +511,63 @@ public final class WindowsJailProbe {
     System.out.println("PASS inherited handle isolation");
   }
 
+  private static String registryLine(InputStream stream) throws IOException {
+    StringBuilder line = new StringBuilder();
+    for (int count = 0; count < 1024; count++) {
+      int value = stream.read();
+      if (value < 0) throw new IOException("registry fixture host exited before readiness");
+      if (value == '\n') return line.toString();
+      if (value != '\r') line.append((char) value);
+    }
+    throw new IOException("registry fixture metadata exceeded its bound");
+  }
+
+  private static void registry(Path parent, Path guest, boolean machine) throws Exception {
+    Process host = new ProcessBuilder(guest.toString(), "registry-host", machine ? "machine" : "user").start();
+    Throwable failure = null;
+    CompletableFuture<List<String>> ready = new CompletableFuture<>();
+    // Hand stdout to the normal drainer only after the metadata reader has finished,
+    // including readiness failures; two readers must never race on the same pipe.
+    CompletableFuture<byte[]> output = ready.handle((paths, failed) -> drain(host.getInputStream()))
+        .thenCompose(result -> result);
+    try {
+      Thread.ofPlatform().daemon().start(() -> {
+        try {
+          List<String> paths = new ArrayList<>();
+          for (int i = 0; i < (machine ? 3 : 2); i++) {
+            String line = registryLine(host.getInputStream());
+            if (!line.startsWith("REGISTRY_PATH=")) throw new IOException("invalid registry fixture metadata");
+            paths.add(line.substring("REGISTRY_PATH=".length()));
+          }
+          if (!registryLine(host.getInputStream()).equals("REGISTRY_READY"))
+            throw new IOException("registry fixture readiness missing");
+          ready.complete(paths);
+        } catch (Throwable caught) { ready.completeExceptionally(caught); }
+      });
+      List<String> command = new ArrayList<>(List.of("registry"));
+      command.addAll(ready.get(10, TimeUnit.SECONDS));
+      try (WindowsJail jail = prepare(parent, guest)) {
+        passed(run(jail, command.toArray(String[]::new)), "real registry capability and private-host isolation");
+      }
+    } catch (Exception | AssertionError caught) {
+      failure = caught;
+      throw caught;
+    } finally {
+      try {
+        passed(finish(host, new byte[] {'q'}, output), "host verifies and removes its exact registry fixtures");
+      } catch (Exception | AssertionError cleanup) {
+        if (failure == null) throw cleanup;
+        failure.addSuppressed(cleanup);
+      }
+    }
+  }
+
   private static void standardChild(Path parent, Path guest) throws Exception {
     passed(finish(new ProcessBuilder(guest.toString(), "standard-token").start(), new byte[0]), "standard host token");
     try (WindowsJail jail = prepare(parent, guest)) {
       passed(run(jail, "token"), "standard user creates real LPAC jail");
     }
+    registry(parent, guest, false);
     check(System.getenv("VIS_JAIL_SECRET") != null, "standard parent has host-only environment fixture");
     argumentsAndStreams(parent, guest);
     System.out.println("PASS standard-user jail");
@@ -661,6 +716,7 @@ public final class WindowsJailProbe {
       stage("validation", () -> validation(parent, guest));
       stage("staging stress", () -> passed(
           finish(new ProcessBuilder(self("--staging-child", parent, guest)).start(), new byte[0]), "bounded staging stress"));
+      stage("registry", () -> registry(parent, guest, true));
       stage("filesystem", () -> filesystem(parent, guest));
       stage("streams", () -> argumentsAndStreams(parent, guest));
       stage("network", () -> network(parent, guest));

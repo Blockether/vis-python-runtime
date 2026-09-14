@@ -141,11 +141,18 @@ and registry storage, in addition to the retained workspace. Files in another
 context and private host files without LPAC access are not granted to it.
 
 Windows' existing LPAC-accessible system and public resources remain subject to
-their OS ACLs. This API does not provide a filtered drive namespace or replace
-Windows' global object-security model. Do not describe it as a path-based
-allowlist over the entire machine. It also does not protect against a compromised
-kernel, an administrator or the trusted host, and supplies no CPU, memory or disk
-quota.
+their OS ACLs. Each process receives exactly one capability, `registryRead`, so
+Win32 can initialize child processes and read system SideBySide settings. This
+enables registry access where Windows ACLs permit it, not just at that one key.
+The capability is **not a read-only filter**: an object's ACL can grant this SID
+write access too. Keep private data out of objects granted to this capability.
+See Microsoft's [AppContainer security model](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
+for how capabilities and ordinary user permissions combine.
+
+This API does not provide a filtered drive namespace or replace Windows' global
+object-security model. Do not treat it as a path-based allowlist over the entire
+machine. It also does not protect against a compromised kernel, an administrator
+or the trusted host, and supplies no CPU, memory or disk quota.
 
 These Unix `JailPolicy` features are **not supported** by this API:
 
@@ -167,7 +174,7 @@ Windows context functions declared in `native/visjail/visjail.h`, followed by th
 shared spawn and stream ABI. Context, process and stream IDs are opaque integers,
 not Windows HANDLE values; the PID query is descriptive, not a kill target.
 
-The Windows CI lane runs filesystem, token, network and process-lifecycle probes
-through both JVM and native-image **launchers**, then repeats them against the
-extracted platform archive. A compiled DLL or a native worker running as a guest
-alone is not treated as proof that this boundary works.
+The Windows CI lane runs filesystem, registry, token, network and process-lifecycle
+probes through both JVM and native-image **launchers**, then repeats them against
+the extracted platform archive. A compiled DLL or a native worker running as a
+guest alone is not treated as proof that this boundary works.
