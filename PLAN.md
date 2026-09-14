@@ -326,18 +326,19 @@ network probe accepts only explicit `WSAEACCES` at socket creation or
 connect/send; host TCP/UDP controls and zero-connection/packet checks pass for
 both IP families. All four Unix jobs and documentation checks pass.
 
-The terminal stage exposes redirected host handles in the child instead of
-ConPTY console handles. Microsoft terminal issue #11276 documents this behavior
-and the fix: use `STARTF_USESTDHANDLES` with null standard handles for ConPTY.
-The candidate sets that flag for both launch paths; only ordinary pipes fill
-the explicit handle slots. ConPTY still disables general handle inheritance,
-and no capability or host ACL changes.
+Run 34904408638 verifies the ConPTY correction from Microsoft terminal issue
+#11276: both launch paths use `STARTF_USESTDHANDLES`, with null standard handles
+for ConPTY. The redirected-parent regression passes all three console handles,
+the exact LPAC token, dimensions, input roundtrip and output capture. Active
+ConPTY backpressure cleanup and parent-crash cleanup also pass.
 
-The regression now always runs beneath a parent with redirected standard
-streams, not only on CI. It checks all three console handles, the exact LPAC
-token, dimensions, input roundtrip and captured output, followed by existing
-termination checks.
+The inherited-handle host control proves the synthetic secret is readable in
+the deliberately inheriting host. The confined guest then exits with
+`STATUS_INVALID_HANDLE` while probing the noninherited handle. The test now
+accepts that exact exception only around the guest handle-type query; any other
+exception and all host-control exceptions remain failures. It still checks
+that the guest cannot read the sentinel. No production policy is changed.
 
-ConPTY, crash cleanup, inherited-handle and nonadministrator-host checks, stock
-Python/native worker, native-image launcher execution and extracted-archive
-verification remain pending. No Windows release completion is claimed yet.
+Inherited-handle completion, nonadministrator-host checks, stock Python/native
+worker, native-image launcher execution and extracted-archive verification
+remain pending. No Windows release completion is claimed yet.

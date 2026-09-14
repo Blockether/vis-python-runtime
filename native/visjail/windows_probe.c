@@ -1210,7 +1210,7 @@ static void host_launch(int argc, wchar_t **argv, int standard) {
 static void handle_check(int argc, wchar_t **argv, int host) {
     HANDLE handle, process = NULL;
     char secret[64] = {0};
-    DWORD count = 0;
+    DWORD count = 0, type = FILE_TYPE_UNKNOWN;
     check(argc == (host ? 4 : 3), "handle arguments");
     if (argc != (host ? 4 : 3)) return;
     handle = (HANDLE)(uintptr_t)_wcstoui64(argv[host ? 3 : 2], NULL, 10);
@@ -1221,7 +1221,14 @@ static void handle_check(int argc, wchar_t **argv, int host) {
                                                  0, FALSE, DUPLICATE_SAME_ACCESS), "host really inherited secret handle");
         handle = copy;
     }
-    if (handle && GetFileType(handle) == FILE_TYPE_DISK) {
+    __try {
+        if (handle) type = GetFileType(handle);
+    } __except (!host && GetExceptionCode() == EXCEPTION_INVALID_HANDLE ?
+                EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        /* Strict handle checking can raise instead of returning an invalid type. */
+        printf("HANDLE_REFERENCE_DENIED=STATUS_INVALID_HANDLE\n");
+    }
+    if (type == FILE_TYPE_DISK) {
         ReadFile(handle, secret, sizeof(secret) - 1, &count, NULL);
         if (host) SetFilePointer(handle, 0, NULL, FILE_BEGIN);
     }
