@@ -155,25 +155,25 @@ Keep the unrelated asynchronous runtime edits outside this change.
 
 ## Plan state
 
-Local verification of the initial port passed, but Windows execution is not
-complete. CI run `34834014772` at `c6557e9` built the DLL and native worker, then
-stalled in the isolated `windows-native-test` JVM until the 40-minute job limit.
-No test name or stack was captured. Linux, macOS and documentation jobs passed.
-The earlier CRT symbol and selector/socket errors were corrected; the isolated
-native-boundary hang is not yet attributed to a specific operation.
+CI run `34834014772` at `c6557e9` built the Windows DLL and native worker, then
+stalled in the isolated native-boundary JVM until the 40-minute job limit. The
+instrumented runner in `45621a2` names tests and fixture stages, captures Python
+and JVM stacks, and exits 124 after two minutes without progress. Its five
+regressions cover success, exceptions, stalled tests, fixtures and embedded Python.
+The rebuilt macOS runtime passed 211 tests and 3085 assertions; formatting,
+lint/reflection, PowerShell analysis and diff checks passed.
 
-The diagnostic runner is implemented locally. It names tests and native fixture
-stages, dumps Python stacks before the JVM watchdog expires, then dumps JVM
-stacks and exits 124 rather than waiting for the job limit. Five disposable-JVM
-regressions cover success, exceptions, stalled tests, stalled fixtures and a
-stalled embedded-Python call. Windows also runs the asynchronous-runtime suite.
-The rebuilt macOS runtime passed all 211 tests and 3085 assertions. Clojure
-formatting, lint/reflection, PowerShell analysis and diff checks pass.
+Instrumented CI `34843998016` isolated the hang to a denied DOS console path in
+`windows-native-confinement-test`. CPython's WindowsConsoleIO opens console handles
+without emitting the `open` audit event. The local C fix guards its constructor
+and existing initializer descriptor, including cached bound wrappers, while
+preserving unconfined behavior. Initialization fails closed if site customization
+already created subclasses with copied initializer slots. Regression tests cover
+automatic dispatch, raw constructors, subclasses, cached initializers and startup
+customization. Linux, macOS and documentation jobs passed the diagnostic commit.
 
-Next: run the instrumented Windows CI, fix the operation identified by its
-stacks, retain a regression test, then verify the scoped tree on Windows and the
-existing Linux/macOS/archive gates. The Windows hang is still unresolved. Do
-not loosen confinement, skip tests or extend the job timeout to hide it. The
-two pre-existing asynchronous-runtime changes remain untouched. The user has
-authorized scoped commits, pushes and CI runs to finish this repair. No new
-release or consumer installation is in scope. No live gateway was restarted.
+Next: verify the fix on Windows and the existing Linux/macOS/archive gates. Do not
+loosen confinement, skip tests or extend the timeout to hide failures. Pre-existing
+asynchronous-runtime changes and concurrent live-worker diagnostics remain outside
+this repair. The user authorized scoped commits, pushes and CI runs. No new
+release, consumer installation or live gateway restart is in scope.

@@ -1,13 +1,16 @@
 (ns com.blockether.vis-python-runtime.windows-native-test
   "Exercise the native ABI and Windows filesystem boundary through the public bridge."
   (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.blockether.vis-python-runtime :as runtime]
             [com.blockether.vis-python-runtime.test-diagnostics :as diagnostics])
   (:import [com.blockether.vispython VisPythonException]
+           [java.io File]
            [java.nio.file Files Path]
-           [java.nio.file.attribute FileAttribute]))
+           [java.nio.file.attribute FileAttribute]
+           [java.util.concurrent TimeUnit]))
 
 (def ^:private windows? (str/starts-with? (System/getProperty "os.name") "Windows"))
 
@@ -18,6 +21,38 @@
 (defn- python-string [value] (json/write-str (str value) :escape-slash false))
 
 (defn- read-expression [path] (str "open(" (python-string path) ", encoding='utf-8').read()"))
+
+(defn- console-startup-probe
+  [customization form]
+  (let [directory
+        (temporary-directory "vis-console-startup-")
+
+        log
+        (io/file (str directory) "probe.log")
+
+        code
+        (binding [*print-meta* true]
+          (pr-str (list 'do '(require '[com.blockether.vis-python-runtime :as runtime]) form)))
+
+        builder
+        (doto (ProcessBuilder. ^java.util.List
+                               [(str (io/file (System/getProperty "java.home") "bin" "java"))
+                                "--enable-native-access=ALL-UNNAMED" "-cp"
+                                (System/getProperty "java.class.path") "clojure.main" "-e" code])
+          (.redirectErrorStream true)
+          (.redirectOutput log))]
+
+    (spit (str (.resolve directory "sitecustomize.py")) customization)
+    (.put (.environment builder) "PYTHONPATH" (str directory))
+    (.put (.environment builder) "PYTHONDONTWRITEBYTECODE" "1")
+    (let [process (.start builder)]
+      (try
+        (is (.waitFor process 30 TimeUnit/SECONDS) "console startup must not hang")
+        (when (.isAlive process) (.destroyForcibly process) (.waitFor process 5 TimeUnit/SECONDS))
+        {:exit (.exitValue process) :out (slurp log)}
+        (finally (when (.isAlive process) (.destroyForcibly process))
+                 (doseq [^File file (reverse (file-seq (.toFile directory)))]
+                   (.delete file)))))))
 
 (use-fixtures :each
               (fn [run]
@@ -43,6 +78,45 @@
                                 (runtime/exec! "windows-test-diagnostics"
                                                "faulthandler.cancel_dump_traceback_later()"))
                               (diagnostics/stage! "Native fixture complete")))))
+
+(deftest windows-console-preexisting-descriptors-are-guarded-test
+  (when windows?
+    (let
+      [{:keys [exit out]}
+       (console-startup-probe
+         (str "import _io\n" "_io.vis_console_init = _io._WindowsConsoleIO.__init__\n"
+              "_io.vis_console_instance = _io._WindowsConsoleIO.__new__(_io._WindowsConsoleIO)\n"
+              "_io.vis_console_bound = _io.vis_console_instance.__init__\n")
+         '(do
+           (runtime/initialize!)
+           (runtime/confine! [(System/getenv "PYTHONPATH")] [])
+           (doseq
+            [expression
+             ["_io.vis_console_init(_io.vis_console_instance, 'CONIN$', 'r')"
+              "_io.vis_console_bound('CONIN$', 'r')"]]
+            (try
+             (runtime/exec! "console-startup" (str "import _io\n" expression))
+             (println "unexpected success")
+             (catch Exception error (println (.getMessage error)))))))]
+      (is (= 0 exit) out)
+      (is (= 2 (count (re-seq #"vis sandbox: Windows console access is forbidden" out))) out)
+      (is (not (str/includes? out "unexpected success")) out))))
+
+(deftest windows-console-preexisting-subclasses-fail-startup-test
+  (when windows?
+    (let [{:keys [exit out]} (console-startup-probe
+                               "import _io\nclass EarlyConsole(_io._WindowsConsoleIO):\n    pass\n"
+                               '(dotimes
+                                 [_ 2]
+                                 (try
+                                  (runtime/initialize!)
+                                  (println "unexpected success")
+                                  (catch Exception error (println (.getMessage error))))))]
+      (is (= 0 exit) out)
+      (is (= 2
+             (count (re-seq #"Windows console guard refuses pre-existing console subclasses" out)))
+          out)
+      (is (not (str/includes? out "unexpected success")) out))))
 
 (deftest invalid-policy-fails-closed-test
   ;; Windows rejects device/UNC roots; dropping every root must not unconfine the process.
@@ -102,12 +176,51 @@
       (is (thrown-with-msg? VisPythonException
                             #"vis sandbox"
                             (runtime/eval-str "windows-files" (read-expression private))))
-      (doseq [path [(str readable ":stream") (str inside "\\NUL") (str inside "\\CON.txt")
-                    "\\\\.\\NUL" "\\\\?\\C:\\Windows\\win.ini" "\\\\127.0.0.1\\share\\secret"]]
+      (doseq [[label path] [["alternate data stream" (str readable ":stream")]
+                            ["DOS null alias" (str inside "\\NUL")]
+                            ["DOS console alias" (str inside "\\CON.txt")]
+                            ["device namespace" "\\\\.\\NUL"]
+                            ["extended namespace" "\\\\?\\C:\\Windows\\win.ini"]
+                            ["UNC share" "\\\\127.0.0.1\\share\\secret"]]]
+        (diagnostics/stage! (str "Reject Windows " label))
         (is (thrown-with-msg? VisPythonException
                               #"vis sandbox"
                               (runtime/eval-str "windows-files" (read-expression path)))
-            path)))))
+            label)))))
+
+(deftest windows-console-constructor-is-confined-test
+  ;; CI 34843998016 blocked in a console read: CPython's WindowsConsoleIO does
+  ;; not emit the open audit event. Guard automatic dispatch and raw type calls.
+  (when windows?
+    (let [session "windows-console-constructor"]
+      (try (runtime/exec!
+             session
+             (str "import _io, io, pathlib\n"
+                  "ConsoleIO = _io._WindowsConsoleIO\n" "raw_init = ConsoleIO.__init__\n"
+                  "class DerivedConsole(ConsoleIO):\n    pass\n" "class SuperConsole(ConsoleIO):\n"
+                  "    def __init__(self, *args, **kwargs):\n"
+                  "        super().__init__(*args, **kwargs)\n"
+                  "instance = ConsoleIO.__new__(ConsoleIO)\n" "bound_init = instance.__init__"))
+           (is (thrown-with-msg? VisPythonException
+                                 #"ValueError"
+                                 (runtime/eval-str session "ConsoleIO('CONIN$', 'invalid')")))
+           (runtime/confine! [(str (temporary-directory "vis-console-policy-"))] [])
+           (doseq [expression ["open('CONIN$', 'r')" "io.open('CONOUT$', 'w')"
+                               "pathlib.Path('CON').open()" "ConsoleIO('CONIN$', 'r')"
+                               "ConsoleIO(file='CONIN$', mode='r')" "DerivedConsole('CONIN$', 'r')"
+                               "SuperConsole(file='CONIN$', mode='r')"
+                               "raw_init(instance, 'CONIN$', 'r')" "bound_init('CONIN$', 'r')"
+                               "ConsoleIO.__init__(instance, file='CONIN$', mode='r')"]]
+             (diagnostics/stage! (str "Reject Windows console constructor: " expression))
+             (is (thrown-with-msg? VisPythonException
+                                   #"vis sandbox"
+                                   (runtime/eval-str session expression))
+                 expression))
+           (runtime/confine! [] [])
+           (is (thrown-with-msg? VisPythonException
+                                 #"ValueError"
+                                 (runtime/eval-str session "ConsoleIO('CONIN$', 'invalid')")))
+           (finally (runtime/close-session! session))))))
 
 (deftest windows-native-junction-escape-test
   (when windows?

@@ -960,6 +960,70 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
     return 0;
 }
 
+#if defined(_WIN32)
+/* CPython's WindowsConsoleIO bypasses the open audit event. Guard both type
+   construction and the existing __init__ descriptor, including cached bound
+   wrappers. Never expose the original initializer to Python. */
+static initproc vis_py_windows_console_original_init;
+static const char *vis_py_windows_console_guard_error;
+
+static int vis_py_windows_console_init(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    if (vis_py_confined) {
+        PyErr_SetString(PyExc_PermissionError, "vis sandbox: Windows console access is forbidden");
+        return -1;
+    }
+    return vis_py_windows_console_original_init(self, args, kwargs);
+}
+
+/* Called with the GIL held, before the runtime accepts guest code. Site
+   customization must not have created subclasses with a copied, unguarded slot. */
+static const char *vis_py_install_windows_console_guard(void)
+{
+    PyObject *module;
+    PyObject *object;
+    PyObject *descriptor;
+    PyObject *subclasses;
+    PyTypeObject *type;
+
+    module = PyImport_ImportModule("_io");
+    if (module == NULL) {
+        return "Windows console guard could not import _io";
+    }
+    object = PyObject_GetAttrString(module, "_WindowsConsoleIO");
+    Py_DECREF(module);
+    if (object == NULL) {
+        return "Windows console guard could not find _WindowsConsoleIO";
+    }
+    type = (PyTypeObject *)object;
+    if (!PyType_Check(object) || strcmp(type->tp_name, "_io._WindowsConsoleIO") != 0 ||
+        !(type->tp_flags & Py_TPFLAGS_IMMUTABLETYPE) || type->tp_init == NULL) {
+        Py_DECREF(object);
+        return "Windows console guard found an unexpected console type";
+    }
+    descriptor = PyDict_GetItemString(type->tp_dict, "__init__");
+    if (descriptor == NULL || Py_TYPE(descriptor) != &PyWrapperDescr_Type ||
+        PyDescr_TYPE(descriptor) != type ||
+        ((PyWrapperDescrObject *)descriptor)->d_wrapped != (void *)type->tp_init) {
+        Py_DECREF(object);
+        return "Windows console guard found an unexpected initializer";
+    }
+    subclasses = PyObject_CallMethod(object, "__subclasses__", NULL);
+    if (subclasses == NULL || !PyList_Check(subclasses) || PyList_GET_SIZE(subclasses) != 0) {
+        Py_XDECREF(subclasses);
+        Py_DECREF(object);
+        return "Windows console guard refuses pre-existing console subclasses";
+    }
+    Py_DECREF(subclasses);
+    vis_py_windows_console_original_init = type->tp_init;
+    ((PyWrapperDescrObject *)descriptor)->d_wrapped = (void *)vis_py_windows_console_init;
+    type->tp_init = vis_py_windows_console_init;
+    PyType_Modified(type);
+    Py_DECREF(object);
+    return NULL;
+}
+#endif
+
 /* --------------------------------------------------------------------------
  * Host callables.
  *
@@ -2188,6 +2252,12 @@ VIS_PY_EXPORT int vispython_initialize(const char *home, const char *executable,
     if (vis_py_started) {
         return 0;
     }
+#if defined(_WIN32)
+    if (vis_py_windows_console_guard_error != NULL) {
+        vis_py_copy_out(vis_py_windows_console_guard_error, out, cap);
+        return VIS_PY_ERR_INIT;
+    }
+#endif
 #if defined(__linux__)
     /* FFM loads this cdylib RTLD_LOCAL. Binary extension modules intentionally leave
        CPython C-API references unresolved and expect the embedding process to export
@@ -2251,6 +2321,15 @@ VIS_PY_EXPORT int vispython_initialize(const char *home, const char *executable,
         vis_py_copy_out("the interpreter did not start", out, cap);
         return VIS_PY_ERR_INIT;
     }
+#if defined(_WIN32)
+    vis_py_windows_console_guard_error = vis_py_install_windows_console_guard();
+    if (vis_py_windows_console_guard_error != NULL) {
+        vis_py_copy_out(vis_py_windows_console_guard_error, out, cap);
+        PyErr_Clear();
+        (void)PyEval_SaveThread();
+        return VIS_PY_ERR_INIT;
+    }
+#endif
     vis_py_started = 1;
     vis_py_record(VIS_PY_LOG_INFO, "init", "\"cap\":%d,\"workers\":%d", vis_py_thread_cap,
                   vis_py_worker_target());
