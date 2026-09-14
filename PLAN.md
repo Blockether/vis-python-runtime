@@ -345,13 +345,19 @@ and System plus read/execute to another SID, but has no user allow entry.
 Administrator membership is disabled and no privilege except traversal is
 enabled. `CreatePipe` with default security returns access denied.
 
-Only the newly constructed test-host token now receives a default DACL granting
-full access to its user and System. No existing host object ACL, production jail
-token, capability or enabled privilege is changed. The regression reads back the
-user owner and exact two-entry default DACL, then requires a real Win32 pipe
-roundtrip. The original Java default-pipe launch and all jail checks remain
-mandatory. Actual Windows verification of the correction is still pending.
+Run 34908364994 passes the complete first JVM launcher: 266 checks, including
+the standard-host Win32/Java pipe controls, disabled administrator membership,
+privilege/integrity checks, user-owned two-entry default DACL, actual LPAC jail
+creation and private registry isolation. Stock CPython and the native worker's
+AF_UNIX protocol both pass; the worker is not reported as unsupported.
 
-Nonadministrator-host checks, stock Python/native worker, native-image launcher
-execution and extracted-archive verification remain pending. No Windows release
-completion is claimed yet.
+The native-image launcher then fails before jail creation because its runtime
+archive was not selected. The JVM found the checkout DLL via its file classpath;
+the image has no such file-classpath fallback. The harness now passes the resolved
+external runtime in each probe process's environment, inherited by its test
+children, without changing the calling shell's environment. Each top-level probe
+also checks that the selected DLL is the requested runtime before the jail tests.
+
+Native-image launcher execution, subsequent runtime/documentation-example suites
+and extracted-archive verification remain pending. No Windows release completion
+is claimed yet.

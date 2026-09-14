@@ -738,10 +738,15 @@ public final class WindowsJailProbe {
     }
     check(System.getProperty("os.name").startsWith("Windows"), "Windows E2E must run on Windows");
     Path guest = Path.of(arguments[0]).toRealPath();
+    Path nativeDirectory = arguments.length == 2 ? Path.of(arguments[1]).toRealPath() : null;
     Path parent = Files.createTempDirectory("vj-").toRealPath();
     Throwable failure = null;
     try {
       // Report the first failure before a later native wait can hide its diagnostics.
+      if (nativeDirectory != null) {
+        stage("runtime selection", () -> check(Files.isSameFile(nativeDirectory.resolve(Native.libraryName()),
+            Path.of(Native.library().path())), "launcher uses the requested external runtime"));
+      }
       stage("validation", () -> validation(parent, guest));
       stage("staging stress", () -> passed(
           finish(new ProcessBuilder(self("--staging-child", parent, guest)).start(), new byte[0]), "bounded staging stress"));
@@ -758,8 +763,8 @@ public final class WindowsJailProbe {
           finish(new ProcessBuilder(self("--terminal-child", parent, guest)).start(), new byte[0]), "bounded active ConPTY close"));
       stage("parent crash", () -> parentCrash(parent, guest));
       stage("inherited handles and standard user", () -> restrictedHosts(parent, guest));
-      if (arguments.length == 2) {
-        stage("stock Python and native worker", () -> python(parent, guest, Path.of(arguments[1]).toRealPath()));
+      if (nativeDirectory != null) {
+        stage("stock Python and native worker", () -> python(parent, guest, nativeDirectory));
       }
     } catch (Throwable caught) {
       failure = caught;

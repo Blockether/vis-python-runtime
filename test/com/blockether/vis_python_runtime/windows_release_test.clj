@@ -101,7 +101,8 @@
         "Build both libraries before replacing the published staging directory")
     (is (str/includes? archive-script "'visjail.dll'"))
     (doseq [text ["visjail.dll" "VIS_WINDOWS_JAIL_GUEST" "WindowsJailProbe"
-                  "Invoke-JailProbe -Executable $launcher" "WaitForExit(180000)"]]
+                  "Invoke-JailProbe -Executable $launcher" "WaitForExit(180000)"
+                  "$start.Environment['VIS_PYTHON_NATIVE_PATH'] = $runtime"]]
       (is (str/includes? test-script text) text))
     (doseq [text ["test/java" "target/test-classes" "target/windows-jail-probe.exe"
                   "com.blockether.vispython.WindowsJailProbe" "native/visjail/windows_probe.c"]]

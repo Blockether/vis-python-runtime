@@ -33,6 +33,8 @@ function Invoke-JailProbe([string] $Executable, [string[]] $Arguments) {
     $start = [System.Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Executable
     $start.UseShellExecute = $false
+    # Native-image launchers need the unpacked DLL, not an embedded classpath resource.
+    $start.Environment['VIS_PYTHON_NATIVE_PATH'] = $runtime
     foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $start
