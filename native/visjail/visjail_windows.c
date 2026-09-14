@@ -219,6 +219,47 @@ done:
     return result == ERROR_SUCCESS;
 }
 
+/* An elevated host's Administrators ACE can be deny-only in LPAC. New guest
+ * objects need explicit user and package grants on both sides of the access check.
+ * Only the suspended guest token changes; existing objects and the host do not. */
+static int default_object_permissions(HANDLE process, PSID package) {
+    union { TOKEN_USER value; BYTE data[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]; } user;
+    union { TOKEN_APPCONTAINER_INFORMATION value;
+            BYTE data[sizeof(TOKEN_APPCONTAINER_INFORMATION) + SECURITY_MAX_SID_SIZE]; } container;
+    HANDLE token = NULL;
+    DWORD size, result;
+    PSID system = NULL;
+    EXPLICIT_ACCESSW entries[3];
+    TOKEN_DEFAULT_DACL defaults;
+    PACL acl = NULL;
+    if (!OpenProcessToken(process, TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, &token)) return 0;
+    if (!GetTokenInformation(token, TokenUser, &user, sizeof(user), &size) ||
+        !GetTokenInformation(token, TokenAppContainerSid, &container, sizeof(container), &size) ||
+        !ConvertStringSidToSidW(L"S-1-5-18", &system)) {
+        result = GetLastError(); goto done;
+    }
+    if (!container.value.TokenAppContainer || !EqualSid(package, container.value.TokenAppContainer)) {
+        result = ERROR_ACCESS_DENIED; goto done;
+    }
+    ZeroMemory(entries, sizeof(entries));
+    entries[0].grfAccessPermissions = GENERIC_ALL;
+    entries[0].grfAccessMode = SET_ACCESS;
+    entries[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    entries[0].Trustee.ptstrName = (LPWSTR)user.value.User.Sid;
+    entries[1] = entries[0]; entries[1].Trustee.ptstrName = (LPWSTR)package;
+    entries[2] = entries[0]; entries[2].Trustee.ptstrName = (LPWSTR)system;
+    result = SetEntriesInAclW(3, entries, NULL, &acl);
+    if (result == ERROR_SUCCESS) {
+        defaults.DefaultDacl = acl;
+        if (!SetTokenInformation(token, TokenDefaultDacl, &defaults, sizeof(defaults))) result = GetLastError();
+    }
+done:
+    if (acl) LocalFree(acl);
+    if (system) LocalFree(system);
+    CloseHandle(token); SetLastError(result);
+    return result == ERROR_SUCCESS;
+}
+
 /* MIC checks precede DACLs: a low-integrity guest needs a low writable directory.
  * LABEL_SECURITY_INFORMATION needs WRITE_OWNER, not SeSecurityPrivilege. */
 static int low_integrity(HANDLE handle) {
@@ -1062,6 +1103,8 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
             (pty ? 0 : CREATE_NO_WINDOW), block, directory, &startup.StartupInfo, &info)) goto fail;
     operation = "Assign Windows process jobs";
     if (!AssignProcessToJobObject(c->job, info.hProcess) || !AssignProcessToJobObject(p->job, info.hProcess)) goto fail;
+    operation = "Configure Windows guest object permissions";
+    if (!default_object_permissions(info.hProcess, c->sid)) goto fail;
     operation = "Connect Windows process streams";
     input = stream_new(c->id, pty ? host_out : NULL, host_in);
     if (!input) goto fail;

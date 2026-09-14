@@ -90,6 +90,45 @@ static void lpac_check(HANDLE token) {
     CloseHandle(impersonation);
 }
 
+/* CI 34881927919: guest object grants must cover both sides of the token check. */
+static void default_dacl_check(HANDLE token) {
+    union TokenData {
+        TOKEN_USER user;
+        TOKEN_APPCONTAINER_INFORMATION package;
+        TOKEN_DEFAULT_DACL defaults;
+        BYTE data[4096];
+    } user, package, defaults;
+    DWORD size;
+    int has_user = 0, has_package = 0, has_system = 0;
+    PACL acl;
+    if (!GetTokenInformation(token, TokenUser, &user, sizeof(user), &size) ||
+        !GetTokenInformation(token, TokenAppContainerSid, &package, sizeof(package), &size) ||
+        !GetTokenInformation(token, TokenDefaultDacl, &defaults, sizeof(defaults), &size)) {
+        check(0, "read guest object default permissions"); return;
+    }
+    check(package.package.TokenAppContainer != NULL, "guest object package identity");
+    if (!package.package.TokenAppContainer) return;
+    acl = defaults.defaults.DefaultDacl;
+    check(acl != NULL && IsValidAcl(acl), "explicit valid guest object DACL");
+    if (!acl || !IsValidAcl(acl)) return;
+    check(acl->AceCount >= 2 && acl->AceCount <= 3, "only user, package and system default grants");
+    for (DWORD index = 0; index < acl->AceCount; index++) {
+        ACCESS_ALLOWED_ACE *ace = NULL;
+        int own_user, own_package, system;
+        check(GetAce(acl, index, (void **)&ace), "read guest object ACE");
+        if (!ace) continue;
+        check(ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && ace->Header.AceFlags == 0 &&
+              ace->Mask == GENERIC_ALL, "explicit full guest object grant");
+        if (ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
+        own_user = EqualSid(&ace->SidStart, user.user.User.Sid);
+        own_package = EqualSid(&ace->SidStart, package.package.TokenAppContainer);
+        system = IsWellKnownSid(&ace->SidStart, WinLocalSystemSid);
+        check(own_user || own_package || system, "no ambient group object grants");
+        has_user |= own_user; has_package |= own_package; has_system |= system;
+    }
+    check(has_user && has_package && has_system, "user and private package both have object access");
+}
+
 static void token_check(void) {
     HANDLE token = NULL;
     DWORD size = 0, value = 0;
@@ -100,6 +139,7 @@ static void token_check(void) {
     check(GetTokenInformation(token, TokenIsAppContainer, &value, sizeof(value), &size)
           && value == 1, "AppContainer token");
     lpac_check(token);
+    default_dacl_check(token);
     if (GetTokenInformation(token, TokenIntegrityLevel, data, sizeof(data), &size)) {
         PSID integrity = ((TOKEN_MANDATORY_LABEL *)data)->Label.Sid;
         DWORD rid = *GetSidSubAuthority(integrity, (DWORD)*GetSidSubAuthorityCount(integrity) - 1);
@@ -265,51 +305,6 @@ static void network_check(int argc, wchar_t **argv) {
     WSACleanup();
 }
 
-/* Failure-only inspection; never changes process policy, tokens or file permissions. */
-static void child_diagnostics(const wchar_t *executable) {
-    PROCESS_MITIGATION_CHILD_PROCESS_POLICY policy = {0};
-    HANDLE image, mapping, self, token = NULL;
-    BOOL queried;
-    DWORD size = 0;
-    TOKEN_DEFAULT_DACL *dacl = NULL;
-    SetLastError(ERROR_SUCCESS);
-    queried = GetProcessMitigationPolicy(GetCurrentProcess(), ProcessChildProcessPolicy, &policy, sizeof(policy));
-    printf("DESCENDANT_POLICY_QUERY=%d FLAGS=%lu ERROR=%lu\n", queried, policy.Flags, GetLastError());
-    SetLastError(ERROR_SUCCESS);
-    self = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
-    printf("DESCENDANT_SELF_ALL_ACCESS=%d ERROR=%lu\n", self != NULL, GetLastError());
-    if (self) CloseHandle(self);
-    SetLastError(ERROR_SUCCESS);
-    image = CreateFileW(executable, GENERIC_READ | GENERIC_EXECUTE,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    printf("DESCENDANT_IMAGE_OPEN=%d ERROR=%lu\n", image != INVALID_HANDLE_VALUE, GetLastError());
-    if (image != INVALID_HANDLE_VALUE) {
-        SetLastError(ERROR_SUCCESS);
-        mapping = CreateFileMappingW(image, NULL, PAGE_EXECUTE_READ | SEC_IMAGE, 0, 0, NULL);
-        printf("DESCENDANT_IMAGE_MAPPING=%d ERROR=%lu\n", mapping != NULL, GetLastError());
-        if (mapping) CloseHandle(mapping);
-        CloseHandle(image);
-    }
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
-        GetTokenInformation(token, TokenDefaultDacl, NULL, 0, &size);
-        dacl = malloc(size);
-        if (dacl && GetTokenInformation(token, TokenDefaultDacl, dacl, size, &size)) {
-            SECURITY_DESCRIPTOR descriptor;
-            LPWSTR text = NULL;
-            if (InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) &&
-                SetSecurityDescriptorDacl(&descriptor, TRUE, dacl->DefaultDacl, FALSE) &&
-                ConvertSecurityDescriptorToStringSecurityDescriptorW(&descriptor, SDDL_REVISION_1,
-                                                                      DACL_SECURITY_INFORMATION, &text, NULL)) {
-                printf("DESCENDANT_DEFAULT_DACL=%ls\n", text);
-                LocalFree(text);
-            } else printf("DESCENDANT_DEFAULT_DACL_ERROR=%lu\n", GetLastError());
-        } else printf("DESCENDANT_DEFAULT_DACL_QUERY_ERROR=%lu\n", GetLastError());
-        free(dacl);
-        CloseHandle(token);
-    } else printf("DESCENDANT_TOKEN_OPEN_ERROR=%lu\n", GetLastError());
-}
-
 static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
     wchar_t executable[32768], command[32768];
     STARTUPINFOW startup;
@@ -326,12 +321,6 @@ static void child_check(const wchar_t *mode, DWORD flags, int expect_failure) {
         check(!spawned, "job breakaway denied");
         if (spawned) TerminateProcess(process.hProcess, 99);
     } else {
-        if (!spawned) {
-            /* CI 34880164527 ruled out console flags and handle inheritance. */
-            DWORD original_error = GetLastError();
-            child_diagnostics(executable);
-            SetLastError(original_error);
-        }
         check(spawned, "confined descendant starts");
         if (spawned && wcscmp(mode, L"sleep") == 0) {
             printf("CHILD=%lu\n", process.dwProcessId);

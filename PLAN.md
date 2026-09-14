@@ -263,12 +263,18 @@ Windows CI run 34878855420 verifies minimal process launch, the effective LPAC
 access mask (`2`), validation and staging stress. The private profile subtree
 exists before launch; the corrected profile-path checks, temporary-file
 create/write/delete, staged read-only inputs and host/sibling/profile/temporary
-file denials pass. Ordinary descendant creation still returns Windows error 5.
-Run 34880164527 confirms self-process creation/duplication rights are available;
-console and handle-inheritance variants fail identically. The next failure-only
-inspection checks child mitigation policy, staged image read/execute and mapping,
-and the default token DACL. The original failure remains mandatory. No process,
-token, pipe, network or host-file permissions have been loosened.
+file denials pass. Ordinary descendant creation still returned Windows error 5
+in runs 34880164527 and 34881927919. Self-process access, child mitigation policy,
+console/handle variants and executable read/execute/mapping checks ruled out
+those prerequisites. The inherited default token DACL instead grants the normal
+user side only logon read/execute when the Administrators group is deny-only.
+
+The launch now sets only the suspended guest token's default object DACL to
+explicit user, private package and System grants, after verifying the package SID
+and assigning both jobs. It fails closed before resume on any setup error.
+Existing host ACLs, capabilities and restrictions are unchanged. Mandatory token
+readback and the original descendant/breakaway tests verify this candidate fix;
+Windows runtime confirmation is still pending. Transient comparisons are removed.
 
 `GetAppContainerFolderPath` returns local application data beneath the profile,
 not its root. Test cleanup validates the generated parent name and exact SID;
