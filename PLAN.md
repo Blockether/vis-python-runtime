@@ -111,3 +111,56 @@ Vis v0.1.61 is tagged at `920fb468b349377941bceadb7fe4ab4cdba31611`; release run
 published the stable release with 15 assets. A macOS runner queue timeout passed
 on retry without source changes or skipped checks. GitHub confirms v0.1.61 is
 non-draft and latest. No release tags were moved; no live gateway was restarted.
+
+# Windows runtime and generated API documentation
+
+Ship a Windows x64 embedding runtime with the same Java and Clojure API.
+
+## Context
+
+The C bridge currently depends on POSIX threads and paths. `build.clj`, native
+build scripts and release workflows package Linux and macOS only. Windows needs
+its own MSVC build, bundled CPython DLL layout, native-image worker and actual
+Windows execution tests. API documentation is currently source links and a short
+Java example. Use standard Javadoc and Codox rather than a custom API renderer.
+Keep the unrelated asynchronous runtime edits outside this change.
+
+## Phases
+
+1. **Port the embedding boundary**
+   - Rationale: a platform name or successful DLL build is not runtime support.
+   - Data: `native/vispython`, Java bridge, Windows-specific regression tests.
+   - Acceptance criteria: load the bundled DLL safely; execute Python, callbacks
+     and workers; preserve C filesystem confinement, thread limits and diagnostics.
+     OS process jail remains explicitly unavailable on Windows, never downgraded.
+   - Unknowns: Windows compiler, native-image and filesystem behavior until CI runs.
+2. **Package and verify Windows releases**
+   - Rationale: the DLL, CPython, uv and worker must travel and run together.
+   - Data: Windows build/archive scripts, version pins, build tasks and workflows.
+   - Acceptance criteria: hash-checked inputs, Windows x64 archive and extracted
+     JVM/native-worker tests; keep all Linux and macOS release gates.
+   - Unknowns: hosted Windows execution results and upstream archive layout.
+3. **Generate and deliver API documentation**
+   - Rationale: callers need browsable references and complete runnable examples.
+   - Data: `doc/`, README, public API docstrings, development-only Codox alias.
+   - Acceptance criteria: Javadoc and Clojure references build automatically,
+     examples and links pass, documentation is included in release artifacts.
+   - Unknowns: documentation warnings and generator compatibility until built.
+4. **Verify and publish**
+   - Rationale: Windows execution must be verified on Windows, not inferred on macOS.
+   - Data: local regressions and lint, exact commit, CI and release artifacts.
+   - Acceptance criteria: scoped commits pushed with unrelated work preserved;
+     Windows/Linux/macOS checks pass; release workflow includes Windows and docs.
+   - Unknowns: CI availability. No consumer installation or gateway restart.
+
+## Plan state
+
+Implementation and local verification are complete. The macOS suite passed
+204 tests and 3052 assertions, including real JVM and native workers. Javadoc
+and Codox generated 36 HTML pages with valid local links; the Java example
+compiled and the documentation regression test passed. Clojure formatting,
+lint and reflection checks, PowerShell analysis and workflow lint passed.
+
+Next: verify the exact publishable tree without the unrelated asynchronous edits,
+then run the Windows, Linux, macOS and documentation CI gates. Windows execution
+and the release assets remain unverified until those hosted jobs pass.

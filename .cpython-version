@@ -11,3 +11,4 @@
 # move together, and moving them means rebuilding every platform artifact.
 CPYTHON_RELEASE=20260825
 CPYTHON_VERSION=3.14.7
+CPYTHON_SHA256_WINDOWS_X64=dec3faa3445d9efc4979e6c74a839be0d1039877367db32ee9c5f6bc91fae3c8

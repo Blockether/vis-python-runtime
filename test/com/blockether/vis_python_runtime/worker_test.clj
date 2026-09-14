@@ -44,7 +44,11 @@
 (defn- jvm-argv
   "Run the worker CLASS on this JVM, from this suite's own classpath."
   [socket home]
-  [(str (System/getProperty "java.home") File/separator "bin" File/separator "java")
+  [(str (System/getProperty "java.home")
+        File/separator
+        "bin"
+        File/separator
+        (if (str/starts-with? (Native/platform) "windows-") "java.exe" "java"))
    (str "-Duser.home=" home) (str "-XX:ErrorFile=" home "/hs_err_pid%p.log")
    "--enable-native-access=ALL-UNNAMED" "-cp" (System/getProperty "java.class.path")
    "com.blockether.vispython.Worker" socket])
@@ -60,14 +64,17 @@
   "Listen on a fresh unix socket, start the worker with `argv` and answer the
    accepted connection together with the process and its log.
 
-   `/tmp`, not the JDK's temp directory: a unix socket path is capped at 104
-   bytes on macOS and the per-user temp directory alone spends half of that."
+   Unix socket paths are bounded: use /tmp on macOS and the platform temp
+   directory on Windows, never an invented POSIX path on that platform."
   [argv & [policy environment]]
   (let [home
         (harness/temp-dir "vis-worker-home")
 
         path
-        (str "/tmp/vis-worker-" (System/nanoTime) ".sock")
+        (str (io/file (if (str/starts-with? (Native/platform) "windows-")
+                        (System/getProperty "java.io.tmpdir")
+                        "/tmp")
+                      (str "vw-" (System/nanoTime) ".sock")))
 
         server
         (doto (ServerSocketChannel/open StandardProtocolFamily/UNIX)
@@ -123,9 +130,11 @@
       (.destroyForcibly process)
       (throw (ex-info "the worker never connected" {:argv (argv path home) :log (slurp log)})))
     (.close server)
-    (Files/deleteIfExists (Path/of path (make-array String 0)))
+    (when-not (str/starts-with? (Native/platform) "windows-")
+      (Files/deleteIfExists (Path/of path (make-array String 0))))
     {:process process
      :log log
+     :socket-path path
      :channel channel
      :reader (BufferedReader. (InputStreamReader. (Channels/newInputStream ^SocketChannel channel)
                                                   StandardCharsets/UTF_8))
@@ -205,7 +214,10 @@
       (testing "executable identity names the bundled interpreter"
         (let [executable
               (value! worker "eval" "session" session "code" "__import__('sys').executable")]
-          (is (str/ends-with? executable "/python/bin/python3"))
+          (is (= (com.blockether.vispython.Locations/pythonExecutable
+                   (com.blockether.vispython.Locations/pythonHome (:path
+                                                                    (runtime/resolve-library))))
+                 executable))
           (is (= executable
                  (value! worker
                          "eval"
@@ -310,7 +322,11 @@ async def library_call():
         (is (.waitFor ^Process (:process worker) 30 TimeUnit/SECONDS)
             (str "the worker outlived its parent: " (slurp (:log worker))))
         (is (zero? (.exitValue ^Process (:process worker))) (slurp (:log worker))))
-      (finally (.destroyForcibly ^Process (:process worker)) (.delete ^File (:log worker))))))
+      (finally (.destroyForcibly ^Process (:process worker))
+               (.close ^SocketChannel (:channel worker))
+               (.waitFor ^Process (:process worker) 5 TimeUnit/SECONDS)
+               (Files/deleteIfExists (Path/of (:socket-path worker) (make-array String 0)))
+               (.delete ^File (:log worker))))))
 
 (defn- exercise-editable!
   "The same source import and reload through JVM and native worker boundaries."

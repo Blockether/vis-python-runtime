@@ -46,7 +46,9 @@
       (spit lib "cdylib")
       (is (nil? (runtime/resolve-jail {:path (str lib)})))
       (spit jail "cdylib")
-      (is (= (.getAbsolutePath jail) (runtime/resolve-jail {:path (str lib)})))))
+      (if (.startsWith (runtime/platform) "windows-")
+        (is (nil? (runtime/resolve-jail {:path (str lib)})) "Windows has no OS jail")
+        (is (= (.getAbsolutePath jail) (runtime/resolve-jail {:path (str lib)}))))))
   (testing "a named path that holds no library is a refusal naming it"
     (try (runtime/use-library! (str (temp-dir "vis-native-empty")))
          (is (thrown? VisPythonException (runtime/resolve-library)))

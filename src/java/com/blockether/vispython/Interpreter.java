@@ -23,30 +23,31 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
- * The JVM half of the boundary: FFM downcalls into {@code native/vispython}.
+ * Embed CPython in a JVM application, with persistent session globals and host callbacks.
  *
- * <p>A handful of entry points, mirroring the C source one to one, all of them
- * integers-and-bytes. A negative return from C is a failure whose reason CPython
- * already wrote into the out-buffer, so a call yields the verdict and the
- * message together and this class never has to ask the interpreter what went
- * wrong.
+ * <p>Choose an unpacked platform archive with {@link Native#use(String)}, then
+ * call {@link #initialize(List, String, String, String)} once per process.
+ * Use {@link #eval(String, String)} for expressions or {@link #exec(String, String)}
+ * for statements. For captured block output, call {@link #installRuntime(String)}
+ * and then {@link #runBlock(String, String)}. Release session state with
+ * {@link #closeSession(String)} when it is no longer needed.
  *
- * <p>Traffic is not one way. {@link #bindHost} hands C an upcall stub, so a tool
- * the guest calls arrives back here, on the interpreter's own thread, while the
- * block waits. The stub's target is a STATIC method found by name: an upcall
- * whose target is a bound instance handle is the shape a native image cannot
- * keep, and the same reason this bridge is Java rather than interop - every
- * downcall below is an {@code invokeExact} against a signature the compiler
- * knows, not a reflective invocation the image would have to be told about.
+ * <p>Sessions have separate globals, but share one interpreter, imported modules,
+ * the GIL, and process policy. A session is not a process or a security boundary.
+ * Set filesystem, network, and thread policy before installing guest runtime
+ * modules or executing untrusted code. OS-level child-process confinement is a
+ * separate {@link Jail} capability and is unavailable on Windows.
  *
- * <p>Calls arrive on the CALLING thread. The C entry points take the GIL
- * themselves, so nothing serializes on a bridge thread and a session never
- * queues behind another session's host call. Two exceptions live on one pinned
- * daemon thread, because CPython binds them to whoever started it: starting the
- * interpreter and finalizing it.
+ * <p>Execution uses the calling thread; native entry points take the GIL.
+ * A host callback releases the GIL, so callbacks can arrive concurrently on
+ * different threads. Callbacks must not re-enter this interpreter. Initialization
+ * stays on a pinned daemon thread because CPython associates it with its creator.
  *
- * <p>Nothing is loaded until the first call, and a checkout with no build simply
- * throws from {@link Native#library()}.
+ * <p>The native library is loaded on first use. Keep it beside the archive's
+ * matching {@code python/} directory and start the JVM with
+ * {@code --enable-native-access=ALL-UNNAMED}. Bridge failures throw
+ * {@link VisPythonException}; block-level Python failures instead appear in the
+ * returned JSON. The JVM binds the runtime's small C ABI, not the raw CPython API.
  */
 public final class Interpreter {
 
@@ -127,6 +128,9 @@ public final class Interpreter {
     if (handles == null) {
       Native.Library resolved = Native.library();
       Linker linker = Linker.nativeLinker();
+      if (Native.platform().startsWith("windows-")) {
+        WindowsLibrary.preload(resolved.path());
+      }
       SymbolLookup lookup = SymbolLookup.libraryLookup(resolved.path(), Arena.global());
       Map<String, MethodHandle> linked = new HashMap<>();
       for (Map.Entry<String, FunctionDescriptor> entry : SIGNATURES.entrySet()) {
@@ -492,41 +496,63 @@ public final class Interpreter {
     }, everyMillis, everyMillis, TimeUnit.MILLISECONDS);
   }
 
-  /** Evaluate {@code code} as an expression, answering {@code str(result)}. */
+  /**
+   * Evaluate one Python expression in persistent session globals.
+   * @param session session name; requires process initialization
+   * @param code Python expression, not a statement body
+   * @return Python {@code str(result)}, not a deserialized Java object
+   * @throws VisPythonException if Python raises or the bridge cannot execute
+   * @see #run(String, String)
+   */
   public static String eval(String session, String code) {
     return invoke("vispython_eval", session, code);
   }
 
-  /** Run {@code code} as a module body, for its side effects. */
+  /**
+   * Execute Python statements for their side effects in persistent session globals.
+   * @param session session name; requires process initialization
+   * @param code Python statements
+   * @throws VisPythonException if Python raises or the bridge cannot execute
+   * @see #runBlock(String, String)
+   */
   public static void exec(String session, String code) {
     invoke("vispython_exec", session, code);
   }
 
   /**
-   * Run {@code code} the way the sandbox does - statements execute and a
-   * trailing expression's value comes back - answering that value as JSON text,
-   * because the caller reads it with the JSON reader it already has.
+   * Execute statements and return the trailing expression's value as JSON text.
+   * @param session session name; requires process initialization
+   * @param code Python source with an optional trailing expression
+   * @return JSON text for the result, for the host's JSON reader
+   * @throws VisPythonException if Python raises or the bridge cannot execute
+   * @see #runBlock(String, String)
    */
   public static String run(String session, String code) {
     return invoke("vispython_run", session, code);
   }
 
   /**
-   * Run {@code code} as a sandbox BLOCK, answering JSON text of what it printed
-   * and what it raised. A block's ONE success channel is what it PRINTED. The
-   * reapers run at the boundary, so a handle the block dropped is freed before
-   * this returns.
+   * Execute a runtime block and capture its printed output and Python error.
+   * A trailing expression is discarded; only printed text is successful output.
+   * Handles dropped by the block are reaped before this method returns.
+   * @param session session name equipped by {@link #installRuntime(String)}
+   * @param code runtime block source, including supported async tool calls
+   * @return JSON text with {@code stdout} and {@code error}; the latter is
+   *         {@code null} on success, otherwise a Python error string
+   * @throws VisPythonException for a loading or bridge failure; block-level
+   *         Python failures are represented in the returned JSON
    */
   public static String runBlock(String session, String code) {
     return invoke("vispython_run_block", session, code);
   }
 
   /**
-   * Equip {@code session} with the sandbox runtime, answering how many names it
-   * got. The runtime is IMPORTED, never interpolated into a string: CPython's
-   * own import machinery compiles and caches it, so a traceback points at a file
-   * and the second session pays nothing. The session names ITSELF here, so a
-   * host call made from it carries that name and one host can serve many.
+   * Install the runtime's block runner and helper names in a session.
+   * Apply process policy first: this also activates installed {@code .pth} files,
+   * which may execute code. Package paths do not grant additional filesystem access.
+   * @param session persistent session name
+   * @return the number of installed runtime names
+   * @throws VisPythonException if installation fails
    */
   public static long installRuntime(String session) {
     // Host policy must precede .pth execution; initialize() only wires the site directory.

@@ -56,7 +56,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class Worker {
 
   /** The executable name a platform archive ships this program under. */
-  public static final String EXECUTABLE = "vis-python-worker";
+  public static final String EXECUTABLE = Native.platform().startsWith("windows-")
+      ? "vis-python-worker.exe" : "vis-python-worker";
 
   private Worker() {}
 

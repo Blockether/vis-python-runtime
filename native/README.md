@@ -43,3 +43,28 @@ never assembles an enforcer command.
 
 Consumers get the whole tree from the per-platform archive built with
 `clojure -T:build platform-archive :platform <tag>`.
+
+## Windows x64
+
+Use PowerShell 7.3 or newer in a Visual Studio x64 Native Tools environment:
+
+```powershell
+./native/vispython/build.ps1
+clojure -T:build javac
+clojure -T:build worker-image
+./scripts/test-windows.ps1
+clojure -T:build platform-archive :platform windows-x64
+./scripts/verify-platform-archive.ps1
+```
+
+The archive contains `vispython.dll`, `vis-python-worker.exe`, a complete
+`python/` tree and `python/Scripts/uv.exe`. CPython, uv and GraalVM CE downloads
+use checked-in SHA-256 pins. The build uses MSVC, not MinGW or a POSIX emulation
+layer. CI builds and executes the runtime on Windows Server 2022 x64, including
+the extracted archive; Windows 11 x64 is the desktop target.
+
+The Windows library implements the embedding API and interpreter-level filesystem
+confinement. It does not provide an OS process jail: the Jail API refuses requests
+rather than launching an unrestricted process. No `visjail.dll` is shipped.
+Windows ARM64 is not a release target. This runtime support does not imply that
+all Vis gateway, terminal or workspace features run natively on Windows.

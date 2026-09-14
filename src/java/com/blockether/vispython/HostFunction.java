@@ -1,26 +1,27 @@
 package com.blockether.vispython;
 
 /**
- * The host a guest calls back into: WHO is calling, a name, a text payload, and
- * text in answer.
+ * Handle a Python tool call in the host application.
  *
- * <p>{@code session} is the namespace the call was made from, and the
- * INTERPRETER says what it is - the nearest calling frame whose globals is a
- * session this library created. It is not read out of the payload, because a
- * payload is written by the guest: a block that named a neighbour's session
- * reached that session's tools. Empty means the call came from no session at
- * all, which a host should refuse rather than guess about.
+ * <p>Bind one implementation with {@link Interpreter#bindHost(HostFunction)}.
+ * The runtime supplies the caller session; authorize against this value rather
+ * than a session name in guest-controlled payloads. An empty caller is unknown
+ * and should be rejected. The installed tool protocol uses JSON requests with
+ * {@code args} and {@code kwargs}, and JSON replies with {@code value} or
+ * {@code error}. The bridge transports those strings without parsing them.
  *
- * <p>This interface is the whole dialect. The bridge carries text and reads
- * none of it, so the caller decides whether that text is JSON, EDN or a
- * sentence — the sandbox runtime speaks JSON, and nothing here knows that.
- *
- * <p>Where an implementation RUNS is the constraint that matters: inside the
- * call the guest is blocked on, so it must not re-enter the interpreter, and on
- * any thread, because the GIL is released for its duration and a second guest
- * thread can arrive while the first is still here.
+ * <p>Callbacks execute while the Python caller waits and the GIL is released.
+ * Calls can arrive concurrently on different threads: protect shared state and
+ * do not re-enter {@link Interpreter} from a callback.
  */
 @FunctionalInterface
 public interface HostFunction {
+  /**
+   * Handle one authorized call and return its protocol reply.
+   * @param session caller session identified by the runtime, or empty if unknown
+   * @param name installed tool name
+   * @param payload request JSON text for installed runtime tools
+   * @return reply JSON text, normally {@code {"value": ...}} or {@code {"error": "..."}}
+   */
   String call(String session, String name, String payload);
 }

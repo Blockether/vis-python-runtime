@@ -3,6 +3,10 @@
   "foreign": {
     "downcalls": [
       {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "void*", "jint"]
+      },
+      {
         "returnType": "jint",
         "parameterTypes": []
       },

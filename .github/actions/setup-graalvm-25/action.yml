@@ -22,6 +22,7 @@ runs:
   using: composite
   steps:
     - name: Install pinned GraalVM CE
+      if: runner.os != 'Windows'
       shell: bash
       run: |
         set -euo pipefail
@@ -40,9 +41,8 @@ runs:
 
         base="https://github.com/graalvm/graalvm-ce-builds/releases/download/${GRAAL_TAG}"
 
-        # We consume THREE platforms: linux-x64, linux-aarch64 and macos-aarch64.
-        # There is NO macos-x64 (Intel) community build, so that runner cannot be
-        # used at all; Windows is not a supported target.
+        # Unix builders: macos-x64 has no community build. Windows uses the
+        # PowerShell step below so JAVA_HOME is a native Windows path.
         case "${RUNNER_OS}/${RUNNER_ARCH}" in
           Linux/X64)     slug="linux-x64";     sha="${GRAAL_SHA256_linux_x64}" ;;
           Linux/ARM64)   slug="linux-aarch64"; sha="${GRAAL_SHA256_linux_aarch64}" ;;
@@ -101,3 +101,39 @@ runs:
         echo "${bin_dir}"                      >> "${GITHUB_PATH}"
 
         echo "✓ ${got} — ${graalvm_home}"
+
+    - name: Install pinned GraalVM CE on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $PSNativeCommandUseErrorActionPreference = $true
+        if ($env:RUNNER_ARCH -ne 'X64') { throw 'GraalVM CE Windows builds require x64' }
+        $pin = @{}
+        foreach ($line in Get-Content "$env:GITHUB_WORKSPACE/.graalvm-version") {
+          if ($line -match '^([A-Z0-9_a-z]+)="([^"]+)"$') { $pin[$Matches[1]] = $Matches[2] }
+        }
+        if ($pin.GRAAL_EDITION -ne 'GraalVM CE' -or $pin.GRAAL_VERSION -ne $pin.GRAAL_MAX_VERSION) {
+          throw 'Invalid locked GraalVM CE pin'
+        }
+        $archive = Join-Path $env:RUNNER_TEMP 'graalvm.zip'
+        $name = "graalvm-community-jdk-$($pin.GRAAL_ASSET_VERSION)_windows-x64_bin.zip"
+        Invoke-WebRequest "https://github.com/graalvm/graalvm-ce-builds/releases/download/$($pin.GRAAL_TAG)/$name" -OutFile $archive
+        if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $pin.GRAAL_SHA256_windows_x64) {
+          throw 'GraalVM CE archive checksum mismatch'
+        }
+        $destination = Join-Path $env:RUNNER_TEMP 'graalvm'
+        Expand-Archive -LiteralPath $archive -DestinationPath $destination
+        $java = @(Get-ChildItem $destination -Recurse -Filter java.exe | Where-Object { $_.Directory.Name -eq 'bin' })
+        if ($java.Count -ne 1) { throw 'Expected one GraalVM Java executable' }
+        $jdkHome = $java[0].Directory.Parent.FullName
+        $properties = & $java[0].FullName -XshowSettings:properties -version 2>&1
+        $vendor = @($properties | Where-Object { "$_" -match '^\s*java.vendor.version = ' })
+        if ($vendor.Count -ne 1 -or ($vendor[0] -replace '^\s*java.vendor.version = ', '').Trim() -ne $pin.GRAAL_VENDOR_VERSION) {
+          throw 'Unexpected GraalVM CE vendor/version'
+        }
+        if (-not (Test-Path "$jdkHome/bin/native-image.cmd")) { throw 'Missing native-image.cmd' }
+        "JAVA_HOME=$jdkHome" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+        "GRAALVM_HOME=$jdkHome" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+        "$jdkHome/bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+        Write-Output "Installed $($pin.GRAAL_VENDOR_VERSION)"

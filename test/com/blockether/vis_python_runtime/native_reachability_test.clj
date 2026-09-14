@@ -60,7 +60,9 @@
           (into (sorted-set)
                 (map (comp pr-str shape))
                 (concat (vals (boundary Interpreter "SIGNATURES"))
-                        (vals (boundary Jail "SIGNATURES"))))
+                        (vals (boundary Jail "SIGNATURES"))
+                        (vals (boundary (Class/forName "com.blockether.vispython.WindowsLibrary")
+                                        "SIGNATURES"))))
 
           have
           (into (sorted-set) (map pr-str) (declared "downcalls"))]

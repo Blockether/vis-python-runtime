@@ -83,15 +83,63 @@ jobs:
         with:
           cli: latest
       - run: clojure -T:build jar
+      - run: clojure -X:docs
+      - run: clojure -M:docs:test -d doc -n runtime-docs-test
+      - uses: actions/upload-artifact@v6
+        with:
+          name: api-documentation
+          path: |
+            target/vis-python-runtime-api-docs-*.zip
+            target/vis-python-runtime-*-javadoc.jar
+          if-no-files-found: error
       - uses: actions/upload-artifact@v6
         with:
           name: jvm-api
           path: target/vis-python-runtime.jar
           if-no-files-found: error
 
+  windows:
+    name: package windows-x64
+    runs-on: windows-2022
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify tag matches VIS_PYTHON_VERSION
+        run: |
+          if ("v$((Get-Content VIS_PYTHON_VERSION -Raw).Trim())" -ne $env:GITHUB_REF_NAME) {
+            throw 'Release tag does not match VIS_PYTHON_VERSION'
+          }
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: ./.github/actions/setup-graalvm-25
+      - uses: DeLaGuardo/setup-clojure@13.6.1
+        with:
+          cli: latest
+      - name: Build and execute the Windows runtime and extracted archive
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          ./native/vispython/build.ps1
+          clojure -T:build javac
+          clojure -T:build worker-image
+          ./scripts/test-windows.ps1
+          clojure -T:build platform-archive :platform windows-x64
+          ./scripts/verify-platform-archive.ps1
+          $env:VIS_PYTHON_NATIVE_PATH = (Resolve-Path 'target/archive-check-windows-x64').Path
+          ./scripts/test-windows.ps1
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-x64
+          path: target/vis-python-runtime-windows-x64-*.tar.gz
+          if-no-files-found: error
+
   release:
     name: publish GitHub Release assets
-    needs: [native, jar]
+    needs: [native, windows, jar]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v7

@@ -150,6 +150,10 @@ public final class Jail {
     if (command == null || command.isEmpty()) {
       throw new IllegalArgumentException("command must not be empty");
     }
+    if (Native.platform().startsWith("windows-")) {
+      throw new VisPythonException("Process denied: the OS process jail is not available on Windows",
+          Map.of("command", command.get(0), "platform", Native.platform()));
+    }
     boolean confined = policy != null && !inherited();
     if (confined) {
       String reason = unsupportedReason();

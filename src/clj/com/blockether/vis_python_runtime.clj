@@ -1,29 +1,26 @@
 (ns com.blockether.vis-python-runtime
-  "Embedded CPython for the Vis sandbox: the whole Clojure API.
+  "Embed CPython in a JVM application, with session globals and host callbacks.
 
-   Vis runs sandbox Python — `packages/vis-agent` plus every shim in
-   `resources/vis-shims/` — in vendored CPython reached through the JDK Foreign
-   Function & Memory API and the first-party C ABI in `native/vispython`.
+   Start with [[use-library!]] and [[initialize!]]. Use [[eval-str]] for an
+   expression, [[exec!]] for statements, or [[install-runtime!]] followed by
+   [[run-block]] to capture printed output and Python errors as JSON. Release a
+   session's globals with [[close-session!]] when you finish.
 
-   The bridge itself is JAVA — `src/java/com/blockether/vispython/` — and this
-   namespace is a thin skin over it: Clojure argument shapes and keyword maps,
-   and nothing else. The reason is the native image the result is linked
-   into. Every downcall there is an `invokeExact` against a signature the
-   compiler knows and the host upcall's target is a static method found by name,
-   while the same code as interop is a reflective invocation an image only keeps
-   if somebody remembered to register it — the failure that does not show up in
-   a green JVM suite, only in a user's terminal. Java also owns the process
-   pinning, the upcall stub, the trust export and pip, because none of that is
-   made clearer by being written in Clojure.
+   One interpreter and GIL serve the whole process. Sessions have separate
+   globals but share imports, filesystem/network policy, thread limits and host
+   callbacks. A session is not a process or a security boundary. Apply policy
+   before installing runtime modules or executing untrusted code.
 
-   Nothing links at build time. The library is resolved when it is first needed:
-   a path the host named through `use-library!` wins, then
-   `VIS_PYTHON_NATIVE_PATH`, then the classpath resource
-   `prebuilds/<platform>/<file>` a checkout has after a native build. The
-   published platform artifact is a release archive, not a jar, so a host that
-   unpacked one names it here. A failure anywhere below is a
-   `VisPythonException` whose `.data`
-   names the symbol, status, platform or path it is about."
+   This namespace wraps the Java API in `com.blockether.vispython`; it does not
+   implement a second interpreter. Library resolution happens on first use:
+   [[use-library!]], then `VIS_PYTHON_NATIVE_PATH`, then a platform prebuild on
+   the classpath. Keep the unpacked platform archive's native library and
+   `python/` directory together. Start the JVM with
+   `--enable-native-access=ALL-UNNAMED`.
+
+   Bridge failures throw `com.blockether.vispython.VisPythonException`; its
+   `.data` map contains available diagnostics such as symbol, status or path.
+   Python errors from [[run-block]] instead appear in its JSON `error` field."
   (:import [com.blockether.vispython HostFunction Interpreter Jail JailPolicy JailPolicy$Egress
             Locations Native Pip Trust]
            [java.util.function Consumer]))
@@ -56,7 +53,9 @@
   ([platform-tag] (Native/libraryName platform-tag)))
 
 (defn resolve-library
-  "Where the runtime cdylib is, as `{:source \"env\"|\"resource\" :path \"…\"}`."
+  "Resolve the native library as `{:source :configured|:env|:resource :path …}`.
+   A path selected by [[use-library!]] takes precedence over the environment;
+   the returned `:path` is the file the bridge opens."
   ([] (resolve-library (platform)))
   ([platform-tag]
    (let [found (Native/library platform-tag)]
@@ -65,9 +64,9 @@
      {:source (keyword (.source found)) :path (.path found)})))
 
 (defn use-library!
-  "Resolve to THIS cdylib (or the directory holding it) from now on — for a host
-   that fetched the platform artifact itself, because a JVM cannot set its own
-   environment. `nil` restores ordinary resolution."
+  "Select the native library file or unpacked archive directory before first use.
+   `nil` restores environment/classpath resolution. The interpreter loads once
+   per process: this does not replace an already loaded library."
   [path]
   (Native/use (some-> path
                       str)))
@@ -148,14 +147,15 @@
                (int (or columns 0)))))
 
 (defn initialize!
-  "Start the embedded interpreter, once per process, and put `:source-paths`
-   (plus the defaults) on `sys.path`. Answers
+  "Start the embedded interpreter once per process and add `:source-paths` to
+   its import path. Returns
    `{:library … :source-paths … :python-home … :pycache-prefix … :packages …}`.
 
-   `:python-home`, `:pycache-prefix` and `:packages` default to what the runtime
-   resolves; an explicit nil turns each one off — CPython's own standard-library
-   search, no bytecode cache, no package directory. Starting is process-wide and
-   idempotent; a SESSION is not."
+   Omit `:python-home`, `:pycache-prefix` or `:packages` to use its resolved
+   default. An explicit `nil` disables that location: CPython resolves its own
+   standard library, bytecode caching is off, or no package directory is added.
+   Initialization is process-wide and idempotent; it does not create an isolated
+   interpreter per session. Apply guest policy before [[install-runtime!]]."
   ([] (initialize! {}))
   ([{:keys [source-paths python-home pycache-prefix packages]
      :or {python-home Interpreter/DEFAULT
@@ -295,25 +295,34 @@
                         (long every-ms))))
 
 (defn eval-str
-  "Evaluate `code` as a Python EXPRESSION, answering `str(result)`."
+  "Evaluate one Python expression and return Python `str(result)` as JVM text.
+   Requires [[initialize!]]. Uses persistent `session` globals; it does not
+   convert Python objects to Clojure values. Python failures throw
+   `VisPythonException`. See [[run]] for JSON-encoded values."
   ([code] (eval-str default-session code))
   ([session code] (Interpreter/eval session code)))
 
 (defn exec!
-  "Run `code` as a Python module body, for its side effects."
+  "Execute Python statements in persistent `session` globals; returns nil.
+   Requires [[initialize!]]. Output is not captured by this API and Python
+   failures throw `VisPythonException`. Use [[run-block]] for output capture."
   ([code] (exec! default-session code))
   ([session code] (Interpreter/exec session code)))
 
 (defn run
-  "Run `code` the way the sandbox does — statements execute and a trailing
-   expression's value comes back — answering that value as JSON text: one
-   dialect crosses this boundary in both directions."
+  "Execute statements and return the trailing expression's value as JSON text.
+   Requires [[initialize!]]. Read the result with your application's JSON
+   library; unlike [[eval-str]], Python values retain their JSON shape.
+   Unlike [[run-block]], this API returns a value rather than printed output."
   ([code] (run default-session code))
   ([session code] (Interpreter/run session code)))
 
 (defn run-block
-  "Run `code` as a sandbox BLOCK, answering JSON text of what it printed and
-   what it raised. A block's ONE success channel is what it PRINTED."
+  "Execute a runtime block and return JSON text with `stdout` and `error`.
+   Install the session with [[install-runtime!]] first. Printed output is the
+   only success channel; a trailing expression is discarded. `error` is null
+   on success or a Python error string; prior stdout is preserved on failure.
+   Loading and bridge errors can still throw `VisPythonException`."
   ([code] (run-block default-session code))
   ([session code] (Interpreter/runBlock session code)))
 
@@ -346,7 +355,8 @@
   ([session name] (Interpreter/installSyncTool session name)))
 
 (defn close-session!
-  "Drop `session`'s namespace, answering whether there was one."
+  "Release a session's globals and owned handles; return whether it existed.
+   This does not unload the process-wide interpreter or clear shared imports."
   [session]
   (Interpreter/closeSession session))
 

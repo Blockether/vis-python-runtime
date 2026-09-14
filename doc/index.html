@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>vis-python-runtime API</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.6; }
+    body { max-width: 64rem; margin: 0 auto; padding: 3rem 1.5rem; }
+    h1, h2 { line-height: 1.2; }
+    h1 { font-size: clamp(2rem, 5vw, 3rem); margin-bottom: .5rem; }
+    .lead { font-size: 1.25rem; max-width: 46rem; }
+    nav { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1rem; margin: 2rem 0; }
+    nav a { border: 1px solid #888; border-radius: .5rem; padding: 1.25rem; text-decoration: none; color: inherit; }
+    nav a:hover, nav a:focus-visible { outline: 2px solid currentColor; }
+    nav strong { display: block; font-size: 1.2rem; text-decoration: underline; }
+    a { color: light-dark(#174fa3, #9dc8ff); }
+    code { font-size: .95em; }
+    footer { margin-top: 3rem; border-top: 1px solid #888; padding-top: 1rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>vis-python-runtime</h1>
+    <p class="lead">Embed CPython in Java and Clojure. Run Python expressions, keep session state, and expose host functions through a small native bridge.</p>
+    <nav aria-label="API documentation">
+      <a href="java/index.html"><strong>Java API</strong>Javadoc for the interpreter, native loading, callbacks, and supporting types.</a>
+      <a href="clojure/index.html"><strong>Clojure API</strong>Codox reference for functions, argument maps, and return values.</a>
+    </nav>
+    <h2>Start with a working example</h2>
+    <p>The <a href="clojure/getting-started.html">getting-started guide</a> covers the JVM jar, native archive, Java and Clojure setup, and expected output. You can also download the <a href="examples/Example.java">runnable Java example</a>.</p>
+    <h2>Choose the right execution and isolation model</h2>
+    <p>Sessions keep separate globals, but share one interpreter, imports, and the GIL. A session is not a process or a security boundary. Read <a href="clojure/embedding.html">embedding and confinement</a> before running untrusted code.</p>
+    <p>Windows x64 supports the embedded runtime. OS-level child-process confinement is not available on Windows; jail requests fail rather than run without enforcement.</p>
+  </main>
+  <footer>
+    <p>Generated with the JDK's Javadoc and Codox. <a href="https://github.com/Blockether/vis-python-runtime">Source repository</a> · <a href="https://github.com/Blockether/vis-python-runtime/releases">Releases</a></p>
+  </footer>
+</body>
+</html>

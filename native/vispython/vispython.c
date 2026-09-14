@@ -16,21 +16,29 @@
  * human-readable reason, so one call yields both the verdict and the message.
  */
 #include <Python.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#if defined(__linux__)
-#include <dlfcn.h>
-#endif
 #include <limits.h>
-#include <pthread.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
+#if defined(_WIN32)
+#include "vispython_windows.h"
+#else
+#include <dirent.h>
+#include <pthread.h>
 #include <unistd.h>
+#define VIS_PY_EXPORT
+#define vis_py_file_info struct stat
+#define vis_py_stat_path stat
+#if defined(__linux__)
+#include <dlfcn.h>
+#endif
+#endif
 
 #define VIS_PY_ERR_BUFFER (-1) /* caller passed no room for a result */
 #define VIS_PY_ERR_INIT   (-2) /* interpreter is not running */
@@ -607,6 +615,9 @@ static void vis_py_roots_clear(vis_py_roots *roots)
    normalization alone would let a symlink INSIDE a root point anywhere. */
 static int vis_py_canonical(const char *path, char *out, size_t cap)
 {
+#if defined(_WIN32)
+    return vis_py_win_canonical(path, out, cap);
+#else
     char work[PATH_MAX];
     char tail[PATH_MAX];
     char resolved[PATH_MAX];
@@ -672,6 +683,7 @@ static int vis_py_canonical(const char *path, char *out, size_t cap)
     }
     written = snprintf(out, cap, "%s%s%s", resolved, resolved[1] == '\0' ? "" : "/", tail);
     return (written > 0 && (size_t)written < cap) ? 1 : 0;
+#endif
 }
 
 /* Whether `path`, already canonical, is one of `roots` or lives under one. */
@@ -684,7 +696,7 @@ static int vis_py_under(const char *path, const vis_py_roots *roots)
         if (strncmp(path, root, n) != 0) {
             continue;
         }
-        if (path[n] == '\0' || path[n] == '/' || (n == 1 && root[0] == '/')) {
+        if (path[n] == '\0' || path[n] == '/' || (n > 0 && root[n - 1] == '/')) {
             return 1;
         }
     }
@@ -756,7 +768,7 @@ static int vis_py_arg_path(PyObject *arg, char *out, size_t cap)
     if (utf8 == NULL || strlen(utf8) >= cap) {
         PyErr_Clear();
         Py_DECREF(fspath);
-        return 0;
+        return -1;
     }
     strcpy(out, utf8);
     Py_DECREF(fspath);
@@ -780,10 +792,11 @@ static int vis_py_check(const char *event, PyObject *arg, int writing)
     char raw[PATH_MAX];
     char canon[PATH_MAX];
     int allowed;
+    int path_status;
 
-    if (!vis_py_arg_path(arg, raw, sizeof raw)) {
-        return 0;
-    }
+    path_status = vis_py_arg_path(arg, raw, sizeof raw);
+    if (path_status == 0) return 0;
+    if (path_status < 0) return vis_py_refuse(event, "<invalid path>", writing);
     if (!vis_py_canonical(raw, canon, sizeof canon)) {
         return vis_py_refuse(event, raw, writing);
     }
@@ -910,6 +923,13 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
     if (!vis_py_confined || event == NULL || args == NULL || !PyTuple_Check(args)) {
         return 0;
     }
+#if defined(_WIN32)
+    if (strncmp(event, "_winapi.", 8) == 0 || strncmp(event, "winreg.", 7) == 0) {
+        PyErr_SetString(PyExc_PermissionError,
+                        "vis sandbox: direct Windows handles and registry access are refused");
+        return -1;
+    }
+#endif
     if (vis_py_event_in(event, vis_py_process_events)) {
         vis_py_refusal(vis_py_process_refusal, VIS_PY_PROCESS_REFUSAL, refusal, sizeof refusal);
         PyErr_SetString(PyExc_RuntimeError, refusal);
@@ -1526,7 +1546,7 @@ static int vis_py_fs_copy_bytes(const char *from, const char *to, size_t *copied
     FILE *out;
     char chunk[65536];
     size_t got;
-    struct stat info;
+    vis_py_file_info info;
 
     in = fopen(from, "rb");
     if (in == NULL) {
@@ -1562,7 +1582,7 @@ static int vis_py_fs_copy_bytes(const char *from, const char *to, size_t *copied
     }
     /* The mode travels with the bytes: a copied script that lost its execute bit
        is a file that no longer does what the original did. */
-    if (stat(from, &info) == 0) {
+    if (vis_py_stat_path(from, &info) == 0) {
         chmod(to, info.st_mode & 07777);
     }
     return 0;
@@ -1619,13 +1639,13 @@ static PyObject *vis_py_fs_move(PyObject *self, PyObject *args)
 static PyObject *vis_py_fs_remove(PyObject *self, PyObject *args)
 {
     const char *path = NULL;
-    struct stat info;
+    vis_py_file_info info;
 
     (void)self;
     if (!vis_py_fs_allowed() || !PyArg_ParseTuple(args, "s", &path)) {
         return NULL;
     }
-    if (stat(path, &info) != 0) {
+    if (vis_py_stat_path(path, &info) != 0) {
         Py_RETURN_FALSE;
     }
     if (S_ISDIR(info.st_mode)) {
@@ -1659,8 +1679,15 @@ static PyObject *vis_py_fs_mkdir(PyObject *self, PyObject *args)
         return NULL;
     }
     snprintf(work, sizeof work, "%s", path);
+#if defined(_WIN32)
+    for (i = 0; work[i] != '\0'; i++) if (work[i] == '\\') work[i] = '/';
+#endif
     for (i = 1; work[i] != '\0'; i++) {
-        if (work[i] != '/') {
+        if (work[i] != '/'
+#if defined(_WIN32)
+            || (i == 2 && work[1] == ':')
+#endif
+        ) {
             continue;
         }
         work[i] = '\0';
@@ -1684,13 +1711,13 @@ static PyObject *vis_py_fs_mkdir(PyObject *self, PyObject *args)
 static PyObject *vis_py_fs_stat(PyObject *self, PyObject *args)
 {
     const char *path = NULL;
-    struct stat info;
+    vis_py_file_info info;
 
     (void)self;
     if (!vis_py_fs_allowed() || !PyArg_ParseTuple(args, "s", &path)) {
         return NULL;
     }
-    if (stat(path, &info) != 0) {
+    if (vis_py_stat_path(path, &info) != 0) {
         Py_RETURN_NONE;
     }
     return Py_BuildValue("{s:s,s:n,s:d}", "kind",
@@ -1758,7 +1785,7 @@ static PyObject *vis_py_host_init(void)
 /* Bind the callable every `_vis_host.call` reaches; NULL unbinds, after which a
    guest calling a tool is told there is no host rather than crashing. The host
    may rebind at will: the pointer is read per call. Returns 0. */
-int vispython_host(void *fn)
+VIS_PY_EXPORT int vispython_host(void *fn)
 {
     vis_py_host_fn host;
 
@@ -1822,7 +1849,12 @@ static void vis_py_add_interpreter_roots(vis_py_roots *roots)
                    interpreter. */
                 if (entry != NULL && PyUnicode_Check(entry)) {
                     const char *text = PyUnicode_AsUTF8(entry);
-                    if (text != NULL && text[0] == '/') {
+                    if (text != NULL && (text[0] == '/'
+#if defined(_WIN32)
+                        || (strlen(text) >= 3 && text[1] == ':' &&
+                            (text[2] == '\\' || text[2] == '/'))
+#endif
+                    )) {
                         vis_py_roots_add(roots, text);
                     }
                 }
@@ -1844,6 +1876,7 @@ static void vis_py_add_interpreter_roots(vis_py_roots *roots)
    because discarding output is what it is for. */
 static void vis_py_add_device_roots(vis_py_roots *read_roots, vis_py_roots *write_roots)
 {
+#if !defined(_WIN32)
     static const char *const readable[] = {"/dev/null", "/dev/zero", "/dev/urandom", "/dev/random",
                                            NULL};
     int i;
@@ -1852,6 +1885,11 @@ static void vis_py_add_device_roots(vis_py_roots *read_roots, vis_py_roots *writ
         vis_py_roots_add(read_roots, readable[i]);
     }
     vis_py_roots_add(write_roots, "/dev/null");
+#else
+    /* DOS devices are not filesystem roots; no device alias is granted implicitly. */
+    (void)read_roots;
+    (void)write_roots;
+#endif
 }
 
 /* Confine the interpreter to `read_roots` and `write_roots`, each a
@@ -1868,7 +1906,7 @@ static void vis_py_add_device_roots(vis_py_roots *read_roots, vis_py_roots *writ
    data, and the installation itself - `sys.prefix`, `sys.base_prefix`,
    `sys.exec_prefix` and every absolute `sys.path` entry - readable. Both are
    counted in the answer. */
-int vispython_confine(const char *read_roots, const char *write_roots, const char *refusal,
+VIS_PY_EXPORT int vispython_confine(const char *read_roots, const char *write_roots, const char *refusal,
                        char *out, int cap)
 {
     /* The next policy, assembled entirely off to the side: nothing here is
@@ -1883,7 +1921,9 @@ int vispython_confine(const char *read_roots, const char *write_roots, const cha
 
     vis_py_roots_set(&next_read, read_roots);
     vis_py_roots_set(&next_write, write_roots);
-    confined = (next_read.count + next_write.count) > 0;
+    /* Invalid requested roots must fail closed, never lift the previous policy. */
+    confined = (read_roots != NULL && read_roots[0] != '\0')
+               || (write_roots != NULL && write_roots[0] != '\0');
     if (confined) {
         vis_py_roots_add(&next_write, vis_py_pycache_prefix);
         vis_py_add_interpreter_roots(&next_read);
@@ -1925,7 +1965,7 @@ int vispython_confine(const char *read_roots, const char *write_roots, const cha
    the thing a host knows: extension namespaces are trusted, the sandbox's are
    not, and no code can move itself from one to the other. Answers how many
    sessions are trusted now. */
-int vispython_trust(const char *session, const char *policy, char *out, int cap)
+VIS_PY_EXPORT int vispython_trust(const char *session, const char *policy, char *out, int cap)
 {
     char summary[16];
     int want = 1;
@@ -1971,7 +2011,7 @@ int vispython_trust(const char *session, const char *policy, char *out, int cap)
     return vis_py_copy_out(summary, out, cap);
 }
 
-int vispython_network(const char *policy, const char *refusal, char *out, int cap)
+VIS_PY_EXPORT int vispython_network(const char *policy, const char *refusal, char *out, int cap)
 {
     int want = 1;
     char summary[8];
@@ -1999,7 +2039,7 @@ int vispython_network(const char *policy, const char *refusal, char *out, int ca
    sandbox's, where the code is the host's own and confinement is off.
    `workers` sizes the pool when it FIRST runs; a later change is for the next
    process, because resizing a pool with work in it is a way to lose a task. */
-int vispython_threads(const char *policy, char *out, int cap)
+VIS_PY_EXPORT int vispython_threads(const char *policy, char *out, int cap)
 {
     int want_cap = 0;
     int want_workers = 0;
@@ -2031,7 +2071,7 @@ int vispython_threads(const char *policy, char *out, int cap)
    suite and `pip` use it; a host that drains leaves it at 0 and keeps its
    diagnostics in the one file it already has. The policy is total: a level
    given without the flag turns mirroring off. Answers the policy in force. */
-int vispython_logging(const char *policy, char *out, int cap)
+VIS_PY_EXPORT int vispython_logging(const char *policy, char *out, int cap)
 {
     char want[16];
     char summary[32];
@@ -2056,7 +2096,7 @@ int vispython_logging(const char *policy, char *out, int cap)
    reports the length it needed, so the host allocates that much and asks once;
    the text is handed over and dropped. Answers 0 with an empty buffer when
    nothing is waiting, which is the normal case. */
-int vispython_take_result(char *out, int cap)
+VIS_PY_EXPORT int vispython_take_result(char *out, int cap)
 {
     char *kept;
     int n;
@@ -2085,7 +2125,7 @@ int vispython_take_result(char *out, int cap)
    host drains in a loop until the answer is empty. Records lost to a full ring
    are reported first, as an event of their own, because the gap matters more
    than the lines around it. */
-int vispython_drain_log(char *out, int cap)
+VIS_PY_EXPORT int vispython_drain_log(char *out, int cap)
 {
     const char *line;
     int written = 0;
@@ -2135,7 +2175,7 @@ int vispython_drain_log(char *out, int cap)
    Idempotent, so a caller that cannot cheaply know whether a sibling already
    started it does not have to. Returns 0, or VIS_PY_ERR_INIT with the reason in
    `out`. */
-int vispython_initialize(const char *home, const char *executable, const char *pycache_prefix,
+VIS_PY_EXPORT int vispython_initialize(const char *home, const char *executable, const char *pycache_prefix,
                          char *out, int cap)
 {
     PyConfig config;
@@ -2220,7 +2260,7 @@ int vispython_initialize(const char *home, const char *executable, const char *p
 }
 
 /* The running interpreter's version string, e.g. "3.14.6 (main, ...)". */
-int vispython_version(char *out, int cap)
+VIS_PY_EXPORT int vispython_version(char *out, int cap)
 {
     if (!vis_py_started) {
         return VIS_PY_ERR_INIT;
@@ -2318,7 +2358,7 @@ static volatile unsigned long vis_py_running_thread = 0;
 
    Called from ANY thread, and never from the one it interrupts: it takes the GIL
    the running block keeps dropping at its switch interval. */
-int vispython_interrupt(char *out, int cap)
+VIS_PY_EXPORT int vispython_interrupt(char *out, int cap)
 {
     PyGILState_STATE gil;
     unsigned long target;
@@ -2427,7 +2467,7 @@ static int vis_py_run_block_locked(const char *module_name, const char *code, ch
    tool calling back INTO the interpreter - while the block that called it sits
    parked in `vis_py_host_call` - a nested acquire instead of a deadlock. The
    `_locked` bodies above assume the GIL is already held. */
-int vispython_eval(const char *module_name, const char *code, char *out, int cap)
+VIS_PY_EXPORT int vispython_eval(const char *module_name, const char *code, char *out, int cap)
 {
     PyGILState_STATE gil;
     int status;
@@ -2443,7 +2483,7 @@ int vispython_eval(const char *module_name, const char *code, char *out, int cap
     return status;
 }
 
-int vispython_exec(const char *module_name, const char *code, char *out, int cap)
+VIS_PY_EXPORT int vispython_exec(const char *module_name, const char *code, char *out, int cap)
 {
     PyGILState_STATE gil;
     int status;
@@ -2459,7 +2499,7 @@ int vispython_exec(const char *module_name, const char *code, char *out, int cap
     return status;
 }
 
-int vispython_run(const char *module_name, const char *code, char *out, int cap)
+VIS_PY_EXPORT int vispython_run(const char *module_name, const char *code, char *out, int cap)
 {
     PyGILState_STATE gil;
     int status;
@@ -2475,7 +2515,7 @@ int vispython_run(const char *module_name, const char *code, char *out, int cap)
     return status;
 }
 
-int vispython_run_block(const char *module_name, const char *code, char *out, int cap)
+VIS_PY_EXPORT int vispython_run_block(const char *module_name, const char *code, char *out, int cap)
 {
     PyGILState_STATE gil;
     int status;

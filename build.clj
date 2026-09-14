@@ -13,22 +13,29 @@
 
 (def lib 'com.blockether/vis-python-runtime)
 
-(def native-platforms #{"linux-x64" "linux-arm64" "darwin-arm64" "darwin-x64"})
+(def native-platforms #{"linux-x64" "linux-arm64" "darwin-arm64" "darwin-x64" "windows-x64"})
 
 (def native-libs
   {"linux-x64" ["libvispython.so" "libvisjail.so"]
    "linux-arm64" ["libvispython.so" "libvisjail.so"]
    "darwin-arm64" ["libvispython.dylib" "libvisjail.dylib"]
-   "darwin-x64" ["libvispython.dylib" "libvisjail.dylib"]})
+   "darwin-x64" ["libvispython.dylib" "libvisjail.dylib"]
+   "windows-x64" ["vispython.dll"]})
 
 (def worker-platforms
   "Platforms whose archive carries `vis-python-worker`, the interpreter worker
    compiled to a native image (`worker-image`). GraalVM CE publishes no
    darwin-x64 build, so that archive ships without one and a host there runs
    `com.blockether.vispython.Worker` on its own JVM instead."
-  #{"linux-x64" "linux-arm64" "darwin-arm64"})
+  #{"linux-x64" "linux-arm64" "darwin-arm64" "windows-x64"})
 
-(def worker-executable "vis-python-worker")
+(defn- worker-executable
+  [platform]
+  (if (= platform "windows-x64") "vis-python-worker.exe" "vis-python-worker"))
+
+(defn- uv-executable
+  [platform]
+  (if (= platform "windows-x64") "python/Scripts/uv.exe" "python/bin/uv"))
 
 (def version
   "The repo-root VIS_PYTHON_VERSION file, verbatim — the single version source,
@@ -140,6 +147,7 @@
 
     (str (cond (str/includes? os "mac") "darwin"
                (str/includes? os "linux") "linux"
+               (str/includes? os "windows") "windows"
                :else (throw (ex-info (str "Unsupported operating system: " os) {:os os})))
          "-"
          (case arch
@@ -169,10 +177,15 @@
         (or (System/getenv "GRAALVM_HOME") (System/getenv "JAVA_HOME"))
 
         launcher
-        (when home (io/file home "bin" "native-image"))
+        (when home
+          (io/file home
+                   "bin"
+                   (if (= (host-platform) "windows-x64") "native-image.cmd" "native-image")))
 
         command
-        (if (and launcher (.isFile launcher)) (.getAbsolutePath launcher) "native-image")
+        (if (and launcher (.isFile launcher))
+          (.getAbsolutePath launcher)
+          (if (= (host-platform) "windows-x64") "native-image.cmd" "native-image"))
 
         want
         (get @graal-pin "GRAAL_VERSION")
@@ -206,7 +219,7 @@
       (throw (ex-info (str "no worker image for " platform " — GraalVM CE has no build there")
                       {:platform platform :known worker-platforms})))
     (javac nil)
-    (let [out (io/file "resources/prebuilds" platform worker-executable)
+    (let [out (io/file "resources/prebuilds" platform (worker-executable platform))
           args [(native-image-launcher) "-cp"
                 (str/join java.io.File/pathSeparator [class-dir "resources"])
                 "--enable-native-access=ALL-UNNAMED" "-H:+UnlockExperimentalVMOptions"
@@ -225,12 +238,11 @@
 
 (defn platform-archive
   "Write the release asset for one platform: everything under
-   `resources/prebuilds/<platform>/` — both cdylibs, the vendored interpreter and,
-   on a `worker-platforms` member, the `vis-python-worker` image — as a gzipped
-   tar. `libvispython` embeds CPython; `libvisjail` embeds upstream bubblewrap on
-   Linux and enters Seatbelt on macOS. Contents sit at the archive root, exactly
-   where `Locations` resolves them. `tar` preserves the interpreter's symlinks
-   and executable bits."
+   `resources/prebuilds/<platform>/` — the embedding library, vendored interpreter
+   and native worker where available — as a gzipped tar. Linux and macOS also
+   include libvisjail; Windows does not provide OS process confinement and the
+   Jail API refuses it. Contents sit at the archive root, where Locations
+   resolves them. tar preserves Unix symlinks and executable bits."
   [{:keys [platform]}]
   (let [platform (some-> platform
                          name)]
@@ -239,7 +251,7 @@
                       {:platform platform :known native-platforms})))
     (let [dir (io/file "resources/prebuilds" platform)
           libs (mapv #(io/file dir %) (native-libs platform))
-          worker (io/file dir worker-executable)
+          worker (io/file dir (worker-executable platform))
           out (io/file (format "target/%s-%s-%s.tar.gz" (name lib) platform version))]
 
       (doseq [src libs]
@@ -250,9 +262,10 @@
         (throw (ex-info (str "worker image not found (run `clojure -T:build worker-image` first): "
                              worker)
                         {:platform platform :path (str worker)})))
-      (when-not (.canExecute (io/file dir "python/bin/uv"))
-        (throw (ex-info "Bundled uv not found (run native/vispython/build.sh first)"
-                        {:platform platform})))
+      (when-not (.canExecute (io/file dir (uv-executable platform)))
+        (throw (ex-info
+                 "Bundled uv not found (run the platform native/vispython build script first)"
+                 {:platform platform})))
       (doseq [license ["uv-LICENSE-APACHE" "uv-LICENSE-MIT"]]
         (when-not (.isFile (io/file dir "licenses" license))
           (throw (ex-info "Bundled uv license not found" {:platform platform :license license}))))

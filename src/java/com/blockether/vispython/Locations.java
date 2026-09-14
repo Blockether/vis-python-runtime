@@ -72,8 +72,11 @@ public final class Locations {
       return null;
     }
     Path root = Path.of(libraryPath).toAbsolutePath().getParent();
-    String name = Native.platform().startsWith("darwin-")
-        ? "libvisjail.dylib" : "libvisjail.so";
+    String platform = Native.platform();
+    if (platform.startsWith("windows-")) {
+      return null; // No Windows process enforcer is shipped; never resolve a Unix library.
+    }
+    String name = platform.startsWith("darwin-") ? "libvisjail.dylib" : "libvisjail.so";
     Path candidate = root.resolve(name);
     return Files.isRegularFile(candidate) ? candidate.toString() : null;
   }
@@ -176,9 +179,13 @@ public final class Locations {
     if (pythonHome == null) {
       return null;
     }
-    Path path = Path.of(pythonHome).resolve("bin/uv");
-    return Files.isRegularFile(path) && Files.isExecutable(path)
-        ? path.toAbsolutePath().toString() : null;
+    for (String candidate : new String[] {"bin/uv", "Scripts/uv.exe"}) {
+      Path path = Path.of(pythonHome).resolve(candidate);
+      if (Files.isRegularFile(path) && Files.isExecutable(path)) {
+        return path.toAbsolutePath().toString();
+      }
+    }
+    return null;
   }
   /**
    * Directories CPython may import from, in order: what the caller passed, then
