@@ -153,6 +153,36 @@
       (is (every? #(number? (get % "ts")) records)))
     (is (= "" (runtime/drain-log!)))))
 
+(deftest windows-native-filesystem-errors-test
+  ;; The Windows CI DLL link must not depend on the CRT's private error mapper.
+  (let [directory
+        (temporary-directory "vis-windows-errors-")
+
+        missing
+        (.resolve directory "missing")
+
+        target
+        (.resolve directory "target.txt")
+
+        session
+        "windows-filesystem-errors"]
+
+    (runtime/trust! session)
+    (try (is (= "[]"
+                (runtime/run session
+                             (str "__import__('_vis_fs').list(" (python-string directory) ")"))))
+         (doseq [expression [(str "__import__('_vis_fs').list(" (python-string missing) ")")
+                             (str "__import__('_vis_fs').move("
+                                  (python-string missing)
+                                  ", "
+                                  (python-string target)
+                                  ")")]]
+           (is (thrown-with-msg? VisPythonException
+                                 #"FileNotFoundError"
+                                 (runtime/run session expression))))
+         (is (not (.exists (.toFile target))))
+         (finally (runtime/trust! session false) (Files/delete directory)))))
+
 (deftest windows-native-trusted-files-test
   (when windows?
     (let [outside

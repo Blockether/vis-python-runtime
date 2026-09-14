@@ -17,8 +17,6 @@
 #define VIS_PY_EXPORT __declspec(dllexport)
 #define _Thread_local __declspec(thread)
 #define strdup _strdup
-#define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)
-#define S_ISREG(mode) (((mode) & _S_IFMT) == _S_IFREG)
 
 typedef SRWLOCK pthread_mutex_t;
 typedef CONDITION_VARIABLE pthread_cond_t;
@@ -200,6 +198,29 @@ static int vis_py_win_mkdir(const char *path, int mode)
     return result;
 }
 
+/* Map documented Win32 failures to the errno contract used by the shared filesystem API. */
+static void vis_py_win_set_errno(DWORD error)
+{
+    switch (error) {
+    case ERROR_FILE_NOT_FOUND:
+    case ERROR_PATH_NOT_FOUND: errno = ENOENT; break;
+    case ERROR_ACCESS_DENIED:
+    case ERROR_SHARING_VIOLATION:
+    case ERROR_LOCK_VIOLATION: errno = EACCES; break;
+    case ERROR_ALREADY_EXISTS:
+    case ERROR_FILE_EXISTS: errno = EEXIST; break;
+    case ERROR_NOT_SAME_DEVICE: errno = EXDEV; break;
+    case ERROR_DIRECTORY: errno = ENOTDIR; break;
+    case ERROR_DIR_NOT_EMPTY: errno = ENOTEMPTY; break;
+    case ERROR_DISK_FULL: errno = ENOSPC; break;
+    case ERROR_NOT_ENOUGH_MEMORY:
+    case ERROR_OUTOFMEMORY: errno = ENOMEM; break;
+    case ERROR_INVALID_NAME:
+    case ERROR_INVALID_PARAMETER: errno = EINVAL; break;
+    default: errno = EIO; break;
+    }
+}
+
 static int vis_py_win_rename(const char *from, const char *to)
 {
     wchar_t *source = vis_py_win_wide(from);
@@ -207,7 +228,7 @@ static int vis_py_win_rename(const char *from, const char *to)
     int result = -1;
     if (source != NULL && target != NULL) {
         if (MoveFileExW(source, target, MOVEFILE_REPLACE_EXISTING)) result = 0;
-        else _dosmaperr(GetLastError());
+        else vis_py_win_set_errno(GetLastError());
     }
     free(source);
     free(target);
@@ -240,10 +261,10 @@ static DIR *opendir(const char *path)
     memcpy(pattern + size, L"\\*", 3 * sizeof *wide);
     free(wide);
     dir->handle = FindFirstFileW(pattern, &dir->data);
-    free(pattern);
     if (dir->handle == INVALID_HANDLE_VALUE) {
-        _dosmaperr(GetLastError()); free(dir); return NULL;
+        vis_py_win_set_errno(GetLastError()); free(pattern); free(dir); return NULL;
     }
+    free(pattern);
     dir->first = 1;
     return dir;
 }
