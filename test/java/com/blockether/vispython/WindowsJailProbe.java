@@ -123,7 +123,11 @@ public final class WindowsJailProbe {
   }
 
   private static Path privateAppData(WindowsJail jail, Path profile) {
-    return jail.temporaryDirectory().resolve("Packages").resolve(profile.getFileName()).resolve("AC");
+    // GetAppContainerFolderPath returns local app data, not the profile root.
+    check(profile.getFileName().toString().equalsIgnoreCase("AC"), "profile app-data path: " + profile);
+    Path name = profile.getParent().getFileName();
+    check(name.toString().matches("visjail\\.[0-9a-f]{32}"), "owned profile name: " + profile);
+    return jail.temporaryDirectory().resolve("Packages").resolve(name).resolve("AC");
   }
 
   private static void validation(Path parent, Path guest) throws Exception {

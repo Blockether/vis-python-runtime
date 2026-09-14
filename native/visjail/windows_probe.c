@@ -549,6 +549,10 @@ static void profile_check(const wchar_t *sid_text, int remove_profile) {
     for (const wchar_t *at = path; *at; at++) printf("%04X", (unsigned int)*at);
     printf("\n");
     if (remove_profile) {
+        wchar_t *leaf = wcsrchr(path, L'\\');
+        /* GetAppContainerFolderPath returns the profile's local app-data folder. */
+        check(leaf && _wcsicmp(leaf + 1, L"AC") == 0, "profile lookup returns local app data");
+        if (leaf) *leaf = L'\0';
         name = wcsrchr(path, L'\\');
         name = name ? name + 1 : path;
         check(wcslen(name) == 40 && wcsncmp(name, L"visjail.", 8) == 0,
