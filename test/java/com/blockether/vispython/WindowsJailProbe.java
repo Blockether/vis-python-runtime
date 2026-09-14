@@ -599,6 +599,9 @@ public final class WindowsJailProbe {
     List<String> leak = new ArrayList<>(List.of(guest.toString(), "leak-host", secret.toString()));
     leak.addAll(self("--inherited-child", parent, guest));
     passed(finish(new ProcessBuilder(leak).start(), new byte[0]), "inherited ambient handle test host");
+    // Exercise the primary token before Java needs to create its own default-security pipes.
+    passed(finish(new ProcessBuilder(guest.toString(), "standard-host", guest.toString(), "standard-token").start(),
+        new byte[0]), "standard host token and Win32 pipe control");
     List<String> standard = new ArrayList<>(List.of(guest.toString(), "standard-host"));
     standard.addAll(self("--standard-child", parent, guest));
     passed(finish(new ProcessBuilder(standard).start(), new byte[0]), "standard user host without elevation");

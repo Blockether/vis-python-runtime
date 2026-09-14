@@ -1135,14 +1135,19 @@ static HANDLE standard_token(void) {
 }
 
 static void standard_check(void) {
-    HANDLE token = NULL, impersonation = NULL;
-    BYTE data[4096];
-    DWORD size;
-    PSID administrators = NULL;
-    BOOL member = TRUE;
+    HANDLE token = NULL, impersonation = NULL, reader = NULL, writer = NULL;
+    BYTE data[4096], user_data[4096];
+    DWORD size, i, count = 0;
+    PSID administrators = NULL, user;
+    BOOL member = TRUE, created, written;
     SID_IDENTIFIER_AUTHORITY nt = SECURITY_NT_AUTHORITY;
+    LUID notify;
+    char value = 0;
     check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &token), "standard host token");
     if (!token) return;
+    check(GetTokenInformation(token, TokenUser, user_data, sizeof(user_data), &size), "standard host user");
+    if (failures) goto done;
+    user = ((TOKEN_USER *)user_data)->User.Sid;
     check(AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
                                    0, 0, 0, 0, 0, 0, &administrators), "query admin SID");
     check(DuplicateToken(token, SecurityIdentification, &impersonation), "standard impersonation token");
@@ -1155,6 +1160,50 @@ static void standard_check(void) {
         DWORD integrity = *GetSidSubAuthority(sid, (DWORD)*GetSidSubAuthorityCount(sid) - 1);
         check(integrity <= SECURITY_MANDATORY_MEDIUM_RID, "parent is not elevated integrity");
     } else check(0, "standard integrity query");
+    check(LookupPrivilegeValueW(NULL, L"SeChangeNotifyPrivilege", &notify), "standard traversal privilege identity");
+    if (failures) goto done;
+    if (GetTokenInformation(token, TokenPrivileges, data, sizeof(data), &size)) {
+        TOKEN_PRIVILEGES *privileges = (TOKEN_PRIVILEGES *)data;
+        for (i = 0; i < privileges->PrivilegeCount; i++) {
+            LUID_AND_ATTRIBUTES *entry = &privileges->Privileges[i];
+            check(!(entry->Attributes & SE_PRIVILEGE_ENABLED) ||
+                  (entry->Luid.LowPart == notify.LowPart && entry->Luid.HighPart == notify.HighPart),
+                  "parent has no enabled privilege except traversal");
+        }
+    } else check(0, "standard privilege query");
+    if (GetTokenInformation(token, TokenOwner, data, sizeof(data), &size)) {
+        printf("STANDARD_OWNER_USER=%d\n", EqualSid(((TOKEN_OWNER *)data)->Owner, user));
+    } else check(0, "standard owner query");
+    if (GetTokenInformation(token, TokenDefaultDacl, data, sizeof(data), &size)) {
+        PACL acl = ((TOKEN_DEFAULT_DACL *)data)->DefaultDacl;
+        printf("STANDARD_DEFAULT_DACL_NULL=%d\n", acl == NULL);
+        if (acl && IsValidAcl(acl)) {
+            for (i = 0; i < acl->AceCount; i++) {
+                void *raw = NULL;
+                if (!GetAce(acl, i, &raw)) { check(0, "standard default ACE query"); break; }
+                if (((ACE_HEADER *)raw)->AceType == ACCESS_ALLOWED_ACE_TYPE) {
+                    ACCESS_ALLOWED_ACE *ace = (ACCESS_ALLOWED_ACE *)raw;
+                    PSID sid = &ace->SidStart;
+                    const char *role = EqualSid(sid, user) ? "user" :
+                        IsWellKnownSid(sid, WinBuiltinAdministratorsSid) ? "administrators" :
+                        IsWellKnownSid(sid, WinLocalSystemSid) ? "system" : "other";
+                    printf("STANDARD_DEFAULT_ALLOW=%s:0x%08lX\n", role, ace->Mask);
+                } else printf("STANDARD_DEFAULT_ACE_TYPE=%u\n", (unsigned int)((ACE_HEADER *)raw)->AceType);
+            }
+        } else if (acl) check(0, "valid standard default DACL");
+    } else check(0, "standard default DACL query");
+    created = CreatePipe(&reader, &writer, NULL, 0);
+    check(created, "standard host creates a default-security pipe");
+    if (created) {
+        written = WriteFile(writer, "p", 1, &count, NULL);
+        check(written && count == 1, "standard host writes its pipe");
+        if (written && count == 1)
+            check(ReadFile(reader, &value, 1, &count, NULL) && count == 1 && value == 'p',
+                  "standard host default pipe roundtrip");
+    }
+done:
+    if (reader) CloseHandle(reader);
+    if (writer) CloseHandle(writer);
     if (administrators) FreeSid(administrators);
     if (impersonation) CloseHandle(impersonation);
     CloseHandle(token);

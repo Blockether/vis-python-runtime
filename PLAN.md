@@ -337,12 +337,18 @@ reads the synthetic secret; the confined guest cannot. Its handle-type probe
 accepts only `STATUS_INVALID_HANDLE` at that one query, not arbitrary crashes.
 All four Unix jobs and documentation checks pass again.
 
-The standard-user fixture then fails before launching its host:
-`SetTokenInformation(TokenIntegrityLevel)` returns `ERROR_ACCESS_DENIED`.
-`CreateRestrictedToken` preserves the source handle's access rights; the fixture
-had omitted `TOKEN_ADJUST_DEFAULT`. The test now requests that handle right so
-it can lower the restricted token to medium integrity. Administrator membership
-remains disabled and maximum privileges removed; no jail policy is changed.
+Run 34906429094 confirms that requesting `TOKEN_ADJUST_DEFAULT` fixes lowering
+of the restricted test-host token: the medium-integrity Java host starts. Its
+first `ProcessBuilder` then fails with `CreatePipe` access denied, before any
+jail call. A copied administrator-oriented owner/default DACL is a hypothesis,
+not yet observed runner state.
+
+The suite now first launches the C standard-token probe directly under the same
+restricted primary token and inherited streams. It checks disabled administrator
+membership, integrity and enabled privileges; prints owner/default-ACL roles
+without account identifiers; and requires a real default-security pipe roundtrip.
+The original Java default-pipe launch and all jail checks remain mandatory. No
+production confinement or token defaults have been changed for this diagnosis.
 
 Nonadministrator-host checks, stock Python/native worker, native-image launcher
 execution and extracted-archive verification remain pending. No Windows release
