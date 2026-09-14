@@ -270,15 +270,32 @@ typedef LONG (__stdcall *last_ntstatus_fn)(void);
 typedef LONG (__stdcall *nt_create_fn)(
     PHANDLE, PHANDLE, ACCESS_MASK, ACCESS_MASK, const void *, const void *,
     ULONG, ULONG, PVOID, PVOID, PVOID);
+typedef LONG (__stdcall *nt_info_fn)(HANDLE, int, PVOID, ULONG);
+typedef LONG (__stdcall *nt_resume_fn)(HANDLE, PULONG);
+typedef LONG (__stdcall *csr_call_fn)(PVOID, PVOID, ULONG, ULONG);
 
 static nt_create_fn original_nt_create;
-static volatile LONG nt_create_calls;
-static struct {
-    LONG status;
-    ULONG state, process_flags, thread_flags;
-} nt_create_steps[4];
+static nt_info_fn original_process_info, original_thread_info;
+static nt_resume_fn original_resume;
+static csr_call_fn original_csr_call;
+static volatile LONG native_calls;
+static struct native_step {
+    const char *operation;
+    LONG status, message_status;
+    ULONG state, process_flags, thread_flags, info_class, length;
+    ULONG api_number, message_api, message_data, message_total;
+    BOOL message_valid;
+} native_steps[32];
 
-/* Observe the actual call; never replace its arguments, create-info output or result. */
+static struct native_step *record_native_step(const char *operation, LONG status) {
+    ULONG index = (ULONG)InterlockedIncrement(&native_calls) - 1;
+    if (index >= 32) return NULL;
+    native_steps[index].operation = operation;
+    native_steps[index].status = status;
+    return &native_steps[index];
+}
+
+/* Observe actual calls; never replace their arguments, output buffers or results. */
 static LONG __stdcall observe_nt_create(
     PHANDLE process, PHANDLE thread, ACCESS_MASK process_access, ACCESS_MASK thread_access,
     const void *process_attributes, const void *thread_attributes, ULONG process_flags,
@@ -286,25 +303,67 @@ static LONG __stdcall observe_nt_create(
     LONG status = original_nt_create(process, thread, process_access, thread_access,
                                      process_attributes, thread_attributes, process_flags,
                                      thread_flags, parameters, create_info, attributes);
-    ULONG index = (ULONG)InterlockedIncrement(&nt_create_calls) - 1;
-    if (index < 4) {
+    struct native_step *step = record_native_step("NtCreateUserProcess", status);
+    if (step) {
         SIZE_T size = 0;
-        nt_create_steps[index].status = status;
-        nt_create_steps[index].state = MAXDWORD;
-        nt_create_steps[index].process_flags = process_flags;
-        nt_create_steps[index].thread_flags = thread_flags;
+        step->state = MAXDWORD;
+        step->process_flags = process_flags;
+        step->thread_flags = thread_flags;
         /* PS_CREATE_INFO begins with SIZE_T Size and a 32-bit PS_CREATE_STATE. */
         if (create_info) memcpy(&size, create_info, sizeof(size));
         if (size >= sizeof(size) + sizeof(ULONG))
-            memcpy(&nt_create_steps[index].state, (const BYTE *)create_info + sizeof(size), sizeof(ULONG));
+            memcpy(&step->state, (const BYTE *)create_info + sizeof(size), sizeof(ULONG));
+    }
+    return status;
+}
+
+static LONG __stdcall observe_process_info(HANDLE process, int info_class, PVOID info, ULONG length) {
+    LONG status = original_process_info(process, info_class, info, length);
+    struct native_step *step = record_native_step("NtSetInformationProcess", status);
+    if (step) { step->info_class = (ULONG)info_class; step->length = length; }
+    return status;
+}
+
+static LONG __stdcall observe_thread_info(HANDLE thread, int info_class, PVOID info, ULONG length) {
+    LONG status = original_thread_info(thread, info_class, info, length);
+    struct native_step *step = record_native_step("NtSetInformationThread", status);
+    if (step) { step->info_class = (ULONG)info_class; step->length = length; }
+    return status;
+}
+
+static LONG __stdcall observe_resume(HANDLE thread, PULONG previous_count) {
+    LONG status = original_resume(thread, previous_count);
+    record_native_step("NtResumeThread", status);
+    return status;
+}
+
+static LONG __stdcall observe_csr_call(PVOID message, PVOID capture, ULONG api_number, ULONG length) {
+    LONG status = original_csr_call(message, capture, api_number, length);
+    struct native_step *step = record_native_step("CsrClientCallServer", status);
+    if (step) {
+        USHORT lengths[2] = {0};
+        step->api_number = api_number;
+        step->length = length;
+        /* The x64 CSR prefix follows a 40-byte PORT_MESSAGE and capture pointer.
+         * Validate the returned lengths and API before interpreting its status. */
+        if (message) memcpy(lengths, message, sizeof(lengths));
+        step->message_data = lengths[0];
+        step->message_total = lengths[1];
+        if (lengths[1] >= 56 && (ULONG)lengths[0] + 40 == lengths[1]) {
+            memcpy(&step->message_api, (const BYTE *)message + 48, sizeof(ULONG));
+            if (step->message_api == api_number) {
+                memcpy(&step->message_status, (const BYTE *)message + 52, sizeof(LONG));
+                step->message_valid = TRUE;
+            }
+        }
     }
     return status;
 }
 
 /* Search only the loaded OS module's bounded x64 import-address table. */
-static ULONGLONG *nt_create_import(void) {
+static ULONGLONG *native_import(const char *name) {
     BYTE *module = (BYTE *)GetModuleHandleW(L"KernelBase.dll");
-    FARPROC address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateUserProcess");
+    FARPROC address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), name);
     IMAGE_DOS_HEADER *dos;
     IMAGE_NT_HEADERS64 *headers;
     IMAGE_DATA_DIRECTORY table;
@@ -342,20 +401,40 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
     };
     wchar_t command[32768], desktop[] = L"";
     HANDLE token = NULL;
-    ULONGLONG *slot = nt_create_import(), saved = 0, replacement;
-    nt_create_fn observer = observe_nt_create;
-    BOOL installed = FALSE;
-    DWORD trace_error = ERROR_SUCCESS;
-    if (slot) {
-        saved = *slot;
-        memcpy(&original_nt_create, &saved, sizeof(original_nt_create));
-        memcpy(&replacement, &observer, sizeof(replacement));
-        SetLastError(ERROR_SUCCESS);
-        installed = replace_nt_import(slot, replacement);
-        if (!installed) trace_error = GetLastError();
+    nt_create_fn create_observer = observe_nt_create;
+    nt_info_fn process_observer = observe_process_info, thread_observer = observe_thread_info;
+    nt_resume_fn resume_observer = observe_resume;
+    csr_call_fn csr_observer = observe_csr_call;
+    struct {
+        const char *name;
+        void *original;
+        const void *observer;
+        ULONGLONG *slot, saved;
+        BOOL installed;
+    } imports[] = {
+        {"NtCreateUserProcess", &original_nt_create, &create_observer, NULL, 0, FALSE},
+        {"NtSetInformationProcess", &original_process_info, &process_observer, NULL, 0, FALSE},
+        {"NtSetInformationThread", &original_thread_info, &thread_observer, NULL, 0, FALSE},
+        {"NtResumeThread", &original_resume, &resume_observer, NULL, 0, FALSE},
+        {"CsrClientCallServer", &original_csr_call, &csr_observer, NULL, 0, FALSE}
+    };
+    C_ASSERT(sizeof(nt_create_fn) == 8 && sizeof(nt_info_fn) == 8 &&
+             sizeof(nt_resume_fn) == 8 && sizeof(csr_call_fn) == 8);
+    for (SIZE_T i = 0; i < sizeof(imports) / sizeof(imports[0]); i++) {
+        ULONGLONG replacement;
+        DWORD trace_error = ERROR_SUCCESS;
+        imports[i].slot = native_import(imports[i].name);
+        if (imports[i].slot) {
+            imports[i].saved = *imports[i].slot;
+            memcpy(imports[i].original, &imports[i].saved, sizeof(ULONGLONG));
+            memcpy(&replacement, imports[i].observer, sizeof(replacement));
+            SetLastError(ERROR_SUCCESS);
+            imports[i].installed = replace_nt_import(imports[i].slot, replacement);
+            if (!imports[i].installed) trace_error = GetLastError();
+        }
+        printf("DESCENDANT_IMPORT=%s FOUND=%d INSTALLED=%d ERROR=%lu\n",
+               imports[i].name, imports[i].slot != NULL, imports[i].installed, trace_error);
     }
-    printf("DESCENDANT_NT_IMPORT_FOUND=%d TRACE_INSTALLED=%d ERROR=%lu\n",
-           slot != NULL, installed, trace_error);
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &token))
         printf("DESCENDANT_TOKEN_ASSIGN_ACCESS=0 ERROR=%lu\n", GetLastError());
     for (int i = 0; i < 3; i++) {
@@ -367,7 +446,8 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
         BOOL started = FALSE;
         startup.cb = sizeof(startup);
         startup.lpDesktop = i == 2 ? desktop : NULL;
-        nt_create_calls = 0;
+        native_calls = 0;
+        ZeroMemory(native_steps, sizeof(native_steps));
         if (configured) {
             swprintf_s(command, 32768, L"\"%ls\" token", executable);
             SetLastError(ERROR_SUCCESS);
@@ -378,12 +458,18 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
             error = GetLastError();
             if (!started && last_status) nt_status = last_status();
         }
-        printf("DESCENDANT_VARIANT=%s CONFIGURED=%d STARTED=%d ERROR=%lu LAST_NTSTATUS=%08lX NT_CALLS=%ld\n",
-               variants[i], configured, started, error, (unsigned long)nt_status, nt_create_calls);
-        for (LONG j = 0; j < nt_create_calls && j < 4; j++)
-            printf("DESCENDANT_NT_STEP=%ld RESULT=%08lX STATE=%lu PROCESS_FLAGS=%08lX THREAD_FLAGS=%08lX\n",
-                   j, (unsigned long)nt_create_steps[j].status, nt_create_steps[j].state,
-                   nt_create_steps[j].process_flags, nt_create_steps[j].thread_flags);
+        printf("DESCENDANT_VARIANT=%s CONFIGURED=%d STARTED=%d ERROR=%lu LAST_NTSTATUS=%08lX NATIVE_CALLS=%ld\n",
+               variants[i], configured, started, error, (unsigned long)nt_status, native_calls);
+        for (LONG j = 0; j < native_calls && j < 32; j++) {
+            const struct native_step *step = &native_steps[j];
+            printf("DESCENDANT_NATIVE_STEP=%ld API=%s RESULT=%08lX STATE=%lu PROCESS_FLAGS=%08lX THREAD_FLAGS=%08lX "
+                   "CLASS=%lu LENGTH=%lu CSR_API=%08lX CSR_LAYOUT=%d CSR_MESSAGE_API=%08lX "
+                   "CSR_MESSAGE_STATUS=%08lX CSR_LENGTHS=%lu/%lu\n",
+                   j, step->operation, (unsigned long)step->status, step->state,
+                   step->process_flags, step->thread_flags, step->info_class, step->length,
+                   step->api_number, step->message_valid, step->message_api,
+                   (unsigned long)step->message_status, step->message_data, step->message_total);
+        }
         if (started) {
             waited = WaitForSingleObject(process.hProcess, 10000);
             if (waited != WAIT_OBJECT_0) {
@@ -395,7 +481,9 @@ static void child_launch_diagnostics(const wchar_t *executable, last_ntstatus_fn
         }
         printf("DESCENDANT_VARIANT=%s WAIT=%lu EXIT=%lu\n", variants[i], waited, code);
     }
-    if (installed) check(replace_nt_import(slot, saved), "restore diagnostic native-create import");
+    for (SIZE_T i = sizeof(imports) / sizeof(imports[0]); i > 0; i--)
+        if (imports[i - 1].installed)
+            check(replace_nt_import(imports[i - 1].slot, imports[i - 1].saved), "restore diagnostic native import");
     if (token) CloseHandle(token);
 }
 

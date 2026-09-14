@@ -280,13 +280,19 @@ creation, a null application name, the current primary token and a System32
 command. The effective job has only kill-on-close enabled and no active-process
 limit. No descendant runs in these comparisons.
 
-The next failure-only probe observes the diagnostic guest's own KernelBase
-`NtCreateUserProcess` import, forwarding every argument and result unchanged.
-It records whether that entry is called and its native result/create-info state,
-then restores the import and page protection. A current-token comparison changes
-only the desktop from inherited (`NULL`) to connection selection (empty string).
-No host object ACLs, capabilities or production launch behavior change. The
-original descendant failure remains mandatory; Windows support is unverified.
+Run 34889232808 observes `NtCreateUserProcess` returning `STATUS_SUCCESS` with
+`PsCreateSuccess` for all three comparisons, including the empty desktop. Win32
+creation fails afterward with error 5; the child never runs. All native builds,
+four Unix lanes and API documentation checks pass, but Windows E2E does not.
+
+The failure-only probe now also observes the diagnostic guest's KernelBase imports
+for CSR registration, process/thread information updates and thread resumption.
+It forwards every argument and result unchanged, records call order and native
+statuses, then restores the imports and page protection. CSR transport and message
+status are recorded separately; message interpretation requires matching x64
+header lengths and the requested API number. No host object ACLs, capabilities or
+production launch behavior change. The original descendant failure remains
+mandatory; Windows support is unverified.
 
 `GetAppContainerFolderPath` returns local application data beneath the profile,
 not its root. Test cleanup validates the generated parent name and exact SID;
