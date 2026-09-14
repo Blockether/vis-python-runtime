@@ -332,13 +332,18 @@ for ConPTY. The redirected-parent regression passes all three console handles,
 the exact LPAC token, dimensions, input roundtrip and output capture. Active
 ConPTY backpressure cleanup and parent-crash cleanup also pass.
 
-The inherited-handle host control proves the synthetic secret is readable in
-the deliberately inheriting host. The confined guest then exits with
-`STATUS_INVALID_HANDLE` while probing the noninherited handle. The test now
-accepts that exact exception only around the guest handle-type query; any other
-exception and all host-control exceptions remain failures. It still checks
-that the guest cannot read the sentinel. No production policy is changed.
+Run 34905273552 also passes inherited-handle isolation. The host positive control
+reads the synthetic secret; the confined guest cannot. Its handle-type probe
+accepts only `STATUS_INVALID_HANDLE` at that one query, not arbitrary crashes.
+All four Unix jobs and documentation checks pass again.
 
-Inherited-handle completion, nonadministrator-host checks, stock Python/native
-worker, native-image launcher execution and extracted-archive verification
-remain pending. No Windows release completion is claimed yet.
+The standard-user fixture then fails before launching its host:
+`SetTokenInformation(TokenIntegrityLevel)` returns `ERROR_ACCESS_DENIED`.
+`CreateRestrictedToken` preserves the source handle's access rights; the fixture
+had omitted `TOKEN_ADJUST_DEFAULT`. The test now requests that handle right so
+it can lower the restricted token to medium integrity. Administrator membership
+remains disabled and maximum privileges removed; no jail policy is changed.
+
+Nonadministrator-host checks, stock Python/native worker, native-image launcher
+execution and extracted-archive verification remain pending. No Windows release
+completion is claimed yet.

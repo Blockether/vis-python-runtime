@@ -1110,8 +1110,9 @@ static HANDLE standard_token(void) {
     SID_IDENTIFIER_AUTHORITY nt = SECURITY_NT_AUTHORITY;
     SID_AND_ATTRIBUTES disabled;
     TOKEN_MANDATORY_LABEL label;
-    check(OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY,
-                           &original), "open parent token");
+    /* CreateRestrictedToken preserves handle access; lowering integrity needs TOKEN_ADJUST_DEFAULT. */
+    check(OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY |
+                           TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT, &original), "open parent token");
     if (!original) return NULL;
     check(AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
                                    0, 0, 0, 0, 0, 0, &administrators), "administrator SID");
