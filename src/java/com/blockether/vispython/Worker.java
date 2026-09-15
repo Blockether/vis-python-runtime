@@ -63,14 +63,19 @@ public final class Worker {
 
   private Worker() {}
 
-  /** {@code vis-python-worker <control-socket> [source-directory ...]}, or {@code --version}. */
+  /**
+   * {@code vis-python-worker <control-socket> [--resolved-sources] [source-directory ...]},
+   * or {@code --version}. With {@code --resolved-sources}, the host supplies every runtime
+   * source root, resolved before OS confinement; the worker never extracts bundled sources.
+   */
   public static void main(String[] args) {
     if (args.length == 1 && "--version".equals(args[0])) {
       System.out.println(Native.version());
       return;
     }
     if (args.length == 0 || args[0].isBlank()) {
-      System.err.println("usage: " + EXECUTABLE + " <control-socket> [source-directory ...]");
+      System.err.println("usage: " + EXECUTABLE
+          + " <control-socket> [--resolved-sources] [source-directory ...]");
       System.exit(2);
     }
     try {
@@ -89,12 +94,22 @@ public final class Worker {
    * came up; a start that then fails closes it, and the parent reads why in the
    * log it gave this process. Host-supplied source directories are installed at
    * interpreter initialization, before any request or host-module import is served.
+   * A leading {@code --resolved-sources} marks the remaining directories as the
+   * complete pre-resolved import roots, with no artifact extraction or fallback.
    */
   public static void serve(Path socket, List<String> sourcePaths) throws IOException {
     try (SocketChannel channel = SocketChannel.open(UnixDomainSocketAddress.of(socket))) {
       Peer peer = new Peer(channel);
-      Interpreter.initialize(sourcePaths, Interpreter.DEFAULT, Interpreter.DEFAULT,
-          Interpreter.DEFAULT);
+      if (!sourcePaths.isEmpty() && "--resolved-sources".equals(sourcePaths.getFirst())) {
+        if (sourcePaths.size() == 1) {
+          throw new IllegalArgumentException("--resolved-sources requires runtime source directories");
+        }
+        Interpreter.initializeResolved(sourcePaths.subList(1, sourcePaths.size()),
+            Interpreter.DEFAULT, Interpreter.DEFAULT, Interpreter.DEFAULT);
+      } else {
+        Interpreter.initialize(sourcePaths, Interpreter.DEFAULT, Interpreter.DEFAULT,
+            Interpreter.DEFAULT);
+      }
       // The caller is the interpreter's answer, forwarded whole: the parent
       // authorizes against it, and a payload naming something else is the
       // guest's word, not the interpreter's.

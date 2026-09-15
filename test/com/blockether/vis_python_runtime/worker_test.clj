@@ -415,6 +415,37 @@ async def library_call():
                                   Worker/EXECUTABLE
                                   "beside the cdylib, run `clojure -T:build worker-image`")))
 
+(harness/defbuilt-test
+  cold-read-only-sources-worker-test
+  (if-let [argv (image-argv)]
+    (let [cold-home (harness/temp-dir "vis-worker-cold-sources")
+          roots (vec (com.blockether.vispython.Sources/roots))
+          worker (start! (fn [socket home]
+                           (into [(first (argv socket home)) (str "-Duser.home=" cold-home) socket
+                                  "--resolved-sources"]
+                                 roots))
+                         {:read-write []
+                          :read-only (conj roots cold-home)
+                          :deny-write (conj roots cold-home)})]
+
+      (try (value! worker "install-runtime" "session" "cold")
+           (is (= "42" (value! worker "eval" "session" "cold" "code" "str(6 * 7)")))
+           (is (not (.exists (io/file cold-home ".vis/python/sources")))
+               "A confined worker must not extract sources into the host cache")
+           (is (some? (get (request! worker
+                                     "exec"
+                                     "session" "cold"
+                                     "code" (str "open("
+                                                 (pr-str (str cold-home "/denied"))
+                                                 ", 'w').close()"))
+                           "error"))
+               "The cold home remains read-only")
+           (finally (.destroyForcibly ^Process (:process worker))
+                    (.close ^SocketChannel (:channel worker))
+                    (.waitFor ^Process (:process worker) 5 TimeUnit/SECONDS)
+                    (.delete ^File (:log worker)))))
+    (println "SKIP cold-read-only-sources-worker-test - run clojure -T:build worker-image")))
+
 (defn- exercise-tls!
   [argv]
   ;; Vis #185: compatibility changes only STRICT, for every ssl context factory.

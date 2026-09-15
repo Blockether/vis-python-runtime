@@ -251,13 +251,18 @@ public final class Interpreter {
    */
   public static Startup initialize(List<String> sourcePaths, String pythonHome,
       String pycachePrefix, String packages) {
+    return initializeResolved(Locations.sourceRoots(sourcePaths), pythonHome, pycachePrefix, packages);
+  }
+
+  /** Start with complete host-resolved roots; never discover or extract artifact sources. */
+  static Startup initializeResolved(List<String> roots, String pythonHome,
+      String pycachePrefix, String packages) {
     String home = DEFAULT.equals(pythonHome) ? Locations.pythonHome(library().path()) : pythonHome;
     String cache = DEFAULT.equals(pycachePrefix) ? Locations.pycachePrefix() : pycachePrefix;
     String target = DEFAULT.equals(packages) ? Locations.packagesDir() : packages;
     String executable = Locations.pythonExecutable(home);
     onRuntimeThread(() -> invoke("vispython_initialize", home == null ? "" : home,
         executable == null ? "" : executable, cache == null ? "" : cache));
-    List<String> roots = Locations.sourceRoots(sourcePaths);
     if (!roots.isEmpty() || target != null) {
       // Starting is idempotent, so wiring sys.path has to be: a host that calls
       // this once per session would otherwise grow the path by a copy of every
