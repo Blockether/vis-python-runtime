@@ -395,3 +395,12 @@ closing the context. This checks simultaneous backpressure without relying on
 forward output progress after deliberately saturating console input. All original
 byte thresholds, close checks and the 20-second child deadline remain. Windows
 verification and publication are still pending.
+
+Run 34923285018 reaches real duplex backpressure and passes the first three JVM
+close attempts in about 0.55 seconds each. The fourth times out in context close:
+128KiB has been received, the reader remains alive, the writer has been released,
+and the Java reaper has exited. The PTY pump is waiting on the full Java pipe.
+Native teardown now emits temporary phase labels for its table/job/stream/console/
+closer/profile steps, without changing their order or deadlines. Remove those
+labels after locating and correcting the native wait; do not publish them as a
+normal runtime logging feature.

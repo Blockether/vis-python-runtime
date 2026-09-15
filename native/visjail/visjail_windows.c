@@ -757,7 +757,10 @@ int visjail_kill(int id, int signal_number) {
 }
 
 static DWORD close_console(void *console) {
-    ClosePseudoConsole((HPCON)console); return 0;
+    fprintf(stderr, "Windows jail async console close begin\n"); fflush(stderr);
+    ClosePseudoConsole((HPCON)console);
+    fprintf(stderr, "Windows jail async console close end\n"); fflush(stderr);
+    return 0;
 }
 
 int visjail_wait(int id, int nohang, int *exit_code) {
@@ -807,17 +810,21 @@ int visjail_windows_destroy(int id) {
     Process *p;
     Stream **sp;
     int result = -ERROR_INVALID_HANDLE;
+    fprintf(stderr, "Windows jail close %d: table\n", id); fflush(stderr);
     AcquireSRWLockExclusive(&lock);
     for (slot = &contexts; *slot && (*slot)->id != id; slot = &(*slot)->next) {}
     c = *slot;
     if (!c) { ReleaseSRWLockExclusive(&lock); return result; }
+    fprintf(stderr, "Windows jail close %d: job\n", id); fflush(stderr);
     if (c->job && !finish_job(c->job)) {
         result = -(int)GetLastError(); ReleaseSRWLockExclusive(&lock); return result;
     }
+    fprintf(stderr, "Windows jail close %d: streams\n", id); fflush(stderr);
     *slot = c->next;
     for (sp = &streams; *sp;) {
         if ((*sp)->context == id) stream_close_locked(sp); else sp = &(*sp)->next;
     }
+    fprintf(stderr, "Windows jail close %d: processes\n", id); fflush(stderr);
     for (;;) {
         HPCON console;
         HANDLE closer;
@@ -836,14 +843,19 @@ int visjail_windows_destroy(int id) {
         if (p->job) { CloseHandle(p->job); p->job = NULL; }
         ReleaseSRWLockExclusive(&lock);
         /* Never retain the table lock while canceled IO releases its handles. */
+        fprintf(stderr, "Windows jail close %d: console\n", id); fflush(stderr);
         if (console) ClosePseudoConsole(console);
+        fprintf(stderr, "Windows jail close %d: closer\n", id); fflush(stderr);
         if (closer) { WaitForSingleObject(closer, INFINITE); CloseHandle(closer); }
         AcquireSRWLockExclusive(&lock);
     }
     ReleaseSRWLockExclusive(&lock);
+    fprintf(stderr, "Windows jail close %d: pins\n", id); fflush(stderr);
     unpin(c->pins); c->pins = NULL;
     if (c->job) { CloseHandle(c->job); c->job = NULL; }
+    fprintf(stderr, "Windows jail close %d: profile\n", id); fflush(stderr);
     result = delete_profile(c->profile, NULL, 0);
+    fprintf(stderr, "Windows jail close %d: profile returned %d\n", id, result); fflush(stderr);
     if (result) {
         /* Retain only cleanup state so close can retry without permitting launches. */
         c->poisoned = 1;
