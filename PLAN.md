@@ -471,7 +471,18 @@ The failed disconnect experiment and all production debug prints are removed.
 The suite retains the existing active/reaped cases and adds four prior-logical-
 close and four simultaneous-context children per launcher. A reader-thread join
 proves prior logical close; shared check counts are now atomic. Confinement,
-backpressure thresholds and success watchdogs are unchanged. Windows execution
-of this implementation and publication remain pending. Concurrent children also
-launch eight finite-output terminals in a third context, retaining their final
-`PASS` marker while exercising record reclamation during the other closes.
+backpressure thresholds and success watchdogs are unchanged. Concurrent children
+also launch eight finite-output terminals in a third context, retaining their
+final `PASS` marker while exercising record reclamation during the other closes.
+
+Run `34929767932` at `1002ba2` passes all five platform lanes and the generated
+documentation checks. The Windows probes pass 297 checks on each JVM and
+native-image launcher, both from the build directory and the extracted archive.
+All four active, reaped, consumer-closed and concurrent backpressure children run
+in every launcher. Stock Python, the jailed native-worker protocol, standard-user
+launch and the documented Java example pass too. Local documentation generation
+checks 38 HTML pages and passes its four assertions.
+
+All three implementation and verification phases are complete. Runtime `0.5.17`
+is prepared; publication remains pending the tag workflow and asset verification.
+No consumer installation, dependency pin or running gateway has been changed.

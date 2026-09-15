@@ -117,6 +117,10 @@ set `pty`/`:pty?` and positive rows and columns; terminal output combines both
 streams. Drain output while writing large inputs to avoid ordinary pipe
 backpressure. Close process streams when finished.
 
+Read terminal output to EOF before closing the context if you need to keep it.
+Context cleanup drains and discards abandoned terminal output while shutting down
+the console.
+
 Both `destroy()` and `destroyForcibly()` terminate the Windows job and its
 descendants; there is no POSIX signal delivery or graceful-termination promise.
 `supportsNormalTermination()` returns false. When the main process exits, its
