@@ -90,9 +90,8 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v6
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+      - name: Configure MSVC for x64
+        run: ./scripts/setup-msvc.ps1
       - uses: ./.github/actions/setup-graalvm-25
       - uses: DeLaGuardo/setup-clojure@13.6.1
         with:

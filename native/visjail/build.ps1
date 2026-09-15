@@ -24,6 +24,12 @@ $exports = @(
     'windows_create', 'windows_stage', 'windows_seal', 'windows_destroy', 'windows_pid'
 ) | ForEach-Object { "/EXPORT:visjail_$_" }
 try {
+    $helper = Join-Path $out 'visjail-ui.exe'
+    & cl.exe /nologo /std:c11 /MT /O2 /W4 /WX /D_CRT_SECURE_NO_WARNINGS `
+        "/Fo$stage/windows-ui.obj" "/Fe$helper" (Join-Path $PSScriptRoot 'windows_ui.c') `
+        /link advapi32.lib userenv.lib user32.lib
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'MSVC produced no visjail-ui.exe' }
+    Write-Output $helper
     $library = Join-Path $out 'visjail.dll'
     & cl.exe /nologo /std:c11 /LD /MD /O2 /W4 /WX /D_CRT_SECURE_NO_WARNINGS `
         "/Fo$stage/visjail.obj" "/Fe$library" (Join-Path $PSScriptRoot 'visjail_windows.c') `

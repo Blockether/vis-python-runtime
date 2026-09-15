@@ -595,26 +595,43 @@ or running gateway was changed by that release.
      rebuilt restored DLL passes both JVM/native-image probes (331 checks each)
      and 15 Windows API/native tests with 102 assertions and no failures or errors.
      All eight restored source hashes match the VM.
-     A separate standard-token fixture cannot create a new window station
-     (`ERROR_ACCESS_DENIED`), so a station-creating helper is not an established
-     no-admin alternative. The interactive station-selection bug remains open.
-   - Unknowns: cross-platform CI and the next release's rebuilt assets remain to pass.
+      A separate standard-token fixture cannot create a new window station
+      (`ERROR_ACCESS_DENIED`), so the new helper uses the station selected by
+      Windows for its own process. It creates the protected SID-private desktop
+      there and transfers only the required handles, without changing the host's
+      station, desktop or security descriptors. Strict MSVC `/W4 /WX`, Java,
+      Clojure formatting/reflection, PowerShell lint and release contracts pass.
+      Source and extracted JVM/native-image probes each pass 366 checks. Both
+      layouts pass Windows API (4 tests / 34 assertions) and native boundary
+      (11 / 68) suites; shared suites pass 84 / 492 and 84 / 489 respectively.
+      A regression also verifies that the helper survives runtime staging.
+    - Unknowns: interactive CI and the next release's rebuilt assets remain to pass.
 2. Resolve generic Windows policy and consumer integration.
    - Rationale: WindowsJail is a copy-in private-workspace API, not the generic
      JailPolicy backend used by Vis shell and REPL processes.
    - Data: live host-path grants, path denies, proxy/open egress, inbound ports and
      local-socket/credential-service grants are not implemented by WindowsJail.
      Low-integrity write checks precede DACL grants on ordinary host files.
-     WinFsp plus a trusted broker is a possible mapped live-view substrate, not an
-     established transparent backend: a new volume does not replace arbitrary
-     existing absolute paths or revoke OS-public access. LPAC compatibility,
-     race-safe backing handles, hardlink semantics, setup and licensing need proof.
-     No driver, broker or generic backend has been installed or implemented.
-   - Acceptance criteria: prove each supported policy field through actual native
-     descendants; retain fail-closed rejection rather than substitute copying,
-     environment-only proxy settings or host-wide ACL/integrity changes.
-   - Unknowns: a supported transparent filesystem/network isolation architecture
-     and its setup requirements remain to be established.
+      A test fixture evaluates per-silo BindFlt mappings of original paths to a
+      WinFsp live view backed by pinned host handles outside the silo. The signed
+      WinFsp 2.1 driver loads and its dispatcher starts with Secure Boot enabled,
+      but the first mapping returns `0x80070001`; separate NTFS controls are being
+      tested before attributing this failure to the filesystem substrate.
+      Package-scoped WFP soft and hard permits still return Winsock 10013 for
+      loopback. Own-workspace AF_UNIX connects succeed while sibling/outside
+      paths fail; abstract sockets fail even in the trusted control. Credential
+      tests distinguish an SSH logon without a credential set from a synthetic
+      service-logon control; neither establishes a usable LPAC credential grant.
+      These fixtures are not a production backend or a policy-support claim.
+    - Acceptance criteria: enforce live read/write grants, read-only grants and
+      deny-read/write/execute precedence; OFF/PROXY/OPEN egress; every inbound port;
+      exact local-socket and credential-service grants through actual native
+      descendants. Preserve host ACLs and integrity labels, reject alias/race
+      escapes, and retain fail-closed behavior throughout implementation.
+    - Unknowns: filesystem composition, race-safe backing resolution, execution
+      denial, network/socket/credential mediation, lifecycle, setup and licensing.
+      Copying, environment-only proxies and host-wide permission changes do not
+      satisfy the policy contract.
 3. Verify distribution and the Vis beta.
    - Rationale: runtime-only success does not prove consumer execution.
    - Data: v0.5.18 is immutable; the consumer has not been integrated by this work.
@@ -623,13 +640,17 @@ or running gateway was changed by that release.
    - Unknowns: integration is gated on the actual policy implementation, not just
      the presence of a Windows archive.
 
-Plan state: the noninteractive Windows launch fix and corrected desktop-access tests
-pass source and extracted JVM/native-image execution. Interactive CI confirms that
-a guest can select `WinSta0` despite correctly inheriting its private station and
-desktop handles. Both fully qualified and desktop-only name candidates were
-falsified and reverted. The interactive station-selection failure remains open;
-passing SSH tests is not sufficient to release.
-No new release tag has been published. Publication is coordinated with the separate
-#229 consumer fix and its final native validation. Generic Windows policy parity,
-consumer integration and the Vis beta remain open. Existing unrelated runtime
+Plan state: the bounded UI helper passes source and extracted Windows security
+and lifecycle gates; interactive CI and release assets remain to verify. The
+Node 20 MSVC action is replaced by a local DevShell setup script; actual x64
+exports, workflow lint and PowerShell lint pass. GraalVM CE 25.3.4.1 preloads a
+warning count of two even when the driver emits no warnings, as confirmed by
+`--dry-run` and upstream issue oracle/graal#14253. A fixed stable CE release is
+not yet available; no warning counter or diagnostic is suppressed. The optional
+WinFsp test SDK also emits an ABI-alignment warning; production builds do not
+include that dependency.
+
+No new release tag is published. Generic Windows policy parity, consumer
+integration and the Vis beta remain open. A passing UI helper or filesystem
+feasibility probe alone is not full Windows support. Unrelated runtime
 diagnostics and Vis edits are excluded.

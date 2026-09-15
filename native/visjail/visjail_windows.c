@@ -13,6 +13,7 @@
 #include <wchar.h>
 #include <limits.h>
 #include "visjail.h"
+#include "windows_ui.h"
 
 #ifndef PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY
 #define PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY 0x0002000f
@@ -36,6 +37,8 @@ typedef struct Context {
     HWINSTA station;
     HDESK desktop;
     Pin *pins;
+    HANDLE ui_process, ui_job;
+    Pin *ui_pins;
     struct Context *next;
 } Context;
 typedef struct Stream {
@@ -56,6 +59,7 @@ typedef struct Process {
     struct Process *next;
 } Process;
 static Context *contexts;
+static Context *failed_context;
 static Stream *streams;
 static Process *processes;
 
@@ -184,42 +188,6 @@ static Context *context_get(int id) {
     SetLastError(ERROR_INVALID_HANDLE); return NULL;
 }
 
-/* Explicit protected ACLs never import source permissions. Owner Rights removes
- * implicit owner WRITE_DAC for guest-created descendants. The host user's token
- * still has its explicit grant, intersected with package rights in the guest. */
-static PACL private_acl(PSID package, DWORD host_rights, DWORD rights, int directory) {
-    HANDLE token = NULL;
-    TOKEN_USER *user = NULL;
-    DWORD size = 0, result = ERROR_NOT_ENOUGH_MEMORY;
-    PSID owner_rights = NULL;
-    EXPLICIT_ACCESSW entries[3];
-    PACL acl = NULL;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return NULL;
-    GetTokenInformation(token, TokenUser, NULL, 0, &size);
-    user = malloc(size);
-    if (!user) goto done;
-    if (!GetTokenInformation(token, TokenUser, user, size, &size) ||
-        !ConvertStringSidToSidW(L"S-1-3-4", &owner_rights)) { result = GetLastError(); goto done; }
-    ZeroMemory(entries, sizeof(entries));
-    entries[0].grfAccessPermissions = host_rights;
-    entries[0].grfAccessMode = SET_ACCESS;
-    entries[0].grfInheritance = directory ? SUB_CONTAINERS_AND_OBJECTS_INHERIT : NO_INHERITANCE;
-    entries[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
-    entries[0].Trustee.ptstrName = (LPWSTR)user->User.Sid;
-    entries[1] = entries[0];
-    entries[1].grfAccessPermissions = rights;
-    entries[1].Trustee.ptstrName = (LPWSTR)package;
-    entries[2] = entries[0];
-    entries[2].grfAccessPermissions = READ_CONTROL;
-    entries[2].Trustee.ptstrName = (LPWSTR)owner_rights;
-    result = SetEntriesInAclW(3, entries, NULL, &acl);
- done:
-    if (owner_rights) LocalFree(owner_rights);
-    free(user); CloseHandle(token); SetLastError(result);
-    if (result != ERROR_SUCCESS) { if (acl) LocalFree(acl); return NULL; }
-    return acl;
-}
-
 static int permissions(HANDLE handle, PSID package, DWORD rights, int directory) {
     PACL acl = private_acl(package, FILE_ALL_ACCESS, rights, directory);
     DWORD result;
@@ -342,55 +310,143 @@ static PSID registry_read_capability(void) {
     return result;
 }
 
-/* A service desktop need not admit packages. Pass a read-only station handle
- * and a new SID-private desktop; never change the host station, desktop or ACLs. */
+/* The helper lets Windows choose its default station without changing this host's UI.
+ * A failed helper remains owned until the kernel confirms its exit. */
+static DWORD ui_remaining(ULONGLONG deadline) {
+    ULONGLONG now = GetTickCount64();
+    return now >= deadline ? 0 : (DWORD)(deadline - now);
+}
+
+static int close_ui_helper(Context *c, DWORD timeout) {
+    if (c->ui_process) {
+        DWORD waited = WaitForSingleObject(c->ui_process, 0);
+        if (waited != WAIT_OBJECT_0) {
+            if (c->ui_job) TerminateJobObject(c->ui_job, 1);
+            if (!TerminateProcess(c->ui_process, 1) && WaitForSingleObject(c->ui_process, 0) != WAIT_OBJECT_0) return 0;
+            waited = WaitForSingleObject(c->ui_process, timeout);
+            if (waited != WAIT_OBJECT_0) {
+                if (waited == WAIT_TIMEOUT) SetLastError(ERROR_TIMEOUT);
+                return 0;
+            }
+        }
+        CloseHandle(c->ui_process); c->ui_process = NULL;
+    }
+    if (c->ui_job) { CloseHandle(c->ui_job); c->ui_job = NULL; }
+    unpin(c->ui_pins); c->ui_pins = NULL;
+    return 1;
+}
+
 static int private_desktop(Context *c) {
-    const DWORD guest_rights = READ_CONTROL | DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW | DESKTOP_WRITEOBJECTS;
-    const DWORD host_rights = STANDARD_RIGHTS_REQUIRED | DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW |
-        DESKTOP_CREATEMENU | DESKTOP_HOOKCONTROL | DESKTOP_JOURNALRECORD | DESKTOP_JOURNALPLAYBACK |
-        DESKTOP_ENUMERATE | DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP;
-    HWINSTA current = GetProcessWindowStation();
-    wchar_t *name = NULL;
-    DWORD needed = 0, saved, status;
-    PACL acl = NULL, label = NULL, actual_acl = NULL, actual_label = NULL;
-    PSECURITY_DESCRIPTOR low = NULL, actual = NULL;
-    SECURITY_DESCRIPTOR descriptor;
-    SECURITY_ATTRIBUTES attributes = {sizeof(attributes), &descriptor, FALSE};
-    BOOL present = FALSE, defaulted = FALSE;
-    int ok = 0;
-    if (!current) return 0;
-    GetUserObjectInformationW(current, UOI_NAME, NULL, 0, &needed);
-    if (!needed || needed > 65536) { SetLastError(ERROR_INVALID_DATA); return 0; }
-    name = calloc(1, needed);
-    if (!name) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return 0; }
-    if (!GetUserObjectInformationW(current, UOI_NAME, name, needed, &needed)) goto done;
-    c->station = OpenWindowStationW(name, FALSE, WINSTA_READATTRIBUTES);
-    if (!c->station) goto done;
-    acl = private_acl(c->sid, host_rights, guest_rights, 0);
-    if (!acl || !ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"S:(ML;;NW;;;LW)", SDDL_REVISION_1, &low, NULL) ||
-        !GetSecurityDescriptorSacl(low, &present, &label, &defaulted) || !present || !label ||
-        !InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) ||
-        !SetSecurityDescriptorDacl(&descriptor, TRUE, acl, FALSE) ||
-        !SetSecurityDescriptorSacl(&descriptor, TRUE, label, FALSE) ||
-        !SetSecurityDescriptorControl(&descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED)) goto done;
-    c->desktop = CreateDesktopW(c->profile, NULL, NULL, 0, guest_rights, &attributes);
-    if (!c->desktop) goto done;
-    /* CreateDesktop can open an existing name. Reject any different descriptor,
-     * including inherited grants, rather than trusting that creation applied it. */
-    status = GetSecurityInfo(c->desktop, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
-        NULL, NULL, &actual_acl, &actual_label, &actual);
-    if (status != ERROR_SUCCESS) { SetLastError(status); goto done; }
-    if (!actual_acl || !actual_label || actual_acl->AclSize != acl->AclSize ||
-        actual_label->AclSize != label->AclSize || memcmp(actual_acl, acl, acl->AclSize) ||
-        memcmp(actual_label, label, label->AclSize)) { SetLastError(ERROR_ACCESS_DENIED); goto done; }
+    static const wchar_t module_anchor = 0;
+    const DWORD capacity = 32768;
+    ULONGLONG deadline = GetTickCount64() + VISJAIL_UI_TIMEOUT;
+    HMODULE module = NULL;
+    wchar_t *path = NULL, *line = NULL, *separator;
+    wchar_t station_name[256];
+    DWORD length, waited, code = 0, saved;
+    HANDLE mapping = NULL, ready = NULL, ack = NULL, inherit[3], waits[2];
+    HANDLE executable;
+    VisjailUiTransfer *shared = NULL, reply;
+    VisjailUiSecurity security = {0};
+    SECURITY_ATTRIBUTES attributes = {sizeof(attributes), NULL, TRUE};
+    STARTUPINFOEXW startup = {0};
+    PROCESS_INFORMATION info = {0};
+    SIZE_T attribute_size = 0;
+    int ok = 0, attribute_ready = 0;
+    path = calloc(capacity, sizeof(wchar_t));
+    line = calloc(capacity + 128u, sizeof(wchar_t));
+    if (!path || !line) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto done; }
+    if (!ui_profile_valid(c->profile) ||
+        !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            &module_anchor, &module)) goto done;
+    length = GetModuleFileNameW(module, path, capacity);
+    if (!length || length >= capacity || !local_path(path) || !(separator = wcsrchr(path, L'\\'))) {
+        SetLastError(ERROR_BAD_PATHNAME); goto done;
+    }
+    if ((size_t)(separator - path) + 1 + sizeof(L"visjail-ui.exe") / sizeof(wchar_t) > capacity) {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE); goto done;
+    }
+    wcscpy_s(separator + 1, capacity - (size_t)(separator + 1 - path), L"visjail-ui.exe");
+    if (!ancestors(path, &c->ui_pins)) goto done;
+    executable = regular(path, GENERIC_READ, FILE_SHARE_READ, 0);
+    if (executable == INVALID_HANDLE_VALUE || !pin_handle(&c->ui_pins, executable)) goto done;
+    mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &attributes, PAGE_READWRITE, 0, sizeof(*shared), NULL);
+    ready = CreateEventW(&attributes, TRUE, FALSE, NULL);
+    ack = CreateEventW(&attributes, TRUE, FALSE, NULL);
+    if (!mapping || !ready || !ack) goto done;
+    shared = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(*shared));
+    if (!shared) goto done;
+    ZeroMemory(shared, sizeof(*shared));
+    shared->version = VISJAIL_UI_VERSION; shared->size = sizeof(*shared); shared->error = ERROR_IO_PENDING;
+    memcpy(shared->profile, c->profile, sizeof(shared->profile));
+    if (_snwprintf_s(line, capacity + 128u, _TRUNCATE, L"\"%ls\" %llu %llu %llu", path,
+        (unsigned long long)(uintptr_t)mapping, (unsigned long long)(uintptr_t)ready,
+        (unsigned long long)(uintptr_t)ack) < 0) { SetLastError(ERROR_INSUFFICIENT_BUFFER); goto done; }
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.lpDesktop = L"";
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
+    startup.lpAttributeList = malloc(attribute_size);
+    if (!startup.lpAttributeList) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto done; }
+    if (!InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attribute_size)) goto done;
+    attribute_ready = 1;
+    inherit[0] = mapping; inherit[1] = ready; inherit[2] = ack;
+    if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        inherit, sizeof(inherit), NULL, NULL) || !(c->ui_job = new_job())) goto done;
+    if (!CreateProcessW(path, line, NULL, NULL, TRUE,
+        CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+        NULL, NULL, &startup.StartupInfo, &info)) goto done;
+    c->ui_process = info.hProcess;
+    if (!SetHandleInformation(mapping, HANDLE_FLAG_INHERIT, 0) ||
+        !SetHandleInformation(ready, HANDLE_FLAG_INHERIT, 0) ||
+        !SetHandleInformation(ack, HANDLE_FLAG_INHERIT, 0)) goto done;
+    if (!AssignProcessToJobObject(c->ui_job, info.hProcess) || ResumeThread(info.hThread) == (DWORD)-1) goto done;
+    waits[0] = ready; waits[1] = info.hProcess;
+    waited = WaitForMultipleObjects(2, waits, FALSE, ui_remaining(deadline));
+    if (waited != WAIT_OBJECT_0) {
+        if (waited == WAIT_TIMEOUT) SetLastError(ERROR_TIMEOUT);
+        else if (waited == WAIT_OBJECT_0 + 1) {
+            if (GetExitCodeProcess(info.hProcess, &code)) SetLastError(code ? code : ERROR_PROCESS_ABORTED);
+        }
+        goto done;
+    }
+    memcpy(&reply, shared, sizeof(reply));
+    if (reply.version != VISJAIL_UI_VERSION || reply.size != sizeof(reply) ||
+        !ui_profile_valid(reply.profile) || wmemcmp(reply.profile, c->profile, VISJAIL_UI_PROFILE_CHARS) ||
+        !wmemchr(reply.station_name, 0, sizeof(reply.station_name) / sizeof(wchar_t))) {
+        SetLastError(ERROR_INVALID_DATA); goto done;
+    }
+    if (reply.error) { SetLastError(reply.error); goto done; }
+    if (!reply.station || !reply.desktop) { SetLastError(ERROR_INVALID_DATA); goto done; }
+    if (!DuplicateHandle(info.hProcess, (HANDLE)reply.station, GetCurrentProcess(), (HANDLE *)&c->station,
+            WINSTA_READATTRIBUTES, FALSE, 0) ||
+        !DuplicateHandle(info.hProcess, (HANDLE)reply.desktop, GetCurrentProcess(), (HANDLE *)&c->desktop,
+            VISJAIL_UI_DESKTOP_RIGHTS, FALSE, 0)) goto done;
+    if (!ui_object(c->station, L"WindowStation", station_name, sizeof(station_name)) ||
+        wcscmp(station_name, reply.station_name) || !ui_security_init(&security, c->sid) ||
+        !ui_desktop_valid(c->desktop, c->profile, &security)) {
+        if (!GetLastError()) SetLastError(ERROR_INVALID_DATA);
+        goto done;
+    }
+    if (!SetEvent(ack)) goto done;
+    waited = WaitForSingleObject(info.hProcess, ui_remaining(deadline));
+    if (waited != WAIT_OBJECT_0) { if (waited == WAIT_TIMEOUT) SetLastError(ERROR_TIMEOUT); goto done; }
+    if (!GetExitCodeProcess(info.hProcess, &code)) goto done;
+    if (code) { SetLastError(code); goto done; }
     ok = 1;
  done:
     saved = GetLastError();
-    if (actual) LocalFree(actual);
-    if (low) LocalFree(low);
-    if (acl) LocalFree(acl);
-    free(name); SetLastError(saved); return ok;
+    if (!close_ui_helper(c, ui_remaining(deadline))) { saved = GetLastError(); ok = 0; }
+    if (info.hThread) CloseHandle(info.hThread);
+    if (attribute_ready) DeleteProcThreadAttributeList(startup.lpAttributeList);
+    free(startup.lpAttributeList);
+    if (shared) UnmapViewOfFile(shared);
+    if (mapping) CloseHandle(mapping);
+    if (ready) CloseHandle(ready);
+    if (ack) CloseHandle(ack);
+    ui_security_free(&security);
+    free(path); free(line);
+    SetLastError(saved ? saved : ok ? ERROR_SUCCESS : ERROR_GEN_FAILURE); return ok;
 }
 
 static int close_desktop(Context *c) {
@@ -405,6 +461,18 @@ static int close_desktop(Context *c) {
     return 1;
 }
 
+/* A constructor cannot return an ID on failure. Retain at most one failed context
+ * and refuse new creation until all of its helper/UI/profile cleanup succeeds. */
+static int dispose_failed_context(Context *c, char *error, int error_cap) {
+    if (!close_ui_helper(c, 0) || !close_desktop(c)) return 0;
+    if (c->profile[0] && delete_profile(c->profile, error, error_cap)) return 0;
+    unpin(c->pins);
+    if (c->job) CloseHandle(c->job);
+    if (c->sid) FreeSid(c->sid);
+    LocalFree(c->registry_read); free(c->path); free(c);
+    return 1;
+}
+
 int visjail_windows_create(const char *directory, char *error, int error_cap) {
     Context *c = calloc(1, sizeof(*c));
     wchar_t name[80], *app = NULL, *work = NULL, *tmp = NULL;
@@ -415,6 +483,12 @@ int visjail_windows_create(const char *directory, char *error, int error_cap) {
     const char *operation = "Create private Windows jail";
     int result;
     AcquireSRWLockExclusive(&lock);
+    if (failed_context) {
+        if (!dispose_failed_context(failed_context, error, error_cap)) {
+            free(c); result = failure(error, error_cap, "Finish prior Windows helper cleanup"); goto done;
+        }
+        failed_context = NULL;
+    }
     if (!c) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto fail; }
     c->path = wide(directory);
     if (!local_path(c->path)) { SetLastError(ERROR_INVALID_NAME); goto fail; }
@@ -460,15 +534,9 @@ int visjail_windows_create(const char *directory, char *error, int error_cap) {
 fail:
     result = failure(error, error_cap, operation);
     if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
-    if (c) {
-        close_desktop(c);
-        unpin(c->pins); if (c->job) CloseHandle(c->job);
-        if (c->profile[0]) {
-            int cleanup = delete_profile(c->profile, error, error_cap);
-            if (cleanup) result = cleanup;
-        }
-        if (c->sid) FreeSid(c->sid);
-        LocalFree(c->registry_read); free(c->path); free(c);
+    if (c && !dispose_failed_context(c, error, error_cap)) {
+        failed_context = c;
+        result = failure(error, error_cap, "Finish failed Windows context cleanup");
     }
 done:
     free(app); free(work); free(tmp);

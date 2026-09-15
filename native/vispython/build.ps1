@@ -69,6 +69,8 @@ try {
     & (Join-Path $repo 'native/visjail/build.ps1') -OutputDirectory $stage
     $jail = Join-Path $stage 'visjail.dll'
     if (-not (Test-Path -LiteralPath $jail -PathType Leaf)) { throw 'MSVC produced no visjail.dll' }
+    $helper = Join-Path $stage 'visjail-ui.exe'
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'MSVC produced no visjail-ui.exe' }
     Get-ChildItem -LiteralPath $pythonHome -Directory -Recurse -Filter '__pycache__' |
         Remove-Item -Recurse -Force
     $null = New-Item -ItemType Directory -Path (Split-Path $out) -Force
@@ -78,6 +80,7 @@ try {
     Move-Item -LiteralPath $licenses -Destination (Join-Path $out 'licenses')
     Move-Item -LiteralPath $library -Destination (Join-Path $out 'vispython.dll')
     Move-Item -LiteralPath $jail -Destination (Join-Path $out 'visjail.dll')
+    Move-Item -LiteralPath $helper -Destination (Join-Path $out 'visjail-ui.exe')
     Write-Output (Join-Path $out 'vispython.dll')
 }
 finally {

@@ -103,6 +103,24 @@ public final class WindowsJailProbe {
     }
   }
 
+  private static void helperArguments(Path guest) throws Exception {
+    Path helper = Path.of(Native.library().path()).getParent().resolve("visjail-ui.exe");
+    check(Files.isRegularFile(helper), "selected runtime contains its desktop helper");
+    for (List<String> arguments : List.of(List.<String>of(), List.of("0"), List.of("0", "0"),
+        List.of("0", "0", "0", "0"), List.of("invalid", "0", "0"),
+        List.of("0", "0", "0"), List.of("-1", "0", "0"),
+        List.of("18446744073709551616", "0", "0"))) {
+      List<String> command = new ArrayList<>(List.of(helper.toString()));
+      command.addAll(arguments);
+      Process process = new ProcessBuilder(command).start();
+      Result result = finish(process, new byte[0]);
+      check(result.exit() == 1, "desktop helper rejects malformed handle arguments: " + arguments);
+      check(!process.isAlive(), "rejected desktop helper leaves no process alive");
+    }
+    passed(finish(new ProcessBuilder(guest.toString(), "helper-protocol", helper.toString()).start(), new byte[0]),
+        "helper rejects malformed protocol size, version and profile without leaked processes");
+  }
+
   private static Result run(WindowsJail jail, String... arguments) throws Exception {
     List<String> command = new ArrayList<>();
     command.add(jail.applicationDirectory().resolve("guest.exe").toString());
@@ -711,8 +729,14 @@ public final class WindowsJailProbe {
     }
   }
 
-  private static void desktopIsolation(Path parent, Path guest) throws Exception {
-    Process host = new ProcessBuilder(guest.toString(), "desktop-fixture").start();
+  @FunctionalInterface
+  private interface DesktopCheck {
+    void run(String desktop) throws Exception;
+  }
+
+  private static void withDesktopFixture(Path guest, String station, boolean shared, DesktopCheck body) throws Exception {
+    Process host = new ProcessBuilder(guest.toString(), "desktop-at", station, "desktop-fixture",
+        shared ? "shared" : "private").start();
     CompletableFuture<String> ready = new CompletableFuture<>();
     CompletableFuture<byte[]> output = ready.handle((name, failed) -> drain(host.getInputStream()))
         .thenCompose(result -> result);
@@ -729,14 +753,15 @@ public final class WindowsJailProbe {
         } catch (Throwable caught) { ready.completeExceptionally(caught); }
       });
       desktop = ready.get(10, TimeUnit.SECONDS);
-      desktopIsolation(parent, guest, desktop);
+      body.run(desktop);
     } catch (Exception | AssertionError caught) {
       failure = caught;
       throw caught;
     } finally {
       try {
         passed(finish(host, new byte[] {'q'}, output), "host verifies and closes its private desktop fixture");
-        if (desktop != null) passed(finish(new ProcessBuilder(guest.toString(), "desktop-absent", desktop).start(), new byte[0]),
+        if (desktop != null) passed(finish(new ProcessBuilder(guest.toString(), "desktop-at", station,
+            "desktop-absent", desktop).start(), new byte[0]),
             "private host desktop fixture leaves no handles alive");
       } catch (Exception | AssertionError cleanup) {
         if (failure == null) throw cleanup;
@@ -745,13 +770,12 @@ public final class WindowsJailProbe {
     }
   }
 
-  private static void desktopIsolation(Path parent, Path guest, String hostDesktop) throws Exception {
+  private static void desktopIsolation(Path parent, Path guest) throws Exception {
     Result before = finish(new ProcessBuilder(guest.toString(), "desktop-state").start(), new byte[0]);
     passed(before, "host UI identity and descriptors before jail launches");
-    // The current Default desktop can intentionally admit LPAC. Use an explicitly private host object.
-    check(!hostDesktop.equals(field(before.out(), "DESKTOP")), "private host fixture is not the current desktop");
     String firstDesktop;
     String secondDesktop;
+    String station;
     Path invalid = Files.writeString(parent.resolve("desktop-invalid.exe"), "not a Windows executable");
     try (WindowsJail first = prepare(parent, guest); WindowsJail second = prepare(parent, guest)) {
       first.stage(invalid, "invalid.exe");
@@ -764,22 +788,32 @@ public final class WindowsJailProbe {
       check(!firstDesktop.equals(secondDesktop), "contexts use distinct private desktops");
       check(!firstDesktop.equals(field(before.out(), "DESKTOP")) && !secondDesktop.equals(field(before.out(), "DESKTOP")),
           "guests never inherit the current host desktop");
-      passed(finish(new ProcessBuilder(guest.toString(), "desktop-present", firstDesktop, secondDesktop).start(), new byte[0]),
-          "host can open both private desktops before context cleanup");
-      check(field(before.out(), "STATION").equals(field(firstIdentity.out(), "STATION"))
-          && field(before.out(), "STATION").equals(field(secondIdentity.out(), "STATION")),
-          "guests retain only the host station identity, not its desktop");
-      passed(run(first, "desktop-isolation", hostDesktop, secondDesktop), "pipe guest denies private host and sibling desktops");
-      Process terminal = second.spawn(List.of(second.applicationDirectory().resolve("guest.exe").toString(),
-          "desktop-isolation", hostDesktop, firstDesktop), Map.of(), null, true, true, 31, 97);
-      passed(finish(terminal, new byte[0]), "ConPTY guest retains LPAC and private desktop isolation");
+      station = field(firstIdentity.out(), "STATION");
+      check(station.equals(field(secondIdentity.out(), "STATION")), "contexts use the same OS-selected station");
+      Result selector = run(first, "desktop-at", station, "desktop-present", firstDesktop);
+      check(selector.exit() != 0 && selector.err().contains("only trusted non-AppContainer probe selects its station"),
+          "station-selecting fixture cannot turn a jailed probe into a trusted host");
+      passed(finish(new ProcessBuilder(guest.toString(), "desktop-at", station, "desktop-present",
+          firstDesktop, secondDesktop).start(), new byte[0]), "host can open both private desktops before context cleanup");
+      // CI 34966071117: an interactive logon can select WinSta0 rather than its creator's service station.
+      // Keep actual same-station objects as denial controls, never accept a missing name as an ACL denial.
+      withDesktopFixture(guest, station, false, hostDesktop -> {
+        check(!hostDesktop.equals(field(before.out(), "DESKTOP")), "private fixture is not the current host desktop");
+        passed(run(first, "desktop-isolation", hostDesktop, secondDesktop), "pipe guest denies private host and sibling desktops");
+        Process terminal = second.spawn(List.of(second.applicationDirectory().resolve("guest.exe").toString(),
+            "desktop-isolation", hostDesktop, firstDesktop), Map.of(), null, true, true, 31, 97);
+        passed(finish(terminal, new byte[0]), "ConPTY guest retains LPAC and private desktop isolation");
+      });
+      withDesktopFixture(guest, station, true, sharedDesktop ->
+          passed(run(first, "desktop-shared", sharedDesktop), "existing desktop admits exactly its explicit 0x81 grant"));
       for (boolean pty : List.of(false, true)) {
         denied(() -> first.spawn(List.of(first.applicationDirectory().resolve("invalid.exe").toString()),
             Map.of(), null, pty, pty, pty ? 31 : 0, pty ? 97 : 0), "invalid image cannot launch");
       }
       passed(run(first, "descendant"), "private desktop preserves descendant confinement");
     } finally { Files.deleteIfExists(invalid); }
-    passed(finish(new ProcessBuilder(guest.toString(), "desktop-absent", firstDesktop, secondDesktop).start(), new byte[0]),
+    passed(finish(new ProcessBuilder(guest.toString(), "desktop-at", station, "desktop-absent",
+        firstDesktop, secondDesktop).start(), new byte[0]),
         "context close releases desktop handles from successful and failed launches");
     Result after = finish(new ProcessBuilder(guest.toString(), "desktop-state").start(), new byte[0]);
     passed(after, "host UI identity and descriptors after jail cleanup");
@@ -927,8 +961,9 @@ public final class WindowsJailProbe {
       Result host = finish(new ProcessBuilder(arguments[1], "desktop-state").start(), new byte[0]);
       passed(host, "fixture Default desktop control identity");
       try (WindowsJail jail = prepare(Path.of(arguments[2]), Path.of(arguments[1]))) {
-        String mode = arguments[0].equals("--shared-desktop-child") ? "desktop-shared" : "desktop-private";
-        passed(run(jail, mode, field(host.out(), "DESKTOP")), "fixture Default admits only its explicit UI rights");
+        String access = arguments[0].equals("--shared-desktop-child") ? "shared" : "private";
+        passed(run(jail, "desktop-original", field(host.out(), "STATION"), field(host.out(), "DESKTOP"), access),
+            "actual fixture Default admits only its explicit rights or its private station denies access");
       }
       System.out.println("PASS WindowsJail private desktop startup, isolation and cleanup");
       return;
@@ -1002,6 +1037,7 @@ public final class WindowsJailProbe {
         stage("runtime selection", () -> check(Files.isSameFile(nativeDirectory.resolve(Native.libraryName()),
             Path.of(Native.library().path())), "launcher uses the requested external runtime"));
       }
+      stage("desktop helper arguments", () -> helperArguments(guest));
       stage("validation", () -> validation(parent, guest));
       stage("desktop isolation", () -> desktopIsolation(parent, guest));
       stage("private service desktop", () -> privateDesktopHost(parent, guest, false));

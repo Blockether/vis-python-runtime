@@ -15,7 +15,7 @@ if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw "Missing $arc
 if (Test-Path -LiteralPath $unpacked) { Remove-Item -LiteralPath $unpacked -Recurse -Force }
 $null = New-Item -ItemType Directory -Path $unpacked
 & tar.exe -xzf $archive -C $unpacked
-foreach ($relative in @('vispython.dll', 'visjail.dll', 'vis-python-worker.exe', 'python/python.exe',
+foreach ($relative in @('vispython.dll', 'visjail.dll', 'visjail-ui.exe', 'vis-python-worker.exe', 'python/python.exe',
         'python/python314.dll', 'python/Lib/os.py', 'python/Scripts/uv.exe',
         'licenses/uv-LICENSE-MIT', 'licenses/uv-LICENSE-APACHE')) {
     if (-not (Test-Path -LiteralPath (Join-Path $unpacked $relative) -PathType Leaf)) {

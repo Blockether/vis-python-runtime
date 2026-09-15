@@ -35,6 +35,17 @@
                 (slurp path)]]
 
     (is (str/includes? workflow "runs-on: windows-2022") path)
+    ;; CI 104381155286 reported the old action's deprecated Node 20 runtime.
+    (is (not (str/includes? workflow "ilammy/msvc-dev-cmd"))
+        (str path ": no deprecated Node setup action"))
+    (let [setup
+          (str/index-of workflow "./scripts/setup-msvc.ps1")
+
+          native-build
+          (str/index-of workflow "./native/vispython/build.ps1")]
+
+      (is (and setup native-build (< setup native-build))
+          (str path ": configure MSVC before native compilation")))
     (doseq [command ["./native/vispython/build.ps1" "clojure -T:build worker-image"
                      "clojure -T:build windows-jail-probe" "./scripts/verify-platform-archive.ps1"
                      "target/archive-check-windows-x64" "./scripts/test-windows.ps1"]]
@@ -102,7 +113,13 @@
     (is (< (str/index-of native-script "native/visjail/build.ps1")
            (str/index-of native-script "Remove-Item -LiteralPath $out"))
         "Build both libraries before replacing the published staging directory")
+    (is (str/includes?
+          native-script
+          "Move-Item -LiteralPath $helper -Destination (Join-Path $out 'visjail-ui.exe')")
+        "The desktop helper survives replacement of the runtime staging directory")
     (is (str/includes? archive-script "'visjail.dll'"))
+    (is (str/includes? archive-script "'visjail-ui.exe'"))
+    (is (str/includes? build "visjail-ui.exe") "Archive construction requires the desktop helper")
     (doseq [text ["visjail.dll" "VIS_WINDOWS_JAIL_GUEST" "WindowsJailProbe"
                   "Invoke-JailProbe -Executable $launcher" "WaitForExit(180000)"
                   "$start.Environment['VIS_PYTHON_NATIVE_PATH'] = $runtime"]]

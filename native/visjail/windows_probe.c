@@ -21,6 +21,7 @@
 #include <wchar.h>
 #include <io.h>
 #include <fcntl.h>
+#include "windows_ui_protocol.h"
 
 #pragma intrinsic(_ReturnAddress)
 
@@ -1637,7 +1638,7 @@ static void desktop_lifetime(const wchar_t *first, const wchar_t *second, int pr
 }
 
 /* A private same-station object is a denial control; the OS Default desktop need not be private. */
-static void desktop_fixture(void) {
+static void desktop_fixture(int shared) {
     HANDLE token = NULL;
     HDESK desktop = NULL, opened = NULL;
     BYTE user[4096];
@@ -1654,7 +1655,8 @@ static void desktop_fixture(void) {
     if (failures) goto done;
     check(ConvertSidToStringSidW(((TOKEN_USER *)user)->User.Sid, &sid), "private desktop fixture identity string");
     if (!sid) goto done;
-    swprintf_s(sddl, 512, L"D:P(A;;GA;;;%ls)(A;;RC;;;OW)S:(ML;;NW;;;LW)", sid);
+    swprintf_s(sddl, 512, L"D:P(A;;GA;;;%ls)(A;;RC;;;OW)%lsS:(ML;;NW;;;LW)", sid,
+               shared ? L"(A;;0x81;;;S-1-15-2-2)" : L"");
     check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, NULL),
           "private desktop fixture descriptor");
     if (!descriptor) goto done;
@@ -1663,10 +1665,10 @@ static void desktop_fixture(void) {
     if (failures) goto done;
     swprintf_s(name, 80, L"visjail-control-%ls", guid);
     desktop = CreateDesktopW(name, NULL, NULL, 0, GENERIC_ALL, &attributes);
-    check(desktop != NULL, "create host-only same-station desktop fixture");
+    check(desktop != NULL, "create explicit same-station desktop fixture");
     if (!desktop) goto done;
     opened = OpenDesktopW(name, 0, FALSE, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS);
-    check(opened != NULL, "host opens private desktop with the rights the guest must be denied");
+    check(opened != NULL, "host opens the actual fixture with the rights tested by the guest");
     if (opened) { check(CloseDesktop(opened), "close private desktop positive control"); opened = NULL; }
     before = desktop_security(desktop);
     if (failures || !before) goto done;
@@ -1823,10 +1825,132 @@ static void desktop_host(int argc, wchar_t **argv) {
     free(command);
 }
 
+/* Only a disposable trusted probe changes its station; the Java host never does. */
+static void desktop_at(int argc, wchar_t **argv) {
+    HANDLE token = NULL;
+    HWINSTA original = GetProcessWindowStation(), station = NULL;
+    DWORD appcontainer = 1, needed = 0;
+    int fixture = argc == 5 && !wcscmp(argv[3], L"desktop-fixture") &&
+        (!wcscmp(argv[4], L"private") || !wcscmp(argv[4], L"shared"));
+    int lifetime = (argc == 5 || argc == 6) &&
+        (!wcscmp(argv[3], L"desktop-present") || !wcscmp(argv[3], L"desktop-absent"));
+    BOOL selected = FALSE;
+    check(fixture || lifetime, "station-selecting host probe arguments");
+    check(original != NULL, "original disposable test host station");
+    if (failures) return;
+    check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "station-selecting host token");
+    if (!token) goto done;
+    check(GetTokenInformation(token, TokenIsAppContainer, &appcontainer, sizeof(appcontainer), &needed) &&
+          !appcontainer, "only trusted non-AppContainer probe selects its station");
+    if (failures) goto done;
+    station = OpenWindowStationW(argv[2], FALSE, WINSTA_READATTRIBUTES | (fixture ? WINSTA_CREATEDESKTOP : 0));
+    check(station != NULL, "trusted host opens the actual context station");
+    if (!station) goto done;
+    selected = SetProcessWindowStation(station);
+    check(selected, "select context station in disposable test host");
+    if (!selected) goto done;
+    if (fixture) desktop_fixture(!wcscmp(argv[4], L"shared"));
+    else desktop_lifetime(argv[4], argc == 6 ? argv[5] : NULL, !wcscmp(argv[3], L"desktop-present"));
+ done:
+    if (selected) check(SetProcessWindowStation(original), "restore disposable test host station");
+    if (station) check(CloseWindowStation(station), "close test host station handle");
+    if (token) CloseHandle(token);
+}
+
+static void desktop_original(const wchar_t *station_name, const wchar_t *name, int shared) {
+    wchar_t current[256];
+    HWINSTA station;
+    DWORD error;
+    token_check();
+    if (!desktop_name(GetProcessWindowStation(), current, sizeof(current))) return;
+    if (!wcscmp(current, station_name)) {
+        desktop_access(name, shared);
+        return;
+    }
+    /* The fixture station exists: a missing name must never stand in for denial. */
+    SetLastError(ERROR_SUCCESS);
+    station = OpenWindowStationW(station_name, FALSE, WINSTA_READATTRIBUTES);
+    error = GetLastError();
+    check(!station && error == ERROR_ACCESS_DENIED, "actual original host station access denied");
+    if (station) check(CloseWindowStation(station), "close unexpected original host station access");
+}
+
+/* Exercise the real helper protocol without granting it handles to this process. */
+static void helper_protocol(const wchar_t *helper) {
+    for (int invalid = 0; invalid < 3; invalid++) {
+        SECURITY_ATTRIBUTES attributes = {sizeof(attributes), NULL, TRUE};
+        HANDLE handles[3] = {NULL, NULL, NULL}, job = NULL;
+        VisjailUiTransfer *shared = NULL;
+        STARTUPINFOEXW startup = {0};
+        PROCESS_INFORMATION process = {0};
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+        SIZE_T bytes = 0;
+        DWORD exit_code = 0;
+        wchar_t command[128];
+        int initialized = 0, completed = 0;
+        handles[0] = CreateFileMappingW(INVALID_HANDLE_VALUE, &attributes, PAGE_READWRITE,
+                                      0, (DWORD)sizeof(*shared), NULL);
+        handles[1] = CreateEventW(&attributes, TRUE, FALSE, NULL);
+        handles[2] = CreateEventW(&attributes, TRUE, FALSE, NULL);
+        if (!handles[0] || !handles[1] || !handles[2]) goto done;
+        shared = MapViewOfFile(handles[0], FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(*shared));
+        if (!shared) goto done;
+        ZeroMemory(shared, sizeof(*shared));
+        shared->version = VISJAIL_UI_VERSION;
+        shared->size = (DWORD)sizeof(*shared);
+        shared->error = ERROR_IO_PENDING;
+        wcscpy_s(shared->profile, VISJAIL_UI_PROFILE_CHARS, L"visjail.00000000000000000000000000000000");
+        if (invalid == 0) shared->version++;
+        else if (invalid == 1) shared->size--;
+        else shared->profile[0] = L'x';
+        job = CreateJobObjectW(NULL, NULL);
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) goto done;
+        InitializeProcThreadAttributeList(NULL, 1, 0, &bytes);
+        startup.lpAttributeList = malloc(bytes);
+        if (!startup.lpAttributeList || !InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &bytes)) goto done;
+        initialized = 1;
+        if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                       handles, sizeof(handles), NULL, NULL)) goto done;
+        startup.StartupInfo.cb = sizeof(startup);
+        startup.StartupInfo.lpDesktop = L"";
+        _snwprintf_s(command, 128, _TRUNCATE, L"visjail-ui %llu %llu %llu",
+                     (unsigned long long)(uintptr_t)handles[0], (unsigned long long)(uintptr_t)handles[1],
+                     (unsigned long long)(uintptr_t)handles[2]);
+        if (!CreateProcessW(helper, command, NULL, NULL, TRUE,
+                            CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                            NULL, NULL, &startup.StartupInfo, &process)) goto done;
+        if (!AssignProcessToJobObject(job, process.hProcess) || ResumeThread(process.hThread) == (DWORD)-1) goto done;
+        if (WaitForSingleObject(handles[1], 5000) != WAIT_OBJECT_0) goto done;
+        check(shared->error == ERROR_INVALID_PARAMETER, "helper reports invalid protocol size, version or profile");
+        check(!shared->station && !shared->desktop && !shared->station_name[0],
+              "rejected helper request publishes no UI handles or station");
+        if (!SetEvent(handles[2]) || WaitForSingleObject(process.hProcess, 5000) != WAIT_OBJECT_0) goto done;
+        check(GetExitCodeProcess(process.hProcess, &exit_code) && exit_code == 1,
+              "malformed protocol helper exits with failure after acknowledgement");
+        completed = 1;
+     done:
+        check(completed, "bounded malformed helper protocol exchange completes");
+        if (process.hProcess && !completed) {
+            check(TerminateProcess(process.hProcess, 1), "terminate failed helper fixture");
+            check(WaitForSingleObject(process.hProcess, 5000) == WAIT_OBJECT_0, "failed helper fixture leaves no process alive");
+        }
+        if (process.hThread) CloseHandle(process.hThread);
+        if (process.hProcess) CloseHandle(process.hProcess);
+        if (job) CloseHandle(job);
+        if (initialized) DeleteProcThreadAttributeList(startup.lpAttributeList);
+        free(startup.lpAttributeList);
+        if (shared) UnmapViewOfFile(shared);
+        for (int i = 0; i < 3; i++) if (handles[i]) CloseHandle(handles[i]);
+        if (!completed) return;
+    }
+}
+
 int wmain(int argc, wchar_t **argv) {
     int i;
     if (argc < 2) return 2;
     if (wcscmp(argv[1], L"wait-chains") == 0 && argc == 3) return wait_chains(wcstoul(argv[2], NULL, 10));
+    else if (wcscmp(argv[1], L"helper-protocol") == 0 && argc == 3) helper_protocol(argv[2]);
     else if (wcscmp(argv[1], L"protect") == 0 && argc == 3) protected_file(argv[2]);
     else if (wcscmp(argv[1], L"junction") == 0 && argc == 4) junction(argv[2], argv[3]);
     else if (wcscmp(argv[1], L"leak-host") == 0) host_launch(argc, argv, 0);
@@ -1835,7 +1959,10 @@ int wmain(int argc, wchar_t **argv) {
     else if (wcscmp(argv[1], L"desktop-state") == 0 && argc == 2) desktop_state();
     else if (wcscmp(argv[1], L"desktop-handles") == 0 && argc == 2) desktop_handles();
     else if (wcscmp(argv[1], L"desktop-isolation") == 0) desktop_isolation(argc, argv);
-    else if (wcscmp(argv[1], L"desktop-fixture") == 0 && argc == 2) desktop_fixture();
+    else if (wcscmp(argv[1], L"desktop-at") == 0) desktop_at(argc, argv);
+    else if (wcscmp(argv[1], L"desktop-original") == 0 && argc == 5 &&
+             (!wcscmp(argv[4], L"private") || !wcscmp(argv[4], L"shared")))
+        desktop_original(argv[2], argv[3], !wcscmp(argv[4], L"shared"));
     else if (wcscmp(argv[1], L"desktop-shared") == 0 && argc == 3) desktop_access(argv[2], 1);
     else if (wcscmp(argv[1], L"desktop-private") == 0 && argc == 3) desktop_access(argv[2], 0);
     else if (wcscmp(argv[1], L"desktop-present") == 0 && (argc == 3 || argc == 4))

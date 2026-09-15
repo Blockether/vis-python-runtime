@@ -306,6 +306,9 @@
         (when-not (.isFile src)
           (throw (ex-info (str "runtime cdylib not found (build native/vispython first): " src)
                           {:platform platform :path (str src)}))))
+      (when (and (= platform "windows-x64") (not (.isFile (io/file dir "visjail-ui.exe"))))
+        (throw (ex-info "Windows desktop helper not found (build native/visjail first)"
+                        {:platform platform :path (str (io/file dir "visjail-ui.exe"))})))
       (when (and (worker-platforms platform) (not (.canExecute worker)))
         (throw (ex-info (str "worker image not found (run `clojure -T:build worker-image` first): "
                              worker)
