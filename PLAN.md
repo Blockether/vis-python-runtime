@@ -431,3 +431,13 @@ means the observed ordering race alone is not a verified explanation or fix.
 Temporary native handle-result, barrier-count and teardown-phase diagnostics are
 restored to locate the remaining wait; remove them after verification and before
 publication. The additional pre-reaped case has not run yet.
+
+Run 34926154800 passes all four direct and four pre-reaped JVM children (281
+launcher checks), then still hangs in the first native-image direct close. Both
+`CloseHandle` calls succeed **before** the barrier returns and the direct console
+call starts. This rules out the disposal barrier as the remaining wait. Terminal
+master disposal now explicitly disconnects both named-pipe clients before closing
+its server handles. This is restricted to duplex terminal masters; ordinary pipe
+EOF/data delivery is unchanged. It tests a stronger channel-break hypothesis,
+not a documented requirement that was previously established. Native diagnostics
+remain until Windows verification resolves it; publication is still pending.

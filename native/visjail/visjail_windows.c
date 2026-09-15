@@ -555,6 +555,13 @@ static void stream_dispose(Stream *s) {
         CancelIoEx(s->read, &s->peek);
         GetOverlappedResult(s->read, &s->peek, &ignored, TRUE);
     }
+    if (s->read && s->write && s->read != s->write) {
+        /* Closing the terminal master explicitly breaks both client channels. */
+        DWORD read_error = DisconnectNamedPipe(s->read) ? ERROR_SUCCESS : GetLastError();
+        DWORD write_error = DisconnectNamedPipe(s->write) ? ERROR_SUCCESS : GetLastError();
+        fprintf(stderr, "Windows jail duplex %d: disconnect read=%lu write=%lu\n",
+            s->id, read_error, write_error); fflush(stderr);
+    }
     BOOL read_closed = !s->read || CloseHandle(s->read);
     BOOL write_closed = !s->write || s->write == s->read || CloseHandle(s->write);
     CloseHandle(s->peek.hEvent); CloseHandle(s->cancel);
