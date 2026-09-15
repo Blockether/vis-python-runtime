@@ -1022,6 +1022,7 @@ def __vis_settle_gather__(v):
 # lazy generator, exactly like real python. It only LOOKS awaitable because it
 # has `.send`, and auto-settling used to DRIVE it to exhaustion and bind None.
 __vis_gen_type__ = __import__("types").GeneratorType
+__vis_coro_type__ = __import__("types").CoroutineType
 
 
 def __vis_is_awaitable__(v):
@@ -1166,7 +1167,8 @@ def __vis_library_awaitable__(aw):
         return any(__vis_library_awaitable__(child) for child in aw.aws)
     if not __vis_is_awaitable__(aw):
         return False
-    code = getattr(aw, "cr_code", None)
+    # Only native coroutines own cr_code; deferred instance lookup runs the tool.
+    code = aw.cr_code if isinstance(aw, __vis_coro_type__) else None
     if code is None:
         code = getattr(getattr(type(aw), "__await__", None), "__code__", None)
     return code is None or (

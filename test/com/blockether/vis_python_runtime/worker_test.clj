@@ -134,6 +134,7 @@
       (Files/deleteIfExists (Path/of path (make-array String 0))))
     {:process process
      :log log
+     :home home
      :socket-path path
      :channel channel
      :reader (BufferedReader. (InputStreamReader. (Channels/newInputStream ^SocketChannel channel)
@@ -464,3 +465,254 @@ assert custom.verify_flags & ssl.VERIFY_CRL_CHECK_LEAF
                          (exercise-tls! argv)
                          (println
                            "SKIP tls-worker-native-test - run clojure -T:build worker-image")))
+
+(defn- bounded-stack-request!
+  [worker op & fields]
+  (let [reply (future (apply request! worker op fields))]
+    (try (let [answer (deref reply 3000 ::timeout)]
+           (when (= ::timeout answer)
+             (.destroyForcibly ^Process (:process worker))
+             (throw (ex-info "stack diagnostic control did not reply" {:op op})))
+           (is (nil? (get answer "error")) (str op " failed: " (get answer "error")))
+           (get answer "value"))
+         (finally (future-cancel reply)))))
+
+(defn- exercise-stack-diagnostics!
+  [argv & [jailed?]]
+  (let [home
+        (harness/temp-dir "vis-stack-artifact")
+
+        work
+        (harness/temp-dir "vis-stack-work")
+
+        worker
+        (start! argv (when jailed? {:read-write [home work] :read-only []}))
+
+        artifact
+        (io/file home "python-stacks.log")
+
+        trigger
+        (io/file work "trigger")
+
+        entered
+        (io/file work "entered")
+
+        session
+        "stack-diagnostics"]
+
+    (try
+      (if (str/starts-with? (Native/platform) "windows-")
+        (is (= {"status" "unavailable" "reason" "unsupported-build"}
+               (bounded-stack-request! worker "dump-stacks")))
+        (do
+          (is (= {"status" "unavailable" "reason" "not-configured"}
+                 (bounded-stack-request! worker "dump-stacks")))
+          (is (= {"status" "unavailable" "reason" "absolute-path-required"}
+                 (bounded-stack-request! worker "stack-diagnostics" "code" "relative.log")))
+          (spit artifact "existing file stays intact")
+          (is (= {"status" "unavailable" "reason" "open-failed"}
+                 (bounded-stack-request! worker "stack-diagnostics" "code" (str artifact))))
+          (is (= "existing file stays intact" (slurp artifact)))
+          (io/delete-file artifact)
+          (is (= {"status" "ready"}
+                 (bounded-stack-request! worker "stack-diagnostics" "code" (str artifact))))
+          (is (= "rw-------"
+                 (java.nio.file.attribute.PosixFilePermissions/toString
+                   (Files/getPosixFilePermissions (.toPath artifact)
+                                                  (make-array java.nio.file.LinkOption 0)))))
+          (is (zero? (.length artifact)) "healthy setup emits no stack content")
+          (is (= {"status" "unavailable" "reason" "already-configured"}
+                 (bounded-stack-request! worker "stack-diagnostics" "code" (str artifact))))
+          (is (= {"status" "written"} (bounded-stack-request! worker "dump-stacks")))
+          (is (= {"status" "unavailable" "reason" "not-configured"}
+                 (bounded-stack-request! worker "stack-diagnostics" "code" "")))
+          (is (= {"status" "unavailable" "reason" "not-configured"}
+                 (bounded-stack-request! worker "dump-stacks")))
+          (io/delete-file artifact)
+          (is (= {"status" "ready"}
+                 (bounded-stack-request! worker "stack-diagnostics" "code" (str artifact))))
+          (value!
+            worker
+            "exec"
+            "session" session
+            "code"
+            "import threading, time
+stop_churn = threading.Event()
+def churn_threads():
+    while not stop_churn.is_set():
+        t = threading.Thread(target=lambda: None)
+        t.start()
+        t.join()
+churn = threading.Thread(target=churn_threads, daemon=True)
+churn.start()")
+          (dotimes [_ 30]
+            (is (= {"status" "written"} (bounded-stack-request! worker "dump-stacks"))))
+          (value! worker "exec" "session" session "code" "stop_churn.set()
+churn.join()")
+          (value! worker
+                  "confine"
+                  "code"
+                  (json/write-str {"read" [work] "write" [work] "refusal" "fixture policy"}))
+          (is (= {"status" "unavailable" "reason" "already-confined"}
+                 (bounded-stack-request! worker
+                                         "stack-diagnostics"
+                                         "code"
+                                         (str (io/file home "late.log")))))
+          (is (string? (get (request! worker
+                                      "exec"
+                                      "session" session
+                                      "code" (str "open(" (pr-str (str artifact)) ", 'w')"))
+                            "error"))
+              "opening the diagnostic file grants no guest filesystem access")
+          (value! worker
+                  "exec"
+                  "session" session
+                  "code" (str "import os, faulthandler, signal
+"
+                              "faulthandler.disable()
+"
+                              "signal_available = hasattr(signal, 'SIGUSR1')
+"
+                              "if signal_available: faulthandler.unregister(signal.SIGUSR1)
+"
+                              "def occupy_guest():
+"
+                              "    private_local = 'STACK_PRIVATE_LOCAL_SENTINEL'
+"
+                              "    while not os.path.exists("
+                              (pr-str (str trigger))
+                              "):
+"
+                              "        time.sleep(0.005)
+"
+                              "    with open("
+                              (pr-str (str entered))
+                              ", 'w') as marker:
+"
+                              "        marker.write('entered')
+"
+                              "    sum(range(10**18))
+"
+                              "threading.Thread(target=occupy_guest, daemon=True).start()"))
+          (spit trigger "go")
+          (loop [attempt 0]
+            (when (and (not (.exists entered)) (< attempt 200))
+              (Thread/sleep 5)
+              (recur (inc attempt))))
+          (is (.exists entered) "the background C loop was entered after exec replied")
+          (is (= {"status" "written"} (bounded-stack-request! worker "dump-stacks")))
+          (let [text (slurp artifact)]
+            (is (str/includes? text "occupy_guest") "stack is present before worker termination")
+            (is (str/includes? text "defined line"))
+            (is (not (str/includes? text "STACK_PRIVATE_LOCAL_SENTINEL"))))
+          (is (.isAlive ^Process (:process worker)) "capture does not kill a GIL-held worker")
+          (is (= {"status" "written"} (bounded-stack-request! worker "dump-stacks")))
+          (is (< (.length artifact) 65536) "repeated capture replaces the bounded artifact")))
+      (finally (.close ^SocketChannel (:channel worker))
+               (.destroyForcibly ^Process (:process worker))
+               (.waitFor ^Process (:process worker) 5 TimeUnit/SECONDS)
+               (.delete ^File (:log worker))
+               (doseq [dir
+                       [home work (:home worker)]
+
+                       file
+                       (reverse (file-seq (io/file dir)))]
+
+                 (io/delete-file file true))))))
+
+(harness/defbuilt-test stack-diagnostics-worker-class-test (exercise-stack-diagnostics! jvm-argv))
+
+(harness/defbuilt-test
+  stack-diagnostics-worker-native-test
+  (if-let [argv (image-argv)]
+    (doseq [jailed? [false true]]
+      (exercise-stack-diagnostics! argv jailed?))
+    (println "SKIP stack-diagnostics-worker-native-test - run clojure -T:build worker-image")))
+
+(defn- exercise-stack-descriptor!
+  [argv]
+  (let [home
+        (harness/temp-dir "vis-stack-descriptor")
+
+        artifact
+        (io/file home "stacks.log")
+
+        replacement
+        (io/file home "replacement.txt")
+
+        worker
+        (start! argv)]
+
+    (try (spit replacement "replacement must survive")
+         (is (= {"status" "ready"}
+                (bounded-stack-request! worker "stack-diagnostics" "code" (str artifact))))
+         (value! worker
+                 "exec"
+                 "session" "descriptor"
+                 "code"
+                 (str "import os
+"
+                      "wanted = os.stat("
+                      (pr-str (str artifact))
+                      ").st_ino
+"
+                      "diagnostic_fd = None
+"
+                      "for candidate in range(3, 256):
+"
+                      "    try:
+"
+                      "        if os.fstat(candidate).st_ino == wanted: diagnostic_fd = candidate
+"
+                      "    except OSError: pass
+"
+                      "assert diagnostic_fd is not None
+"))
+         (value! worker
+                 "confine"
+                 "code"
+                 (json/write-str {"read" [home] "write" [home] "refusal" "fixture policy"}))
+         (value! worker
+                 "exec"
+                 "session" "descriptor"
+                 "code" (str "os.close(diagnostic_fd)
+"
+                             "replacement_fd = os.open("
+                             (pr-str (str replacement))
+                             ", os.O_RDWR)
+"
+                             "os.dup2(replacement_fd, diagnostic_fd)
+"))
+         (is (= {"status" "unavailable" "reason" "descriptor-replaced"}
+                (bounded-stack-request! worker "dump-stacks")))
+         (is (= {"status" "unavailable" "reason" "not-configured"}
+                (bounded-stack-request! worker "stack-diagnostics" "code" "")))
+         (is (= "True"
+                (value! worker
+                        "eval"
+                        "session" "descriptor"
+                        "code"
+                        "os.fstat(diagnostic_fd).st_ino == os.fstat(replacement_fd).st_ino")))
+         (is (= "replacement must survive" (slurp replacement)))
+         (finally (.close ^SocketChannel (:channel worker))
+                  (.destroyForcibly ^Process (:process worker))
+                  (.waitFor ^Process (:process worker) 5 TimeUnit/SECONDS)
+                  (.delete ^File (:log worker))
+                  (doseq [dir
+                          [home (:home worker)]
+
+                          file
+                          (reverse (file-seq (io/file dir)))]
+
+                    (io/delete-file file true))))))
+
+(harness/defbuilt-test stack-descriptor-worker-class-test
+                       (when-not (str/starts-with? (Native/platform) "windows-")
+                         (exercise-stack-descriptor! jvm-argv)))
+
+(harness/defbuilt-test
+  stack-descriptor-worker-native-test
+  (when-not (str/starts-with? (Native/platform) "windows-")
+    (if-let [argv (image-argv)]
+      (exercise-stack-descriptor! argv)
+      (println "SKIP stack-descriptor-worker-native-test - run clojure -T:build worker-image"))))

@@ -3,11 +3,11 @@
 Run CPython from Java or Clojure, including native Python packages. The runtime
 bundles its own interpreter and is used by [Vis](https://github.com/Blockether/vis).
 
-**Platforms:** Linux x64/arm64, macOS x64/arm64, and Windows x64.
+**Released platforms:** Linux x64/arm64 and macOS x64/arm64.
 You need JDK 22 or newer; builds and release tests use JDK 25. Linux requires
-glibc 2.35 or newer. On Windows, use the explicit
-[private-workspace jail](doc/windows-jail.md) for OS-level process isolation;
-Unix path-based `JailPolicy` requests still fail closed.
+glibc 2.35 or newer. Windows support is still in development: CI and releases
+do not build or publish Windows archives. The [Windows guide](doc/windows-jail.md)
+describes the experimental source implementation, not a supported release.
 
 ## Start here
 
@@ -18,7 +18,7 @@ library from its `python/` tree. No system Python installation is required.
 
 - **[Java and Clojure quickstarts](doc/getting-started.md)** — installation, working examples, and expected output.
 - **[Embedding guide](doc/embedding.md)** — execution APIs, callbacks, session lifecycle, errors, and confinement.
-- **[Run isolated Windows programs](doc/windows-jail.md)** — copied inputs, private workspaces, process cleanup, and security limits.
+- **[Experimental Windows isolation](doc/windows-jail.md)** — source-only copied inputs, private workspaces, process cleanup, and security limits.
 - **API reference:** download the documentation ZIP from the release, extract it,
   and open `index.html` for searchable **Javadoc** and **Codox** references.
   The release also includes a standard Javadoc jar for IDEs.

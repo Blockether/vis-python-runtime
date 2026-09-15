@@ -16,6 +16,22 @@
  * human-readable reason, so one call yields both the verdict and the message.
  */
 #include <Python.h>
+#if PY_VERSION_HEX == 0x030e07f0 && !defined(Py_GIL_DISABLED) && !defined(Py_DEBUG) && \
+    (defined(__APPLE__) || defined(__linux__))
+#define VIS_PY_STACK_DIAGNOSTICS 1
+#define Py_BUILD_CORE
+#include "internal/pycore_interpframe.h"
+#undef Py_BUILD_CORE
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#else
+#include <sys/uio.h>
+#include <sys/syscall.h>
+#endif
+#else
+#define VIS_PY_STACK_DIAGNOSTICS 0
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -2225,6 +2241,215 @@ VIS_PY_EXPORT int vispython_drain_log(char *out, int cap)
     out[written] = '\0';
     return written;
 }
+
+/* Private stack artifacts are separate from the payload-free diagnostic ring.
+   Sample only the pinned CPython layouts; every guest address is copied through
+   the kernel, without acquiring the GIL or installing/delivering signals. The
+   snapshot may be incomplete during frame/thread teardown, but cannot dereference
+   their freed memory. Other interpreter layouts report unsupported-build. */
+#if VIS_PY_STACK_DIAGNOSTICS
+static pthread_mutex_t vis_py_stack_lock = PTHREAD_MUTEX_INITIALIZER;
+static int vis_py_stack_fd = -1;
+static PyInterpreterState *vis_py_stack_interp = NULL;
+static struct stat vis_py_stack_identity;
+
+static int vis_py_stack_owned(void)
+{
+    struct stat current;
+    return vis_py_stack_fd >= 0 && fstat(vis_py_stack_fd, &current) == 0 &&
+        S_ISREG(current.st_mode) && current.st_dev == vis_py_stack_identity.st_dev &&
+        current.st_ino == vis_py_stack_identity.st_ino;
+}
+
+static int vis_py_stack_write(const char *text)
+{
+    size_t left = strlen(text);
+    while (left > 0) {
+        ssize_t n = write(vis_py_stack_fd, text, left);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        text += n;
+        left -= (size_t)n;
+    }
+    return 0;
+}
+
+/* No conversion API, reference counting or guest code. Every sampled address
+   is copied by the kernel before access: another thread can unmap a frame while
+   diagnostics run, and freed-memory byte patterns alone cannot prevent a crash. */
+static int vis_py_stack_read(const void *address, void *out, size_t size)
+{
+    if (address == NULL || size > UINTPTR_MAX - (uintptr_t)address) return 0;
+#if defined(__APPLE__)
+    mach_vm_size_t copied = 0;
+    return mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)address, size,
+                                 (mach_vm_address_t)out, &copied) == KERN_SUCCESS && copied == size;
+#else
+    struct iovec local = {out, size}, remote = {(void *)address, size};
+    return syscall(SYS_process_vm_readv, getpid(), &local, 1, &remote, 1, 0) == (ssize_t)size;
+#endif
+}
+
+static void vis_py_stack_name(PyObject *value, char out[1001])
+{
+    PyUnicodeObject text;
+    Py_UCS4 characters[100];
+    size_t used = 0;
+    strcpy(out, "???");
+    if (!vis_py_stack_read(value, &text, sizeof text) || Py_TYPE(&text) != &PyUnicode_Type)
+        return;
+    PyASCIIObject *ascii = &text._base._base;
+    Py_ssize_t length = ascii->length;
+    int kind = ascii->state.kind;
+    if (length < 0 || (kind != 1 && kind != 2 && kind != 4)) return;
+    if (length > 100) length = 100;
+    const void *data = ascii->state.compact
+        ? (const void *)((uintptr_t)value + (ascii->state.ascii ? sizeof(PyASCIIObject)
+                                                              : sizeof(PyCompactUnicodeObject)))
+        : text.data.any;
+    if (!vis_py_stack_read(data, characters, (size_t)length * (size_t)kind)) return;
+    for (Py_ssize_t i = 0; i < length; i++) {
+        Py_UCS4 ch = PyUnicode_READ(kind, characters, i);
+        if (ch >= 32 && ch <= 126 && ch != '\\' && ch != '"') {
+            out[used++] = (char)ch;
+        } else {
+            used += (size_t)snprintf(out + used, 1001 - used, "\\U%08x", (unsigned)ch);
+        }
+    }
+    out[used] = '\0';
+}
+
+static int vis_py_stack_dump(void)
+{
+    PyThreadState *thread = PyInterpreterState_ThreadHead(vis_py_stack_interp);
+    unsigned threads = 0;
+    if (vis_py_stack_write("Python stack samples (most recent frame first; definition lines, not current lines)\n") < 0)
+        return -1;
+    while (thread != NULL && threads++ < 64) {
+        char line[2200];
+        PyThreadState state;
+        if (!vis_py_stack_read(thread, &state, sizeof state) || state.interp != vis_py_stack_interp)
+            return vis_py_stack_write("<unavailable thread state>\n");
+        _PyInterpreterFrame *frame = state.current_frame;
+        snprintf(line, sizeof line, "Thread 0x%lx:\n", state.thread_id);
+        if (vis_py_stack_write(line) < 0) return -1;
+        unsigned depth = 0;
+        while (frame != NULL && depth++ < 64) {
+            _PyInterpreterFrame sample;
+            PyCodeObject code;
+            if (!vis_py_stack_read(frame, &sample, offsetof(_PyInterpreterFrame, localsplus))) {
+                if (vis_py_stack_write("  <unavailable frame>\n") < 0) return -1;
+                break;
+            }
+            if (sample.owner != FRAME_OWNED_BY_INTERPRETER) {
+                if (sample.owner < FRAME_OWNED_BY_THREAD || sample.owner >= FRAME_OWNED_BY_INTERPRETER ||
+                    PyStackRef_IsTaggedInt(sample.f_executable)) {
+                    if (vis_py_stack_write("  <invalid frame>\n") < 0) return -1;
+                    break;
+                }
+                PyObject *executable = PyStackRef_AsPyObjectBorrow(sample.f_executable);
+                if (!vis_py_stack_read(executable, &code, offsetof(PyCodeObject, co_code_adaptive)) ||
+                    Py_TYPE(&code) != &PyCode_Type) {
+                    if (vis_py_stack_write("  <unavailable code>\n") < 0) return -1;
+                    break;
+                }
+                char filename[1001], name[1001];
+                uintptr_t bytecode = (uintptr_t)executable + offsetof(PyCodeObject, co_code_adaptive);
+                uintptr_t instruction = (uintptr_t)sample.instr_ptr;
+                int offset = instruction >= bytecode && instruction - bytecode <= INT_MAX
+                    ? (int)(instruction - bytecode) : -1;
+                vis_py_stack_name(code.co_filename, filename);
+                vis_py_stack_name(code.co_name, name);
+                snprintf(line, sizeof line, "  File \"%s\", defined line %d, bytecode offset %d in %s\n",
+                         filename, code.co_firstlineno, offset, name);
+                if (vis_py_stack_write(line) < 0) return -1;
+            }
+            frame = sample.previous;
+        }
+        if (frame != NULL && depth > 64 && vis_py_stack_write("  <frames truncated>\n") < 0)
+            return -1;
+        thread = state.next;
+    }
+    if (thread != NULL && vis_py_stack_write("<threads truncated>\n") < 0) return -1;
+    return 0;
+}
+#endif
+
+/* Configure once before confinement. Empty path closes the retained descriptor.
+   O_EXCL refuses an existing file/symlink; no guest filesystem grant is added. */
+VIS_PY_EXPORT int vispython_stack_diagnostics(const char *path, char *out, int cap)
+{
+#if VIS_PY_STACK_DIAGNOSTICS
+    const char *result;
+    int probe;
+    if (pthread_mutex_trylock(&vis_py_stack_lock) != 0)
+        return vis_py_copy_out("busy", out, cap);
+    if (path == NULL || path[0] == '\0') {
+        if (vis_py_stack_owned()) close(vis_py_stack_fd);
+        vis_py_stack_fd = -1;
+        vis_py_stack_interp = NULL;
+        result = "unavailable not-configured";
+    } else if (!vis_py_started) {
+        result = "unavailable not-initialized";
+    } else if (vis_py_confined) {
+        result = "unavailable already-confined";
+    } else if (vis_py_stack_fd >= 0) {
+        result = "unavailable already-configured";
+    } else if (path[0] != '/') {
+        result = "unavailable absolute-path-required";
+    } else if (!vis_py_stack_read(&vis_py_started, &probe, sizeof probe)) {
+        result = "unavailable memory-read-failed";
+    } else {
+        vis_py_stack_fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (vis_py_stack_fd < 0) {
+            result = "unavailable open-failed";
+        } else if (fstat(vis_py_stack_fd, &vis_py_stack_identity) != 0) {
+            close(vis_py_stack_fd);
+            vis_py_stack_fd = -1;
+            result = "unavailable open-failed";
+        } else {
+            vis_py_stack_interp = PyInterpreterState_Main();
+            result = "ready";
+        }
+    }
+    pthread_mutex_unlock(&vis_py_stack_lock);
+    return vis_py_copy_out(result, out, cap);
+#else
+    (void)path;
+    return vis_py_copy_out("unavailable unsupported-build", out, cap);
+#endif
+}
+
+/* All work is independent of the GIL. The host must bound disk/control waits
+   and may retire the worker if collection stalls. Each request replaces, rather
+   than appends to, the private artifact. It contains names, never locals/source. */
+VIS_PY_EXPORT int vispython_dump_stacks(char *out, int cap)
+{
+#if VIS_PY_STACK_DIAGNOSTICS
+    const char *result;
+    int probe;
+    if (pthread_mutex_trylock(&vis_py_stack_lock) != 0)
+        return vis_py_copy_out("busy", out, cap);
+    if (vis_py_stack_fd < 0) {
+        result = "unavailable not-configured";
+    } else if (!vis_py_stack_owned()) {
+        vis_py_stack_fd = -1;
+        result = "unavailable descriptor-replaced";
+    } else if (!vis_py_stack_read(&vis_py_started, &probe, sizeof probe)) {
+        result = "unavailable memory-read-failed";
+    } else if (ftruncate(vis_py_stack_fd, 0) != 0 || lseek(vis_py_stack_fd, 0, SEEK_SET) < 0 ||
+               vis_py_stack_dump() != 0) {
+        result = "failed write-failed";
+    } else {
+        result = "written";
+    }
+    pthread_mutex_unlock(&vis_py_stack_lock);
+    return vis_py_copy_out(result, out, cap);
+#else
+    return vis_py_copy_out("unavailable unsupported-build", out, cap);
+#endif
+}
+
 /* Start the interpreter, rooted at `home` when one is given.
 
    `home` is a VENDORED CPython tree — the directory holding `lib/python3.14/`.

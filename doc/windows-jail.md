@@ -1,5 +1,8 @@
 # Run isolated Windows programs
 
+Windows support is experimental and available only from source. CI and releases
+do not build or publish Windows archives; this guide documents work in progress.
+
 Use `WindowsJail` when you need to run a Windows program outside the embedded
 interpreter, with an OS boundary around it and its descendants. You select the
 program and inputs, copy them into a private workspace, then launch the process
@@ -13,9 +16,9 @@ the same implementation.
 
 ## Before you start
 
-Use Windows 11 or Windows Server 2022 on x64, a supported JDK, and matching JVM
-and Windows platform archives. The unpacked archive must contain both
-`vispython.dll` and `visjail.dll`. Start the JVM with
+Use Windows 11 or Windows Server 2022 on x64, a supported JDK, and a matching
+experimental source build of the JVM API and native libraries. Its runtime
+directory must contain both `vispython.dll` and `visjail.dll`. Start the JVM with
 `--enable-native-access=ALL-UNNAMED`, as in the [quickstart](getting-started.md).
 `WindowsJail.unsupportedReason()` reports a missing platform or archive; creating
 the context checks the native security prerequisites and fails closed.

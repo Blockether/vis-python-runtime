@@ -53,6 +53,47 @@
     (out answer)))
 
 (harness/defbuilt-test
+  direct-host-gather-classification-test
+  ;; Council report 896: probing cr_code on a deferred call ran it before gather
+  ;; could settle every slot or collect exceptions. Classification must be inert.
+  (doseq
+    [expression
+     ["gather(succeed(1), fail(), succeed(2)%s)"
+      "gather(asyncio.create_task(succeed(1)), asyncio.create_task(fail()), asyncio.create_task(succeed(2))%s)"
+      "gather(gather(succeed(1)), fail(), gather(succeed(2))%s)"]
+
+     exceptions?
+     [false true]]
+
+    (let [seen
+          (atom [])
+
+          session
+          (harness/tool-session {"succeed" (fn [[value]]
+                                             (swap! seen conj value)
+                                             value)
+                                 "fail" (fn [_]
+                                          (swap! seen conj :failed)
+                                          (throw (ex-info "expected fixture failure" {})))})
+
+          call
+          (format expression (if exceptions? ", return_exceptions=True" ""))
+
+          answer
+          (block session
+                 (str "import asyncio\n" "try:\n"
+                      "    answers = await " call
+                      "\n" "    print(answers[0], isinstance(answers[1], Exception), answers[2])\n"
+                      "except Exception as error:\n" "    print(str(error))"))]
+
+      (is (nil? (:error answer)) (pr-str answer))
+      (is (= {1 1 :failed 1 2 1} (frequencies @seen)) expression)
+      (if exceptions?
+        (is (= (if (str/includes? expression "gather(gather") "[1] True [2]" "1 True 2")
+               (out answer)))
+        (is (str/includes? (out answer) "[1] expected fixture failure"))))))
+
+(harness/defbuilt-test
   third-party-asyncio-context-test
   ;; Regression: a real library coroutine needs an actual asyncio Task and loop,
   ;; not merely Vis' await/gather trampoline. No network or optional wheel needed.

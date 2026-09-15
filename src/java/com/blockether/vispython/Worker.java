@@ -38,9 +38,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * own requests and no id can collide. The parent asks {@code install-runtime},
  * {@code install-sync-tool}, {@code install-tool}, {@code install-module},
  * {@code exec}, {@code run}, {@code run-block}, {@code eval}, {@code confine},
- * {@code network}, {@code trust}, {@code stdin}, {@code interrupt} and
- * {@code close}, each with a {@code session} and, where one is needed, a
- * {@code code} text; a reply carries {@code value} or {@code error}. The worker
+ * {@code network}, {@code trust}, {@code stdin}, {@code interrupt},
+ * {@code stack-diagnostics}, {@code dump-stacks} and {@code close}. Ordinary
+ * operations take a {@code session} and optional {@code code}; stack diagnostics
+ * use {@code code} only for the pre-confinement private destination path.
+ * A reply carries {@code value} or {@code error}. The worker
  * asks back with {@code host} - {@code session}, {@code tool}, {@code payload}
  * - because the registry that knows what a name may call lives in the parent.
  * stdout is NOT the wire: Python that prints, or a native library writing to
@@ -104,7 +106,11 @@ public final class Worker {
         ask.put("payload", payload);
         return peer.request(ask);
       });
-      peer.pump();
+      try {
+        peer.pump();
+      } finally {
+        Interpreter.stackDiagnostics("");
+      }
     }
   }
 
@@ -148,6 +154,8 @@ public final class Worker {
         yield null;
       }
       case "interrupt" -> Interpreter.interrupt();
+      case "stack-diagnostics" -> Interpreter.stackDiagnostics(code);
+      case "dump-stacks" -> Interpreter.dumpStacks();
       case "close" -> {
         Interpreter.trust(session, false);
         yield Interpreter.closeSession(session);

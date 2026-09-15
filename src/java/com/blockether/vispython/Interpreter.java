@@ -92,6 +92,8 @@ public final class Interpreter {
       Map.entry("vispython_threads", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_logging", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_drain_log", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_stack_diagnostics", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_dump_stacks", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_take_result", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_interrupt", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)));
 
@@ -407,6 +409,34 @@ public final class Interpreter {
    */
   public static boolean interrupt() {
     return "1".equals(invoke("vispython_interrupt").trim());
+  }
+
+  /**
+   * Open a private stack artifact before confinement, or close it with an empty path.
+   * The path must be absolute and not already exist. No guest access is granted.
+   * Frames contain file/function names, definition lines and bytecode offsets, not
+   * current line numbers, source text or locals. Availability is build-specific.
+   * @param path host-selected path, or empty to close the retained descriptor
+   * @return status and optional reason; setup failures are nonfatal
+   */
+  public static Map<String, Object> stackDiagnostics(String path) {
+    return stackStatus(invoke("vispython_stack_diagnostics", path));
+  }
+
+  /**
+   * Replace the configured private stack artifact without acquiring the GIL.
+   * Traversal is capped at 64 threads, 64 frames each and 100 code points per name.
+   * The host must bound the control exchange: filesystem IO can still stall.
+   * @return status written, unavailable, busy or failed, with optional reason
+   */
+  public static Map<String, Object> dumpStacks() {
+    return stackStatus(invoke("vispython_dump_stacks"));
+  }
+
+  private static Map<String, Object> stackStatus(String reply) {
+    String[] parts = reply.trim().split(" ", 2);
+    return parts.length == 1 ? Map.of("status", parts[0])
+        : Map.of("status", parts[0], "reason", parts[1]);
   }
 
   /**

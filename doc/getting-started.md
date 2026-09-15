@@ -15,15 +15,14 @@ and CPU. Build and release checks use JDK 25. Download these assets from the sam
 - The documentation ZIP — this guide, searchable Java and Clojure references,
   and a runnable Java example. Extract it and open `index.html`.
 
-Supported platform tags are `linux-x64`, `linux-arm64`, `darwin-x64`,
-`darwin-arm64`, and `windows-x64`. Linux requires glibc 2.35 or newer. The
-supported Windows baseline is Windows 11 or Windows Server 2022 on x64; release
-tests run on Server 2022. Windows ARM64 has no archive. WSL2 uses the matching
-Linux archive, not the Windows one.
+Released platform tags are `linux-x64`, `linux-arm64`, `darwin-x64`, and
+`darwin-arm64`. Linux requires glibc 2.35 or newer. WSL2 uses the matching Linux
+archive. Windows support is still in development; no Windows archive is published
+by this release.
 
-The Windows archive contains `vispython.dll`, `visjail.dll`, the native worker
-and its matching `python/` tree. Keep them together when moving or deploying the
-runtime. Use the matching JVM jar and platform archive.
+The Windows examples below are for experimental source builds on Windows 11 or
+Windows Server 2022 x64. Such builds need `vispython.dll`, `visjail.dll`, the native
+worker and the matching `python/` tree together. They are not a supported release.
 
 The examples below embed trusted Python. To isolate a separate Windows program,
 follow [Run isolated Windows programs](windows-jail.md), which explains its

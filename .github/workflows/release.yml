@@ -98,53 +98,54 @@ jobs:
           path: target/vis-python-runtime.jar
           if-no-files-found: error
 
-  windows:
-    name: package windows-x64
-    runs-on: windows-2022
-    timeout-minutes: 40
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v6
-      - name: Verify tag matches VIS_PYTHON_VERSION
-        run: |
-          if ("v$((Get-Content VIS_PYTHON_VERSION -Raw).Trim())" -ne $env:GITHUB_REF_NAME) {
-            throw 'Release tag does not match VIS_PYTHON_VERSION'
-          }
-      - name: Configure MSVC for x64
-        run: ./scripts/setup-msvc.ps1
-      - uses: ./.github/actions/setup-graalvm-25
-      - uses: DeLaGuardo/setup-clojure@13.6.1
-        with:
-          cli: latest
-      - name: Build the Windows runtime libraries
-        run: ./native/vispython/build.ps1
-      - name: Compile the Java API
-        run: clojure -T:build javac
-      - name: Build the Windows native worker
-        run: clojure -T:build worker-image
-      - name: Build the Windows jail probes
-        run: clojure -T:build windows-jail-probe
-      - name: Test the Windows runtime
-        run: ./scripts/test-windows.ps1
-      - name: Package the Windows runtime
-        run: clojure -T:build platform-archive :platform windows-x64
-      - name: Verify the extracted Windows archive
-        run: ./scripts/verify-platform-archive.ps1
-      - name: Test the extracted Windows runtime
-        run: |
-          $env:VIS_PYTHON_NATIVE_PATH = (Resolve-Path 'target/archive-check-windows-x64').Path
-          ./scripts/test-windows.ps1
-      - uses: actions/upload-artifact@v6
-        with:
-          name: windows-x64
-          path: target/vis-python-runtime-windows-x64-*.tar.gz
-          if-no-files-found: error
+  # Windows support is not released yet; do not build or publish Windows assets.
+#   windows:
+#     name: package windows-x64
+#     runs-on: windows-2022
+#     timeout-minutes: 40
+#     defaults:
+#       run:
+#         shell: pwsh
+#     steps:
+#       - uses: actions/checkout@v6
+#       - name: Verify tag matches VIS_PYTHON_VERSION
+#         run: |
+#           if ("v$((Get-Content VIS_PYTHON_VERSION -Raw).Trim())" -ne $env:GITHUB_REF_NAME) {
+#             throw 'Release tag does not match VIS_PYTHON_VERSION'
+#           }
+#       - name: Configure MSVC for x64
+#         run: ./scripts/setup-msvc.ps1
+#       - uses: ./.github/actions/setup-graalvm-25
+#       - uses: DeLaGuardo/setup-clojure@13.6.1
+#         with:
+#           cli: latest
+#       - name: Build the Windows runtime libraries
+#         run: ./native/vispython/build.ps1
+#       - name: Compile the Java API
+#         run: clojure -T:build javac
+#       - name: Build the Windows native worker
+#         run: clojure -T:build worker-image
+#       - name: Build the Windows jail probes
+#         run: clojure -T:build windows-jail-probe
+#       - name: Test the Windows runtime
+#         run: ./scripts/test-windows.ps1
+#       - name: Package the Windows runtime
+#         run: clojure -T:build platform-archive :platform windows-x64
+#       - name: Verify the extracted Windows archive
+#         run: ./scripts/verify-platform-archive.ps1
+#       - name: Test the extracted Windows runtime
+#         run: |
+#           $env:VIS_PYTHON_NATIVE_PATH = (Resolve-Path 'target/archive-check-windows-x64').Path
+#           ./scripts/test-windows.ps1
+#       - uses: actions/upload-artifact@v6
+#         with:
+#           name: windows-x64
+#           path: target/vis-python-runtime-windows-x64-*.tar.gz
+#           if-no-files-found: error
 
   release:
     name: publish GitHub Release assets
-    needs: [native, windows, jar]
+    needs: [native, jar]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v7

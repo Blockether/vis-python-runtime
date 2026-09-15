@@ -1,5 +1,5 @@
 (ns com.blockether.vis-python-runtime.windows-release-test
-  "Release gates complement actual Windows execution in CI; no host OS is mocked."
+  "Windows build recipes remain available, but CI and releases exclude the platform."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]])
@@ -31,9 +31,19 @@
   (doseq [path
           [".github/workflows/ci.yml" ".github/workflows/release.yml"]
 
-          :let [workflow
-                (slurp path)]]
+          :let [source
+                (slurp path)
 
+                active
+                (str/join "\n"
+                          (remove #(str/starts-with? (str/trim %) "#") (str/split-lines source)))
+
+                workflow
+                (str/replace source #"(?m)^# " "")]]
+
+    (is (not (re-find #"(?m)^  windows:" active))
+        (str path ": Windows remains disabled until platform support is complete"))
+    (is (not (str/includes? active "runs-on: windows-2022")) path)
     (is (str/includes? workflow "runs-on: windows-2022") path)
     ;; CI 104381155286 reported the old action's deprecated Node 20 runtime.
     (is (not (str/includes? workflow "ilammy/msvc-dev-cmd"))
@@ -73,8 +83,8 @@
     (is (str/includes? workflow "clojure -M:docs:test -d doc -n runtime-docs-test") path)
     (is (str/includes? workflow "target/vis-python-runtime-api-docs-*.zip") path)
     (is (str/includes? workflow "target/vis-python-runtime-*-javadoc.jar") path))
-  (is (str/includes? (slurp ".github/workflows/release.yml") "needs: [native, windows, jar]")
-      "publication must wait for Windows execution and API documentation"))
+  (is (str/includes? (slurp ".github/workflows/release.yml") "needs: [native, jar]")
+      "publication waits for supported platforms and API documentation, not Windows"))
 
 (deftest windows-build-inputs-are-pinned-test
   (doseq [[path name] [[".cpython-version" "CPYTHON_SHA256_WINDOWS_X64"]

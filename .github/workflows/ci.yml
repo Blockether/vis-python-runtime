@@ -81,39 +81,40 @@ jobs:
           ${{ matrix.prefix }} clojure -T:build platform-archive :platform '${{ matrix.platform }}'
           ${{ matrix.prefix }} scripts/verify-platform-archive.sh '${{ matrix.platform }}'
 
-  windows:
-    name: build + test windows-x64
-    runs-on: windows-2022
-    timeout-minutes: 40
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v6
-      - name: Configure MSVC for x64
-        run: ./scripts/setup-msvc.ps1
-      - uses: ./.github/actions/setup-graalvm-25
-      - uses: DeLaGuardo/setup-clojure@13.6.1
-        with:
-          cli: latest
-      - name: Build the Windows runtime libraries
-        run: ./native/vispython/build.ps1
-      - name: Compile the Java API
-        run: clojure -T:build javac
-      - name: Build the Windows native worker
-        run: clojure -T:build worker-image
-      - name: Build the Windows jail probes
-        run: clojure -T:build windows-jail-probe
-      - name: Test the Windows runtime
-        run: ./scripts/test-windows.ps1
-      - name: Package the Windows runtime
-        run: clojure -T:build platform-archive :platform windows-x64
-      - name: Verify the extracted Windows archive
-        run: ./scripts/verify-platform-archive.ps1
-      - name: Test the extracted Windows runtime
-        run: |
-          $env:VIS_PYTHON_NATIVE_PATH = (Resolve-Path 'target/archive-check-windows-x64').Path
-          ./scripts/test-windows.ps1
+  # Windows support is not released yet; retain this build recipe for re-enabling it.
+#   windows:
+#     name: build + test windows-x64
+#     runs-on: windows-2022
+#     timeout-minutes: 40
+#     defaults:
+#       run:
+#         shell: pwsh
+#     steps:
+#       - uses: actions/checkout@v6
+#       - name: Configure MSVC for x64
+#         run: ./scripts/setup-msvc.ps1
+#       - uses: ./.github/actions/setup-graalvm-25
+#       - uses: DeLaGuardo/setup-clojure@13.6.1
+#         with:
+#           cli: latest
+#       - name: Build the Windows runtime libraries
+#         run: ./native/vispython/build.ps1
+#       - name: Compile the Java API
+#         run: clojure -T:build javac
+#       - name: Build the Windows native worker
+#         run: clojure -T:build worker-image
+#       - name: Build the Windows jail probes
+#         run: clojure -T:build windows-jail-probe
+#       - name: Test the Windows runtime
+#         run: ./scripts/test-windows.ps1
+#       - name: Package the Windows runtime
+#         run: clojure -T:build platform-archive :platform windows-x64
+#       - name: Verify the extracted Windows archive
+#         run: ./scripts/verify-platform-archive.ps1
+#       - name: Test the extracted Windows runtime
+#         run: |
+#           $env:VIS_PYTHON_NATIVE_PATH = (Resolve-Path 'target/archive-check-windows-x64').Path
+#           ./scripts/test-windows.ps1
 
   docs:
     name: generate and check API documentation
