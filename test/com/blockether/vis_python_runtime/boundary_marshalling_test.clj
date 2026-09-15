@@ -37,6 +37,67 @@
     (is (nil? (:error answer)) code)
     (str/trim (str (:stdout answer)))))
 
+;; Regression Blockether/vis#240: generated records share attribute and field-name access.
+(harness/defbuilt-test
+  generated-record-subscription-test
+  (let [session (harness/tool-session
+                  {"ledger.status" (fn [[state]]
+                                     {"__vis_object__" "BuildStatus"
+                                      "__vis_attrs__" {"state" state
+                                                       "items" [{"__vis_object__" "Job"
+                                                                 "__vis_attrs__" {"number" 42}}]
+                                                       "keys" "keys field"
+                                                       "values" "values field"
+                                                       "get" nil}})
+                   "ledger.empty" (fn [_]
+                                    {"__vis_object__" "Empty" "__vis_attrs__" {}})})]
+    (testing "top-level and nested records keep field values and mapping-name collisions"
+      (is (= "records readable"
+             (ran session
+                  (str "import dataclasses\n"
+                       "item = await ledger.status('ready')\n"
+                       "assert item['state'] == item.state == 'ready'\n"
+                       "assert item['items'] is item.items\n"
+                       "assert item['items'][0]['number'] == item.items[0].number == 42\n"
+                       "assert item['keys'] == item.keys == 'keys field'\n"
+                       "assert item['values'] == item.values == 'values field'\n"
+                       "assert item['get'] is item.get is None\n"
+                       "again = await ledger.status('again')\n"
+                       "assert again['state'] == 'again' and item['state'] == 'ready'\n"
+                       "assert dataclasses.is_dataclass(item)\n"
+                       "assert not hasattr(item, '__dict__')\n" "print('records readable')")))))
+    (testing "unknown names report available fields, never expose class attributes"
+      (is
+        (=
+          "missing fields explained"
+          (ran
+            session
+            (str
+              "for key in ('missing', '__class__', '__getitem__'):\n"
+              "    try:\n        item[key]\n" "    except KeyError as exc:\n"
+              "        assert key in str(exc) and 'BuildStatus' in str(exc)\n"
+              "        assert all(name in str(exc) for name in ('state', 'items', 'keys', 'values', 'get'))\n"
+              "    else:\n        raise AssertionError('unknown field accepted')\n"
+              "empty = await ledger.empty()\n"
+              "try:\n    empty['missing']\n"
+              "except KeyError as exc:\n    assert '(none)' in str(exc)\n"
+              "else:\n    raise AssertionError('empty record accepted a field')\n"
+              "print('missing fields explained')")))))
+    (testing "non-string indices and both assignment forms remain unsupported"
+      (is (= "records frozen"
+             (ran session
+                  (str "for key in (0, -1, None, ['state'], slice(None)):\n"
+                       "    try:\n        item[key]\n"
+                       "    except TypeError as exc:\n        assert 'string' in str(exc)\n"
+                       "    else:\n        raise AssertionError('non-string field accepted')\n"
+                       "try:\n    item['state'] = 'changed'\n" "except TypeError:\n    pass\n"
+                       "else:\n    raise AssertionError('mutable subscription')\n"
+                       "try:\n    item.items[0].number = 99\n"
+                       "except dataclasses.FrozenInstanceError:\n    pass\n"
+                       "else:\n    raise AssertionError('mutable nested record')\n"
+                       "assert item['state'] == 'ready' and item['items'][0]['number'] == 42\n"
+                       "print('records frozen')")))))))
+
 (harness/defbuilt-test
   pyify-container-preservation-test
   (let [session (harness/block-session)]
