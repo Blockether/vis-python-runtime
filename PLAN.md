@@ -567,6 +567,20 @@ or running gateway was changed by that release.
      84 / 482, respectively, with no failures or errors. All eight uploaded source
      hashes match the reviewed checkout. Strict C and Java compilation, 5 release
      tests / 73 assertions and Javadoc/local links across 38 HTML pages also pass.
+     A subsequent CI run at `a76f6a3` passes the corrected top-level control but
+     fails the private-service stage in an interactive logon: the guest selects
+     `WinSta0` while its SID-private desktop cannot be reopened there (error 2).
+     Supplying the exact creator-station/private-desktop path is not a valid fix:
+     the rebuilt DLL causes `STATUS_DLL_INIT_FAILED` in the first SSH-session JVM
+     validation. That candidate has been reverted without changing any permissions.
+     The regression now reports its host snapshot and, on an own-desktop failure,
+     a bounded snapshot of the guest's UI handles to distinguish handle inheritance
+     from station selection. All positive controls and denials remain required.
+     Strict C and Java compilation pass. The diagnostic revision passes all four
+     331-check JVM/native-image runs, Windows API (4 / 34), native boundary (11 / 68),
+     and source/extracted shared suites (84 / 485 and 84 / 482), with zero failures
+     or errors. All eight remote source hashes match; 5 local release-contract tests
+     / 73 assertions also pass. Interactive CI investigation remains open.
    - Unknowns: cross-platform CI and the next release's rebuilt assets remain to pass.
 2. Resolve generic Windows policy and consumer integration.
    - Rationale: WindowsJail is a copy-in private-workspace API, not the generic
@@ -593,8 +607,11 @@ or running gateway was changed by that release.
      the presence of a Windows archive.
 
 Plan state: the noninteractive Windows launch fix and corrected desktop-access tests
-pass source and extracted JVM/native-image execution. Cross-platform CI and the next
-runtime release remain pending. Publication is coordinated with the separate #229
-consumer fix and its final native validation. Generic Windows policy parity,
-consumer integration and the Vis beta remain open. Existing unrelated runtime
-diagnostics and Vis edits are excluded.
+pass source and extracted JVM/native-image execution. Subsequent CI exposed an
+interactive-logon station-selection failure. A qualified-name candidate was falsified
+on Windows and reverted; bounded UI-handle diagnostics pass the source and extracted
+Windows gates. The interactive CI failure remains unresolved. No new release tag
+has been published. Publication is coordinated with the separate #229 consumer fix
+and its final native validation. Generic Windows
+policy parity, consumer integration and the Vis beta remain open. Existing unrelated
+runtime diagnostics and Vis edits are excluded.

@@ -1528,6 +1528,51 @@ static void desktop_denied(const wchar_t *name, DWORD rights, const char *messag
     if (opened) check(CloseDesktop(opened), "close unexpected desktop access");
 }
 
+/* Failure diagnostics inspect only this process's bounded handle table. */
+static void desktop_handles(void) {
+    typedef NTSTATUS (__stdcall *QueryProcess)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+    typedef struct {
+        HANDLE handle;
+        ULONG_PTR handles, pointers;
+        ACCESS_MASK access;
+        ULONG type, attributes, reserved;
+    } Entry;
+    typedef struct { ULONG_PTR count, reserved; Entry entries[1]; } Snapshot;
+    union { FARPROC address; QueryProcess query; } api;
+    const ULONG capacity = 1024 * 1024;
+    DWORD saved = GetLastError(), shown = 0;
+    ULONG returned = 0;
+    Snapshot *snapshot = calloc(1, capacity);
+    NTSTATUS status;
+    api.address = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess");
+    fprintf(stderr, "UI_SELECTED station=%p desktop=%p\n", GetProcessWindowStation(),
+            GetThreadDesktop(GetCurrentThreadId()));
+    if (!snapshot || !api.address) goto done;
+    /* ProcessHandleInformation is a snapshot of our own handles, never other processes. */
+    status = api.query(GetCurrentProcess(), (PROCESSINFOCLASS)51, snapshot, capacity, &returned);
+    fprintf(stderr, "UI_SNAPSHOT status=0x%08lx bytes=%lu\n", (ULONG)status, returned);
+    if (status < 0 || snapshot->count > 1 + (capacity - sizeof(*snapshot)) / sizeof(Entry)) goto done;
+    for (ULONG_PTR i = 0; i < snapshot->count; i++) {
+        wchar_t type[64], name[256];
+        USEROBJECTFLAGS flags = {0};
+        DWORD needed = 0, inherited = 0;
+        HANDLE handle = snapshot->entries[i].handle;
+        if (!GetUserObjectInformationW(handle, UOI_TYPE, type, sizeof(type), &needed) ||
+            (wcscmp(type, L"WindowStation") && wcscmp(type, L"Desktop"))) continue;
+        if (++shown > 16) { fprintf(stderr, "UI_HANDLES truncated\n"); break; }
+        name[0] = L'\0';
+        GetUserObjectInformationW(handle, UOI_NAME, name, sizeof(name), &needed);
+        GetUserObjectInformationW(handle, UOI_FLAGS, &flags, sizeof(flags), &needed);
+        GetHandleInformation(handle, &inherited);
+        fprintf(stderr, "UI_HANDLE handle=%p type=%ls name=%ls access=0x%lx attributes=0x%lx inherit=%lu user_inherit=%d\n",
+                handle, type, name, snapshot->entries[i].access, snapshot->entries[i].attributes,
+                inherited, flags.fInherit);
+    }
+ done:
+    free(snapshot);
+    SetLastError(saved);
+}
+
 static void desktop_isolation(int argc, wchar_t **argv) {
     const DWORD forbidden_desktop[] = {WRITE_DAC, WRITE_OWNER, DELETE, DESKTOP_HOOKCONTROL,
         DESKTOP_JOURNALRECORD, DESKTOP_JOURNALPLAYBACK, DESKTOP_SWITCHDESKTOP};
@@ -1559,6 +1604,7 @@ static void desktop_isolation(int argc, wchar_t **argv) {
     if (derived) FreeSid(derived);
     opened = OpenDesktopW(name, 0, FALSE,
         READ_CONTROL | DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | DESKTOP_CREATEWINDOW);
+    if (!opened) desktop_handles();
     check(opened != NULL, "guest can reopen its own desktop with only required rights");
     if (opened) check(CloseDesktop(opened), "close guest desktop access control");
     for (size_t i = 0; i < sizeof(forbidden_desktop) / sizeof(forbidden_desktop[0]); i++)
@@ -1787,6 +1833,7 @@ int wmain(int argc, wchar_t **argv) {
     else if (wcscmp(argv[1], L"standard-host") == 0) host_launch(argc, argv, 1);
     else if (wcscmp(argv[1], L"desktop-host") == 0) desktop_host(argc, argv);
     else if (wcscmp(argv[1], L"desktop-state") == 0 && argc == 2) desktop_state();
+    else if (wcscmp(argv[1], L"desktop-handles") == 0 && argc == 2) desktop_handles();
     else if (wcscmp(argv[1], L"desktop-isolation") == 0) desktop_isolation(argc, argv);
     else if (wcscmp(argv[1], L"desktop-fixture") == 0 && argc == 2) desktop_fixture();
     else if (wcscmp(argv[1], L"desktop-shared") == 0 && argc == 3) desktop_access(argv[2], 1);

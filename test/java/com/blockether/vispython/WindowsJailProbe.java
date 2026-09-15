@@ -757,8 +757,8 @@ public final class WindowsJailProbe {
       first.stage(invalid, "invalid.exe");
       Result firstIdentity = run(first, "desktop-isolation");
       Result secondIdentity = run(second, "desktop-isolation");
-      passed(firstIdentity, "first private desktop identity and rights");
-      passed(secondIdentity, "second private desktop identity and rights");
+      passed(firstIdentity, "first private desktop identity and rights; host=" + before.out());
+      passed(secondIdentity, "second private desktop identity and rights; host=" + before.out());
       firstDesktop = field(firstIdentity.out(), "DESKTOP");
       secondDesktop = field(secondIdentity.out(), "DESKTOP");
       check(!firstDesktop.equals(secondDesktop), "contexts use distinct private desktops");
