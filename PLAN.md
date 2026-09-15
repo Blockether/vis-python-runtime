@@ -404,3 +404,12 @@ Native teardown now emits temporary phase labels for its table/job/stream/consol
 closer/profile steps, without changing their order or deadlines. Remove those
 labels after locating and correcting the native wait; do not publish them as a
 normal runtime logging feature.
+
+Run 34923942703 passes the complete JVM launcher (273 checks), then hangs in the
+second native-image close child. Native labels locate the wait in the direct
+`ClosePseudoConsole` call, after the job and logical stream teardown. The active
+writer can retain the duplex stream past logical close, so temporary diagnostics
+now also record its reference count and actual read/write `CloseHandle` results.
+This distinguishes an output-handle ordering race from a console wait after both
+handles were already closed. Remove all temporary native prints before release;
+no teardown ordering or deadline has changed yet.

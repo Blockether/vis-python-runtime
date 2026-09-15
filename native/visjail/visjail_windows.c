@@ -547,13 +547,28 @@ static Stream *stream_get(int id) {
 }
 
 static void stream_dispose(Stream *s) {
+    int duplex = s->read && s->write && s->read != s->write;
+    BOOL closed;
+    if (duplex) {
+        fprintf(stderr, "Windows jail duplex %d: dispose pending=%d\n", s->id, s->pending); fflush(stderr);
+    }
     if (s->pending) {
         DWORD ignored;
         CancelIoEx(s->read, &s->peek);
         GetOverlappedResult(s->read, &s->peek, &ignored, TRUE);
     }
-    if (s->read) CloseHandle(s->read);
-    if (s->write && s->write != s->read) CloseHandle(s->write);
+    if (s->read) {
+        closed = CloseHandle(s->read);
+        if (duplex) {
+            fprintf(stderr, "Windows jail duplex %d: read closed=%d\n", s->id, (int)closed); fflush(stderr);
+        }
+    }
+    if (s->write && s->write != s->read) {
+        closed = CloseHandle(s->write);
+        if (duplex) {
+            fprintf(stderr, "Windows jail duplex %d: write closed=%d\n", s->id, (int)closed); fflush(stderr);
+        }
+    }
     CloseHandle(s->peek.hEvent); CloseHandle(s->cancel); free(s);
 }
 
@@ -583,6 +598,9 @@ static Stream *stream_new(int context, HANDLE read, HANDLE write) {
 /* Caller owns the exclusive table lock. Outstanding IO references retain handles. */
 static void stream_close_locked(Stream **slot) {
     Stream *s = *slot;
+    if (s->read && s->write && s->read != s->write) {
+        fprintf(stderr, "Windows jail duplex %d: cancel refs=%d\n", s->id, s->refs); fflush(stderr);
+    }
     *slot = s->next; s->closed = 1; SetEvent(s->cancel);
     if (s->read) CancelIoEx(s->read, NULL);
     if (s->write && s->write != s->read) CancelIoEx(s->write, NULL);
