@@ -24,10 +24,11 @@
 /* The host serializes lifecycle operations. Blocking stream operations retain a
  * reference independently, so close can cancel IO without recycling a HANDLE. */
 static SRWLOCK lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE streams_closed = CONDITION_VARIABLE_INIT;
 static int next_id = 1;
 typedef struct Pin { HANDLE handle; struct Pin *next; } Pin;
 typedef struct Context {
-    int id, sealed, poisoned;
+    int id, sealed, poisoned, live_streams;
     wchar_t *path;
     wchar_t profile[80];
     PSID sid, registry_read;
@@ -36,7 +37,8 @@ typedef struct Context {
     struct Context *next;
 } Context;
 typedef struct Stream {
-    int id, context, refs, closed;
+    int id, refs, closed;
+    Context *context;
     HANDLE read, write, cancel;
     SRWLOCK reader;
     OVERLAPPED peek;
@@ -546,40 +548,27 @@ static Stream *stream_get(int id) {
     ReleaseSRWLockExclusive(&lock); return s;
 }
 
+/* Caller owns the table lock; publish disposal only after the handles close. */
 static void stream_dispose(Stream *s) {
-    int duplex = s->read && s->write && s->read != s->write;
-    BOOL closed;
-    if (duplex) {
-        fprintf(stderr, "Windows jail duplex %d: dispose pending=%d\n", s->id, s->pending); fflush(stderr);
-    }
     if (s->pending) {
         DWORD ignored;
         CancelIoEx(s->read, &s->peek);
         GetOverlappedResult(s->read, &s->peek, &ignored, TRUE);
     }
-    if (s->read) {
-        closed = CloseHandle(s->read);
-        if (duplex) {
-            fprintf(stderr, "Windows jail duplex %d: read closed=%d\n", s->id, (int)closed); fflush(stderr);
-        }
-    }
-    if (s->write && s->write != s->read) {
-        closed = CloseHandle(s->write);
-        if (duplex) {
-            fprintf(stderr, "Windows jail duplex %d: write closed=%d\n", s->id, (int)closed); fflush(stderr);
-        }
-    }
-    CloseHandle(s->peek.hEvent); CloseHandle(s->cancel); free(s);
+    if (s->read) CloseHandle(s->read);
+    if (s->write && s->write != s->read) CloseHandle(s->write);
+    CloseHandle(s->peek.hEvent); CloseHandle(s->cancel);
+    if (--s->context->live_streams == 0) WakeAllConditionVariable(&streams_closed);
+    free(s);
 }
 
 static void stream_release(Stream *s) {
-    int dispose;
-    AcquireSRWLockExclusive(&lock); dispose = --s->refs == 0;
+    AcquireSRWLockExclusive(&lock);
+    if (--s->refs == 0) stream_dispose(s);
     ReleaseSRWLockExclusive(&lock);
-    if (dispose) stream_dispose(s);
 }
 
-static Stream *stream_new(int context, HANDLE read, HANDLE write) {
+static Stream *stream_new(Context *context, HANDLE read, HANDLE write) {
     Stream *s = calloc(1, sizeof(*s));
     if (!s) return NULL;
     s->cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -592,15 +581,13 @@ static Stream *stream_new(int context, HANDLE read, HANDLE write) {
         free(s); return NULL;
     }
     s->read = read; s->write = write; s->refs = 1; s->context = context;
+    context->live_streams++;
     s->next = streams; streams = s; return s;
 }
 
 /* Caller owns the exclusive table lock. Outstanding IO references retain handles. */
 static void stream_close_locked(Stream **slot) {
     Stream *s = *slot;
-    if (s->read && s->write && s->read != s->write) {
-        fprintf(stderr, "Windows jail duplex %d: cancel refs=%d\n", s->id, s->refs); fflush(stderr);
-    }
     *slot = s->next; s->closed = 1; SetEvent(s->cancel);
     if (s->read) CancelIoEx(s->read, NULL);
     if (s->write && s->write != s->read) CancelIoEx(s->write, NULL);
@@ -775,9 +762,7 @@ int visjail_kill(int id, int signal_number) {
 }
 
 static DWORD close_console(void *console) {
-    fprintf(stderr, "Windows jail async console close begin\n"); fflush(stderr);
     ClosePseudoConsole((HPCON)console);
-    fprintf(stderr, "Windows jail async console close end\n"); fflush(stderr);
     return 0;
 }
 
@@ -811,8 +796,9 @@ int visjail_wait(int id, int nohang, int *exit_code) {
             p->reaped = 1; p->code = code;
             CloseHandle(p->process); p->process = NULL;
             CloseHandle(p->job); p->job = NULL;
-            if (p->console) {
-                /* Closing ConPTY flushes while the independent reader drains. */
+            /* A closing context owns ConPTY teardown after its canceled IO drains. */
+            if (p->console && context_get(p->context)) {
+                /* Normal exit still flushes output to the independent reader. */
                 p->closer = CreateThread(NULL, 0, close_console, p->console, 0, NULL);
                 if (p->closer) p->console = NULL;
                 else result = -(int)GetLastError();
@@ -828,21 +814,20 @@ int visjail_windows_destroy(int id) {
     Process *p;
     Stream **sp;
     int result = -ERROR_INVALID_HANDLE;
-    fprintf(stderr, "Windows jail close %d: table\n", id); fflush(stderr);
     AcquireSRWLockExclusive(&lock);
     for (slot = &contexts; *slot && (*slot)->id != id; slot = &(*slot)->next) {}
     c = *slot;
     if (!c) { ReleaseSRWLockExclusive(&lock); return result; }
-    fprintf(stderr, "Windows jail close %d: job\n", id); fflush(stderr);
     if (c->job && !finish_job(c->job)) {
         result = -(int)GetLastError(); ReleaseSRWLockExclusive(&lock); return result;
     }
-    fprintf(stderr, "Windows jail close %d: streams\n", id); fflush(stderr);
     *slot = c->next;
     for (sp = &streams; *sp;) {
-        if ((*sp)->context == id) stream_close_locked(sp); else sp = &(*sp)->next;
+        if ((*sp)->context == c) stream_close_locked(sp); else sp = &(*sp)->next;
     }
-    fprintf(stderr, "Windows jail close %d: processes\n", id); fflush(stderr);
+    /* Logical close only cancels IO. ConPTY needs the physical output handle
+     * closed before teardown, including streams already removed by close(). */
+    while (c->live_streams) SleepConditionVariableSRW(&streams_closed, &lock, INFINITE, 0);
     for (;;) {
         HPCON console;
         HANDLE closer;
@@ -860,20 +845,15 @@ int visjail_windows_destroy(int id) {
         if (p->process) { CloseHandle(p->process); p->process = NULL; }
         if (p->job) { CloseHandle(p->job); p->job = NULL; }
         ReleaseSRWLockExclusive(&lock);
-        /* Never retain the table lock while canceled IO releases its handles. */
-        fprintf(stderr, "Windows jail close %d: console\n", id); fflush(stderr);
+        /* Console teardown never holds the global handle-table lock. */
         if (console) ClosePseudoConsole(console);
-        fprintf(stderr, "Windows jail close %d: closer\n", id); fflush(stderr);
         if (closer) { WaitForSingleObject(closer, INFINITE); CloseHandle(closer); }
         AcquireSRWLockExclusive(&lock);
     }
     ReleaseSRWLockExclusive(&lock);
-    fprintf(stderr, "Windows jail close %d: pins\n", id); fflush(stderr);
     unpin(c->pins); c->pins = NULL;
     if (c->job) { CloseHandle(c->job); c->job = NULL; }
-    fprintf(stderr, "Windows jail close %d: profile\n", id); fflush(stderr);
     result = delete_profile(c->profile, NULL, 0);
-    fprintf(stderr, "Windows jail close %d: profile returned %d\n", id, result); fflush(stderr);
     if (result) {
         /* Retain only cleanup state so close can retry without permitting launches. */
         c->poisoned = 1;
@@ -1117,12 +1097,12 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     operation = "Assign Windows process jobs";
     if (!AssignProcessToJobObject(c->job, info.hProcess) || !AssignProcessToJobObject(p->job, info.hProcess)) goto fail;
     operation = "Connect Windows process streams";
-    input = stream_new(c->id, pty ? host_out : NULL, host_in);
+    input = stream_new(c, pty ? host_out : NULL, host_in);
     if (!input) goto fail;
     host_in = NULL; if (pty) host_out = NULL;
     if (!pty) {
-        output = stream_new(c->id, host_out, NULL); if (!output) goto fail; host_out = NULL;
-        if (host_err) { errstream = stream_new(c->id, host_err, NULL); if (!errstream) goto fail; host_err = NULL; }
+        output = stream_new(c, host_out, NULL); if (!output) goto fail; host_out = NULL;
+        if (host_err) { errstream = stream_new(c, host_err, NULL); if (!errstream) goto fail; host_err = NULL; }
     }
     operation = "Start confined Windows process";
     if (ResumeThread(info.hThread) == (DWORD)-1) goto fail;

@@ -413,3 +413,14 @@ now also record its reference count and actual read/write `CloseHandle` results.
 This distinguishes an output-handle ordering race from a console wait after both
 handles were already closed. Remove all temporary native prints before release;
 no teardown ordering or deadline has changed yet.
+
+Run 34924594273 confirms the ordering race: the duplex stream has two references
+at logical close, and both successful native handle closes occur after entering
+`ClosePseudoConsole`, which remains blocked. Context teardown now counts live
+native streams and waits on a condition variable until canceled IO releases every
+handle, including independently closed streams, before closing the console. A
+reaper cannot start a new console closer while this context barrier is active.
+All temporary native prints are removed. The suite retains four active-close
+children and adds four kill/reap-before-close children per launcher to check an
+already-started asynchronous closer too. Native Windows verification remains
+pending; byte thresholds, watchdogs and confinement are unchanged.

@@ -415,7 +415,7 @@ public final class WindowsJailProbe {
     return result;
   }
 
-  private static void terminalBackpressure(Path parent, Path guest) throws Exception {
+  private static void terminalBackpressure(Path parent, Path guest, boolean reapFirst) throws Exception {
     System.out.println("START WindowsJail ConPTY preparation");
     WindowsJail jail = prepare(parent, guest);
     System.out.println("START WindowsJail ConPTY flood spawn");
@@ -471,6 +471,12 @@ public final class WindowsJailProbe {
       check(!read.isDone(), "ConPTY consumer stays alive without draining at close");
       check(process.isAlive(), "flood guest remains active before context close");
       check(!write.isDone(), "ConPTY stdin is active under backpressure at close");
+      if (reapFirst) {
+        stage("ConPTY reaper before context close", () -> {
+          process.destroyForcibly();
+          check(process.waitFor(5, TimeUnit.SECONDS), "ConPTY reaper finishes with the consumer still paused");
+        });
+      }
       stage("ConPTY context close", () -> background(jail::close).get(10, TimeUnit.SECONDS));
       stage("ConPTY process exit", () ->
           check(process.waitFor(5, TimeUnit.SECONDS), "ConPTY backpressure close kills process"));
@@ -783,9 +789,10 @@ public final class WindowsJailProbe {
       System.out.println("PASS WindowsJail ConPTY with redirected host handles");
       return;
     }
-    if (arguments.length == 3 && arguments[0].equals("--terminal-child")) {
-      terminalBackpressure(Path.of(arguments[2]), Path.of(arguments[1]));
-      System.out.println("PASS WindowsJail active ConPTY close");
+    if (arguments.length == 3 && (arguments[0].equals("--terminal-child") || arguments[0].equals("--reaped-terminal-child"))) {
+      boolean reapFirst = arguments[0].equals("--reaped-terminal-child");
+      terminalBackpressure(Path.of(arguments[2]), Path.of(arguments[1]), reapFirst);
+      System.out.println("PASS WindowsJail " + (reapFirst ? "reaped" : "active") + " ConPTY close");
       return;
     }
     if (arguments.length == 3 && arguments[0].equals("--inherited-child")) {
@@ -829,6 +836,8 @@ public final class WindowsJailProbe {
       for (int attempt = 0; attempt < 4; attempt++) {
         stage("active ConPTY close " + (attempt + 1), () -> passed(
             finish(new ProcessBuilder(self("--terminal-child", parent, guest)).start(), new byte[0]), "bounded active ConPTY close"));
+        stage("reaped ConPTY close " + (attempt + 1), () -> passed(
+            finish(new ProcessBuilder(self("--reaped-terminal-child", parent, guest)).start(), new byte[0]), "bounded reaped ConPTY close"));
       }
       stage("parent crash", () -> parentCrash(parent, guest));
       stage("inherited handles and standard user", () -> restrictedHosts(parent, guest));
