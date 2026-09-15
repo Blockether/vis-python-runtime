@@ -849,9 +849,22 @@ def __vis_typed_result__(__vis_d__):
             __k__: __vis_typed_value__(__v__)
             for __k__, __v__ in __vis_d__["__vis_attrs__"].items()
         }
+        __vis_fields__ = tuple(__vis_attrs__)
+
+        def __vis_getitem__(self, key):
+            if not isinstance(key, str):
+                raise TypeError(f"{type(self).__name__} field name must be a string")
+            if key not in __vis_fields__:
+                raise KeyError(
+                    f"{type(self).__name__} has no field {key!r}; "
+                    f"available fields: {', '.join(__vis_fields__) or '(none)'}"
+                )
+            return getattr(self, key)
+
         __vis_cls__ = __vis_dataclasses__.make_dataclass(
             __vis_d__["__vis_object__"],
             [(name, object) for name in __vis_attrs__],
+            namespace={"__getitem__": __vis_getitem__},
             frozen=True,
             slots=True,
         )
