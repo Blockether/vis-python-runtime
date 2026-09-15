@@ -584,15 +584,20 @@ or running gateway was changed by that release.
      one station handle with `WINSTA_READATTRIBUTES` and its SID-private desktop
      with the required rights, but selects a separate `WinSta0` handle. This is a
      station-selection failure, not a missing handle or an ACL-test mismatch.
-     The next candidate supplies only the private desktop name, preserving the
-     inherited station and all existing rights. The fully qualified station path
-     remains rejected. The desktop-only candidate passes strict C compilation and
-     all four source/extracted JVM/native-image probes (331 checks each), Windows
+     Supplying only the private desktop name passes strict C compilation and all
+     four SSH source/extracted JVM/native-image probes (331 checks each), Windows
      API (4 / 34), native boundary (11 / 68), and shared suites (84 / 485 and
      84 / 482), without failures or errors. All eight source hashes match the VM.
-     Interactive CI still must verify this candidate. A separate standard-token
-     fixture cannot create a new window station (`ERROR_ACCESS_DENIED`), so a
-     station-creating helper is not an established no-admin alternative.
+     However, CI `34967991111` at `877f9cd` rejects that candidate: the interactive
+     private-service guest exits with `STATUS_DLL_INIT_FAILED` before any output.
+     Desktop-only and fully qualified names are both falsified; inherited desktop
+     selection is restored without changing any permissions or assertions. The
+     rebuilt restored DLL passes both JVM/native-image probes (331 checks each)
+     and 15 Windows API/native tests with 102 assertions and no failures or errors.
+     All eight restored source hashes match the VM.
+     A separate standard-token fixture cannot create a new window station
+     (`ERROR_ACCESS_DENIED`), so a station-creating helper is not an established
+     no-admin alternative. The interactive station-selection bug remains open.
    - Unknowns: cross-platform CI and the next release's rebuilt assets remain to pass.
 2. Resolve generic Windows policy and consumer integration.
    - Rationale: WindowsJail is a copy-in private-workspace API, not the generic
@@ -621,9 +626,9 @@ or running gateway was changed by that release.
 Plan state: the noninteractive Windows launch fix and corrected desktop-access tests
 pass source and extracted JVM/native-image execution. Interactive CI confirms that
 a guest can select `WinSta0` despite correctly inheriting its private station and
-desktop handles. A qualified-name candidate was falsified and reverted. The
-desktop-only candidate passes the source and extracted Windows gates without
-changing any permissions or assertions; interactive CI remains required.
+desktop handles. Both fully qualified and desktop-only name candidates were
+falsified and reverted. The interactive station-selection failure remains open;
+passing SSH tests is not sufficient to release.
 No new release tag has been published. Publication is coordinated with the separate
 #229 consumer fix and its final native validation. Generic Windows policy parity,
 consumer integration and the Vis beta remain open. Existing unrelated runtime

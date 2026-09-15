@@ -1207,8 +1207,9 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     }
     operation = "Configure Windows process security";
     startup.StartupInfo.cb = sizeof(startup);
-    /* Name the private desktop without reopening the host station by name. */
-    startup.StartupInfo.lpDesktop = c->profile;
+    /* NULL copies an explicit parent desktop name. Preserve the inherited desktop;
+     * named lookups can fail before guest initialization on private service stations. */
+    startup.StartupInfo.lpDesktop = L"";
     /* NULL stdio lets ConPTY attach instead of duplicating redirected host pipes. */
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     InitializeProcThreadAttributeList(NULL, attribute_count, 0, &attribute_size);
