@@ -1398,13 +1398,12 @@ int wmain(int argc, wchar_t **argv) {
     else if (wcscmp(argv[1], L"pty-flood") == 0) {
         char block[8192];
         DWORD count;
-        int index;
         memset(block, 'x', sizeof(block));
-        for (index = 0; index < 128; index++) {
+        /* Keep producing until killed; finite console writes need not yield equal VT output. */
+        for (;;) {
             if (!WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), block, sizeof(block), &count, NULL)) return 1;
             if (count != sizeof(block)) return 1;
         }
-        Sleep(INFINITE);
     }
     else if (wcscmp(argv[1], L"streams") == 0) { stream_check(); return failures ? 1 : 0; }
     else if (wcscmp(argv[1], L"args") == 0) {

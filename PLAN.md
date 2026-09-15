@@ -368,6 +368,20 @@ exit/writer/cleanup phases and prints thread stacks on an inner failure. Cleanup
 preserves the primary exception. The 20-second success deadline is unchanged;
 no confinement or production teardown behavior has changed for this diagnosis.
 
-The remaining native-image stages, subsequent runtime/documentation-example
-suites and extracted-archive verification remain pending. No Windows release
-completion is claimed yet.
+Run 34910492970 initially passes all six jobs. Windows completes both JVM and
+native-image launchers (267 checks each), stock Python, the native worker,
+Clojure suites and the runnable documentation example, then repeats those checks
+against the extracted archive. An identical Windows-job rerun fails in extracted
+native-image **output readiness**, before context close. The consumer is waiting
+for output, the PTY pump is polling, and the writer is in its native write;
+cleanup succeeds. This is not evidence of a native teardown deadlock.
+
+The backpressure fixture now keeps producing until killed instead of assuming a
+finite console write produces the same number of terminal-stream bytes. It also
+keeps the paused reader thread alive: `PipedInputStream` otherwise treats the
+terminated reader as a broken pipe and can release the writer before context
+close. Readiness still requires 128KiB, input still writes 16MiB, and every child
+retains its 20-second watchdog. Counted-read diagnostics and four independent
+close attempts per launcher check this previously intermittent scenario. No
+production policy or teardown path changed. Repeat verification and publication
+remain pending; no Windows jail release completion is claimed yet.

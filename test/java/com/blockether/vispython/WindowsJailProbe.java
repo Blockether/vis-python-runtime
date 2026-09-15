@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Test-only main: run on the JVM and as a native-image FFM launcher, never ship in the jar. */
 public final class WindowsJailProbe {
@@ -420,20 +421,39 @@ public final class WindowsJailProbe {
     System.out.println("START WindowsJail ConPTY flood spawn");
     Process process = jail.spawn(List.of(jail.applicationDirectory().resolve("guest.exe").toString(), "pty-flood"),
         Map.of(), null, true, true, 31, 97);
-    // Consume more than the Java 64KiB pipe, then deliberately stop draining it.
+    // Keep the consumer alive: PipedInputStream treats a dead reader as a broken pipe.
+    CompletableFuture<Void> outputReady = new CompletableFuture<>();
+    CompletableFuture<Void> releaseReader = new CompletableFuture<>();
+    AtomicInteger outputBytes = new AtomicInteger();
     CompletableFuture<Void> read = background(() -> {
-      check(process.getInputStream().readNBytes(131072).length == 131072, "ConPTY output exceeds 64KiB");
+      try {
+        byte[] block = new byte[8192];
+        while (outputBytes.get() < 131072) {
+          int count = process.getInputStream().read(block, 0, Math.min(block.length, 131072 - outputBytes.get()));
+          if (count < 0) throw new IOException("ConPTY output ended before 128KiB");
+          outputBytes.addAndGet(count);
+        }
+        outputReady.complete(null);
+        releaseReader.get(); // Stay alive without draining until the context-close test finishes.
+      } catch (Exception | AssertionError failure) {
+        outputReady.completeExceptionally(failure);
+        throw failure;
+      }
     });
+    CompletableFuture<Void> writerStarted = new CompletableFuture<>();
     CompletableFuture<Void> write = background(() -> {
       try {
         byte[] block = new byte[1048576];
+        writerStarted.complete(null);
         for (int count = 0; count < 16; count++) process.getOutputStream().write(block);
       }
       catch (IOException expectedOnClose) { /* Closing a blocked writer is expected. */ }
     });
     Throwable failure = null;
     try {
-      stage("ConPTY output readiness", () -> read.get(10, TimeUnit.SECONDS));
+      stage("ConPTY output readiness", () -> outputReady.get(10, TimeUnit.SECONDS));
+      stage("ConPTY writer startup", () -> writerStarted.get(5, TimeUnit.SECONDS));
+      check(!read.isDone(), "ConPTY consumer stays alive without draining at close");
       check(process.isAlive(), "flood guest remains active before context close");
       check(!write.isDone(), "ConPTY stdin is active under backpressure at close");
       stage("ConPTY context close", () -> background(jail::close).get(10, TimeUnit.SECONDS));
@@ -442,6 +462,8 @@ public final class WindowsJailProbe {
       stage("ConPTY blocked writer release", () -> write.get(5, TimeUnit.SECONDS));
     } catch (Exception | AssertionError caught) {
       failure = caught;
+      System.err.println("ConPTY output bytes=" + outputBytes.get()
+          + " readerDone=" + read.isDone() + " writerDone=" + write.isDone());
       caught.printStackTrace(System.err);
       Thread.getAllStackTraces().forEach((thread, stack) -> {
         System.err.println("ConPTY thread " + thread.getName() + " " + thread.getState());
@@ -449,6 +471,7 @@ public final class WindowsJailProbe {
       });
       throw caught;
     } finally {
+      releaseReader.complete(null);
       // Cleanup itself is bounded: a native lock bug must fail, not hang the runner.
       try {
         stage("ConPTY cleanup", () -> background(() -> {
@@ -457,6 +480,7 @@ public final class WindowsJailProbe {
           process.getOutputStream().close();
           process.getErrorStream().close();
           jail.close();
+          read.get(5, TimeUnit.SECONDS);
         }).get(10, TimeUnit.SECONDS));
       } catch (Exception | AssertionError cleanup) {
         if (failure == null) throw cleanup;
@@ -786,8 +810,10 @@ public final class WindowsJailProbe {
       stage("terminal", () -> passed(
           finish(new ProcessBuilder(self("--terminal-roundtrip-child", parent, guest)).start(), new byte[0]),
           "ConPTY with redirected host stdio"));
-      stage("active ConPTY close", () -> passed(
-          finish(new ProcessBuilder(self("--terminal-child", parent, guest)).start(), new byte[0]), "bounded active ConPTY close"));
+      for (int attempt = 0; attempt < 4; attempt++) {
+        stage("active ConPTY close " + (attempt + 1), () -> passed(
+            finish(new ProcessBuilder(self("--terminal-child", parent, guest)).start(), new byte[0]), "bounded active ConPTY close"));
+      }
       stage("parent crash", () -> parentCrash(parent, guest));
       stage("inherited handles and standard user", () -> restrictedHosts(parent, guest));
       if (nativeDirectory != null) {
