@@ -383,5 +383,15 @@ terminated reader as a broken pipe and can release the writer before context
 close. Readiness still requires 128KiB, input still writes 16MiB, and every child
 retains its 20-second watchdog. Counted-read diagnostics and four independent
 close attempts per launcher check this previously intermittent scenario. No
-production policy or teardown path changed. Repeat verification and publication
-remain pending; no Windows jail release completion is claimed yet.
+production policy or teardown path changed.
+
+Run 34922719764 passes all four JVM close attempts and the complete JVM launcher
+(273 checks). Native-image readiness still times out after receiving 63,612
+bytes while input is flooding, with the consumer waiting and the pump polling.
+Continuous output alone did not resolve readiness. The fixture now establishes
+output readiness and a full 64KiB consumer pipe **before** starting the oversized
+input write. It then requires that write to remain incomplete for 100ms before
+closing the context. This checks simultaneous backpressure without relying on
+forward output progress after deliberately saturating console input. All original
+byte thresholds, close checks and the 20-second child deadline remain. Windows
+verification and publication are still pending.

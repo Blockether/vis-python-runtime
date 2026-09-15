@@ -440,9 +440,11 @@ public final class WindowsJailProbe {
         throw failure;
       }
     });
+    CompletableFuture<Void> startWriter = new CompletableFuture<>();
     CompletableFuture<Void> writerStarted = new CompletableFuture<>();
     CompletableFuture<Void> write = background(() -> {
       try {
+        startWriter.get();
         byte[] block = new byte[1048576];
         writerStarted.complete(null);
         for (int count = 0; count < 16; count++) process.getOutputStream().write(block);
@@ -452,7 +454,20 @@ public final class WindowsJailProbe {
     Throwable failure = null;
     try {
       stage("ConPTY output readiness", () -> outputReady.get(10, TimeUnit.SECONDS));
+      stage("ConPTY output backpressure", () -> {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (process.getInputStream().available() < 65536 && System.nanoTime() < deadline) Thread.sleep(20);
+        check(process.getInputStream().available() == 65536, "ConPTY output fills the paused consumer's pipe");
+      });
+      // Flooding console input earlier can stall output before this test becomes ready.
+      startWriter.complete(null);
       stage("ConPTY writer startup", () -> writerStarted.get(5, TimeUnit.SECONDS));
+      stage("ConPTY input backpressure", () -> {
+        try {
+          write.get(100, TimeUnit.MILLISECONDS);
+          throw new AssertionError("ConPTY oversized write must remain blocked before close");
+        } catch (java.util.concurrent.TimeoutException expected) { checks++; }
+      });
       check(!read.isDone(), "ConPTY consumer stays alive without draining at close");
       check(process.isAlive(), "flood guest remains active before context close");
       check(!write.isDone(), "ConPTY stdin is active under backpressure at close");
@@ -471,6 +486,7 @@ public final class WindowsJailProbe {
       });
       throw caught;
     } finally {
+      startWriter.cancel(false);
       releaseReader.complete(null);
       // Cleanup itself is bounded: a native lock bug must fail, not hang the runner.
       try {
