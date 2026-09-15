@@ -6,6 +6,8 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <winternl.h>
+#include <tlhelp32.h>
+#include <wct.h>
 #include <aclapi.h>
 #include <sddl.h>
 #include <userenv.h>
@@ -1367,10 +1369,121 @@ static void profile_check(const wchar_t *sid_text, int remove_profile) {
     CoTaskMemFree(path);
 }
 
+/* Failure-only host diagnostics. Never inspect guest data or print object names. */
+static int wait_chains(DWORD host_pid) {
+    DWORD pids[16], tids[512], owners[512];
+    size_t process_count = 1, thread_count = 0;
+    HANDLE token = NULL, snapshot = INVALID_HANDLE_VALUE;
+    TOKEN_PRIVILEGES privilege = {0};
+    PROCESSENTRY32W process = {0};
+    THREADENTRY32 thread = {0};
+    HWCT session = NULL;
+    int result = 1;
+    if (!host_pid) return 2;
+    pids[0] = host_pid;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &token) ||
+        !LookupPrivilegeValueW(NULL, L"SeDebugPrivilege", &privilege.Privileges[0].Luid)) {
+        fprintf(stderr, "ConPTY WCT privilege lookup error=%lu\n", GetLastError());
+        goto done;
+    }
+    privilege.PrivilegeCount = 1;
+    privilege.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    SetLastError(ERROR_SUCCESS);
+    if (!AdjustTokenPrivileges(token, FALSE, &privilege, 0, NULL, NULL) ||
+        GetLastError() != ERROR_SUCCESS) {
+        fprintf(stderr, "ConPTY WCT privilege unavailable error=%lu\n", GetLastError());
+        goto done;
+    }
+    snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    process.dwSize = sizeof(process);
+    if (snapshot == INVALID_HANDLE_VALUE || !Process32FirstW(snapshot, &process)) {
+        fprintf(stderr, "ConPTY WCT process snapshot error=%lu\n", GetLastError());
+        goto done;
+    }
+    do {
+        if (process.th32ParentProcessID == host_pid && _wcsicmp(process.szExeFile, L"conhost.exe") == 0) {
+            if (process_count == sizeof(pids) / sizeof(pids[0])) {
+                fprintf(stderr, "ConPTY WCT process limit reached\n");
+                goto done;
+            }
+            pids[process_count++] = process.th32ProcessID;
+        }
+    } while (Process32NextW(snapshot, &process));
+    CloseHandle(snapshot);
+    snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    thread.dwSize = sizeof(thread);
+    if (snapshot == INVALID_HANDLE_VALUE || !Thread32First(snapshot, &thread)) {
+        fprintf(stderr, "ConPTY WCT thread snapshot error=%lu\n", GetLastError());
+        goto done;
+    }
+    do {
+        for (size_t i = 0; i < process_count; i++) {
+            if (thread.th32OwnerProcessID != pids[i]) continue;
+            if (thread_count == sizeof(tids) / sizeof(tids[0])) {
+                fprintf(stderr, "ConPTY WCT thread limit reached\n");
+                goto done;
+            }
+            owners[thread_count] = pids[i];
+            tids[thread_count++] = thread.th32ThreadID;
+            break;
+        }
+    } while (Thread32Next(snapshot, &thread));
+    CloseHandle(snapshot);
+    snapshot = INVALID_HANDLE_VALUE;
+    fprintf(stderr, "ConPTY WCT processes=%zu threads=%zu\n", process_count, thread_count);
+    for (size_t i = 0; i < process_count; i++) {
+        HANDLE queried = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pids[i]);
+        FILETIME created, exited, kernel, user;
+        if (queried && GetProcessTimes(queried, &created, &exited, &kernel, &user)) {
+            unsigned long long kernel_time = ((unsigned long long)kernel.dwHighDateTime << 32) | kernel.dwLowDateTime;
+            unsigned long long user_time = ((unsigned long long)user.dwHighDateTime << 32) | user.dwLowDateTime;
+            fprintf(stderr, "ConPTY WCT pid=%lu role=%s kernel100ns=%llu user100ns=%llu\n",
+                    pids[i], i == 0 ? "host" : "conhost", kernel_time, user_time);
+        } else {
+            fprintf(stderr, "ConPTY WCT pid=%lu process query error=%lu\n", pids[i], GetLastError());
+        }
+        if (queried) CloseHandle(queried);
+    }
+    session = OpenThreadWaitChainSession(0, NULL);
+    if (!session) {
+        fprintf(stderr, "ConPTY WCT session error=%lu\n", GetLastError());
+        goto done;
+    }
+    result = 0;
+    /* Do not recursively follow chains into unrelated processes. */
+    for (size_t i = thread_count; i > 0; i--) {
+        WAITCHAIN_NODE_INFO nodes[WCT_MAX_NODE_COUNT];
+        DWORD count = WCT_MAX_NODE_COUNT;
+        BOOL cycle = FALSE;
+        fprintf(stderr, "ConPTY WCT query pid=%lu tid=%lu\n", owners[i - 1], tids[i - 1]);
+        if (!GetThreadWaitChain(session, 0, WCT_OUT_OF_PROC_CS_FLAG, tids[i - 1], &count, nodes, &cycle)) {
+            fprintf(stderr, "ConPTY WCT error=%lu required=%lu\n", GetLastError(), count);
+            result = 1;
+            continue;
+        }
+        fprintf(stderr, "ConPTY WCT nodes=%lu cycle=%d\n", count, cycle);
+        for (DWORD j = 0; j < count; j++) {
+            fprintf(stderr, "ConPTY WCT node=%lu type=%u status=%u", j,
+                    (unsigned)nodes[j].ObjectType, (unsigned)nodes[j].ObjectStatus);
+            if (nodes[j].ObjectType == WctThreadType)
+                fprintf(stderr, " pid=%lu tid=%lu wait=%lu switches=%lu",
+                        nodes[j].ThreadObject.ProcessId, nodes[j].ThreadObject.ThreadId,
+                        nodes[j].ThreadObject.WaitTime, nodes[j].ThreadObject.ContextSwitches);
+            fputc('\n', stderr);
+        }
+    }
+done:
+    if (session) CloseThreadWaitChainSession(session);
+    if (snapshot != INVALID_HANDLE_VALUE) CloseHandle(snapshot);
+    if (token) CloseHandle(token);
+    return result;
+}
+
 int wmain(int argc, wchar_t **argv) {
     int i;
     if (argc < 2) return 2;
-    if (wcscmp(argv[1], L"protect") == 0 && argc == 3) protected_file(argv[2]);
+    if (wcscmp(argv[1], L"wait-chains") == 0 && argc == 3) return wait_chains(wcstoul(argv[2], NULL, 10));
+    else if (wcscmp(argv[1], L"protect") == 0 && argc == 3) protected_file(argv[2]);
     else if (wcscmp(argv[1], L"junction") == 0 && argc == 4) junction(argv[2], argv[3]);
     else if (wcscmp(argv[1], L"leak-host") == 0) host_launch(argc, argv, 0);
     else if (wcscmp(argv[1], L"standard-host") == 0) host_launch(argc, argv, 1);

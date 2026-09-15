@@ -490,6 +490,32 @@ public final class WindowsJailProbe {
         System.err.println("ConPTY thread " + thread.getName() + " " + thread.getState());
         for (StackTraceElement frame : stack) System.err.println("  at " + frame);
       });
+      Process diagnostic = null;
+      try {
+        diagnostic = new ProcessBuilder(guest.toString(), "wait-chains", Long.toString(ProcessHandle.current().pid()))
+            .redirectOutput(ProcessBuilder.Redirect.INHERIT).redirectError(ProcessBuilder.Redirect.INHERIT).start();
+        diagnostic.getOutputStream().close();
+        if (!diagnostic.waitFor(3, TimeUnit.SECONDS)) {
+          System.err.println("ConPTY native wait-chain diagnostic timed out");
+        } else {
+          System.err.println("ConPTY native wait-chain diagnostic exit=" + diagnostic.exitValue());
+        }
+      } catch (Exception diagnosticError) {
+        caught.addSuppressed(diagnosticError);
+        diagnosticError.printStackTrace(System.err);
+      } finally {
+        if (diagnostic != null && diagnostic.isAlive()) {
+          diagnostic.destroyForcibly();
+          try {
+            if (!diagnostic.waitFor(1, TimeUnit.SECONDS)) {
+              System.err.println("ConPTY native wait-chain diagnostic did not exit");
+            }
+          } catch (InterruptedException interrupted) {
+            caught.addSuppressed(interrupted);
+            Thread.currentThread().interrupt();
+          }
+        }
+      }
       throw caught;
     } finally {
       startWriter.cancel(false);

@@ -441,3 +441,14 @@ its server handles. This is restricted to duplex terminal masters; ordinary pipe
 EOF/data delivery is unchanged. It tests a stronger channel-break hypothesis,
 not a documented requirement that was previously established. Native diagnostics
 remain until Windows verification resolves it; publication is still pending.
+
+Run 34926734487 passes the JVM's 281 checks, then again hangs in the first
+native-image direct close. Both explicit disconnects and both handle closes
+succeed before `ClosePseudoConsole` starts. Disconnecting the clients is not a
+verified fix. The next run adds failure-only native wait-chain diagnostics for
+the failing host and its direct console-host children, with numeric object
+states and CPU times but no object names, memory or environments. The helper enables an
+already-held debug privilege only in its own test process; unavailable access is
+reported, never treated as verification. Its three-second watchdog and forced
+cleanup do not change the test's success deadlines or outer watchdog. Production
+teardown, isolation and release status are unchanged while this wait is diagnosed.
