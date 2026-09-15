@@ -424,3 +424,10 @@ All temporary native prints are removed. The suite retains four active-close
 children and adds four kill/reap-before-close children per launcher to check an
 already-started asynchronous closer too. Native Windows verification remains
 pending; byte thresholds, watchdogs and confinement are unchanged.
+
+Run 34925493396 still times out in the first direct JVM close child after the
+barrier change. The writer is released and the consumer remains paused. This
+means the observed ordering race alone is not a verified explanation or fix.
+Temporary native handle-result, barrier-count and teardown-phase diagnostics are
+restored to locate the remaining wait; remove them after verification and before
+publication. The additional pre-reaped case has not run yet.

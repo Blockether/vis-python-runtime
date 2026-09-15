@@ -555,9 +555,13 @@ static void stream_dispose(Stream *s) {
         CancelIoEx(s->read, &s->peek);
         GetOverlappedResult(s->read, &s->peek, &ignored, TRUE);
     }
-    if (s->read) CloseHandle(s->read);
-    if (s->write && s->write != s->read) CloseHandle(s->write);
+    BOOL read_closed = !s->read || CloseHandle(s->read);
+    BOOL write_closed = !s->write || s->write == s->read || CloseHandle(s->write);
     CloseHandle(s->peek.hEvent); CloseHandle(s->cancel);
+    if (s->read && s->write && s->read != s->write) {
+        fprintf(stderr, "Windows jail duplex %d: read closed=%d write closed=%d live=%d\n",
+            s->id, (int)read_closed, (int)write_closed, s->context->live_streams); fflush(stderr);
+    }
     if (--s->context->live_streams == 0) WakeAllConditionVariable(&streams_closed);
     free(s);
 }
@@ -762,7 +766,9 @@ int visjail_kill(int id, int signal_number) {
 }
 
 static DWORD close_console(void *console) {
+    fprintf(stderr, "Windows jail async console begin\n"); fflush(stderr);
     ClosePseudoConsole((HPCON)console);
+    fprintf(stderr, "Windows jail async console end\n"); fflush(stderr);
     return 0;
 }
 
@@ -814,6 +820,7 @@ int visjail_windows_destroy(int id) {
     Process *p;
     Stream **sp;
     int result = -ERROR_INVALID_HANDLE;
+    fprintf(stderr, "Windows jail %d: table\n", id); fflush(stderr);
     AcquireSRWLockExclusive(&lock);
     for (slot = &contexts; *slot && (*slot)->id != id; slot = &(*slot)->next) {}
     c = *slot;
@@ -821,13 +828,16 @@ int visjail_windows_destroy(int id) {
     if (c->job && !finish_job(c->job)) {
         result = -(int)GetLastError(); ReleaseSRWLockExclusive(&lock); return result;
     }
+    fprintf(stderr, "Windows jail %d: job finished live=%d\n", id, c->live_streams); fflush(stderr);
     *slot = c->next;
     for (sp = &streams; *sp;) {
         if ((*sp)->context == c) stream_close_locked(sp); else sp = &(*sp)->next;
     }
     /* Logical close only cancels IO. ConPTY needs the physical output handle
      * closed before teardown, including streams already removed by close(). */
+    fprintf(stderr, "Windows jail %d: stream barrier live=%d\n", id, c->live_streams); fflush(stderr);
     while (c->live_streams) SleepConditionVariableSRW(&streams_closed, &lock, INFINITE, 0);
+    fprintf(stderr, "Windows jail %d: streams disposed\n", id); fflush(stderr);
     for (;;) {
         HPCON console;
         HANDLE closer;
@@ -846,14 +856,19 @@ int visjail_windows_destroy(int id) {
         if (p->job) { CloseHandle(p->job); p->job = NULL; }
         ReleaseSRWLockExclusive(&lock);
         /* Console teardown never holds the global handle-table lock. */
+        fprintf(stderr, "Windows jail %d: direct console=%d\n", id, console != NULL); fflush(stderr);
         if (console) ClosePseudoConsole(console);
+        fprintf(stderr, "Windows jail %d: async closer=%d\n", id, closer != NULL); fflush(stderr);
         if (closer) { WaitForSingleObject(closer, INFINITE); CloseHandle(closer); }
         AcquireSRWLockExclusive(&lock);
     }
     ReleaseSRWLockExclusive(&lock);
+    fprintf(stderr, "Windows jail %d: pins\n", id); fflush(stderr);
     unpin(c->pins); c->pins = NULL;
     if (c->job) { CloseHandle(c->job); c->job = NULL; }
+    fprintf(stderr, "Windows jail %d: profile\n", id); fflush(stderr);
     result = delete_profile(c->profile, NULL, 0);
+    fprintf(stderr, "Windows jail %d: profile returned=%d\n", id, result); fflush(stderr);
     if (result) {
         /* Retain only cleanup state so close can retry without permitting launches. */
         c->poisoned = 1;
