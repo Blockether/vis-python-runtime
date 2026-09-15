@@ -580,7 +580,19 @@ or running gateway was changed by that release.
      331-check JVM/native-image runs, Windows API (4 / 34), native boundary (11 / 68),
      and source/extracted shared suites (84 / 485 and 84 / 482), with zero failures
      or errors. All eight remote source hashes match; 5 local release-contract tests
-     / 73 assertions also pass. Interactive CI investigation remains open.
+     / 73 assertions also pass. CI at `25b91d7` confirms that the guest inherits exactly
+     one station handle with `WINSTA_READATTRIBUTES` and its SID-private desktop
+     with the required rights, but selects a separate `WinSta0` handle. This is a
+     station-selection failure, not a missing handle or an ACL-test mismatch.
+     The next candidate supplies only the private desktop name, preserving the
+     inherited station and all existing rights. The fully qualified station path
+     remains rejected. The desktop-only candidate passes strict C compilation and
+     all four source/extracted JVM/native-image probes (331 checks each), Windows
+     API (4 / 34), native boundary (11 / 68), and shared suites (84 / 485 and
+     84 / 482), without failures or errors. All eight source hashes match the VM.
+     Interactive CI still must verify this candidate. A separate standard-token
+     fixture cannot create a new window station (`ERROR_ACCESS_DENIED`), so a
+     station-creating helper is not an established no-admin alternative.
    - Unknowns: cross-platform CI and the next release's rebuilt assets remain to pass.
 2. Resolve generic Windows policy and consumer integration.
    - Rationale: WindowsJail is a copy-in private-workspace API, not the generic
@@ -607,11 +619,12 @@ or running gateway was changed by that release.
      the presence of a Windows archive.
 
 Plan state: the noninteractive Windows launch fix and corrected desktop-access tests
-pass source and extracted JVM/native-image execution. Subsequent CI exposed an
-interactive-logon station-selection failure. A qualified-name candidate was falsified
-on Windows and reverted; bounded UI-handle diagnostics pass the source and extracted
-Windows gates. The interactive CI failure remains unresolved. No new release tag
-has been published. Publication is coordinated with the separate #229 consumer fix
-and its final native validation. Generic Windows
-policy parity, consumer integration and the Vis beta remain open. Existing unrelated
-runtime diagnostics and Vis edits are excluded.
+pass source and extracted JVM/native-image execution. Interactive CI confirms that
+a guest can select `WinSta0` despite correctly inheriting its private station and
+desktop handles. A qualified-name candidate was falsified and reverted. The
+desktop-only candidate passes the source and extracted Windows gates without
+changing any permissions or assertions; interactive CI remains required.
+No new release tag has been published. Publication is coordinated with the separate
+#229 consumer fix and its final native validation. Generic Windows policy parity,
+consumer integration and the Vis beta remain open. Existing unrelated runtime
+diagnostics and Vis edits are excluded.
