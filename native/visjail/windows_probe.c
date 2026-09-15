@@ -1516,8 +1516,14 @@ static void desktop_state(void) {
 }
 
 static void desktop_denied(const wchar_t *name, DWORD rights, const char *message) {
-    HDESK opened = OpenDesktopW(name, 0, FALSE, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | rights);
-    DWORD error = GetLastError();
+    HDESK opened;
+    DWORD error;
+    SetLastError(ERROR_SUCCESS);
+    opened = OpenDesktopW(name, 0, FALSE, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | rights);
+    error = GetLastError();
+    if (opened || error != ERROR_ACCESS_DENIED)
+        fprintf(stderr, "DESKTOP_ACCESS name=%ls opened=%d rights=0x%lx error=%lu\n",
+                name, opened != NULL, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | rights, error);
     check(!opened && error == ERROR_ACCESS_DENIED, message);
     if (opened) check(CloseDesktop(opened), "close unexpected desktop access");
 }
@@ -1565,7 +1571,7 @@ static void desktop_isolation(int argc, wchar_t **argv) {
     }
     if (argc == 4) {
         check(wcscmp(name, argv[2]) && wcscmp(name, argv[3]), "host and sibling names are distinct controls");
-        desktop_denied(argv[2], 0, "host desktop access denied");
+        desktop_denied(argv[2], 0, "private host desktop access denied");
         desktop_denied(argv[3], 0, "sibling desktop access denied");
     }
 }
@@ -1574,7 +1580,7 @@ static void desktop_lifetime(const wchar_t *first, const wchar_t *second, int pr
     const wchar_t *names[] = {first, second};
     /* A service host need not have WINSTA_ENUMDESKTOPS. Check only our own objects,
      * with a successful-open control before cleanup so access denial cannot pass. */
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+    for (size_t i = 0; i < (second ? 2u : 1u); i++) {
         HDESK desktop = OpenDesktopW(names[i], 0, FALSE, READ_CONTROL);
         DWORD error = GetLastError();
         if (present) check(desktop != NULL, "host can open its live private desktop");
@@ -1582,6 +1588,70 @@ static void desktop_lifetime(const wchar_t *first, const wchar_t *second, int pr
                    "normal and failed launches leave no private desktop handles alive");
         if (desktop) check(CloseDesktop(desktop), "close host desktop lifetime control");
     }
+}
+
+/* A private same-station object is a denial control; the OS Default desktop need not be private. */
+static void desktop_fixture(void) {
+    HANDLE token = NULL;
+    HDESK desktop = NULL, opened = NULL;
+    BYTE user[4096];
+    DWORD size = 0, count = 0;
+    char command = 0;
+    GUID id;
+    wchar_t guid[40], name[80], sddl[512];
+    LPWSTR sid = NULL, before = NULL, after = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    SECURITY_ATTRIBUTES attributes = {sizeof(attributes), NULL, FALSE};
+    check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "private desktop fixture host token");
+    if (!token) goto done;
+    check(GetTokenInformation(token, TokenUser, user, sizeof(user), &size), "private desktop fixture host identity");
+    if (failures) goto done;
+    check(ConvertSidToStringSidW(((TOKEN_USER *)user)->User.Sid, &sid), "private desktop fixture identity string");
+    if (!sid) goto done;
+    swprintf_s(sddl, 512, L"D:P(A;;GA;;;%ls)(A;;RC;;;OW)S:(ML;;NW;;;LW)", sid);
+    check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, NULL),
+          "private desktop fixture descriptor");
+    if (!descriptor) goto done;
+    attributes.lpSecurityDescriptor = descriptor;
+    check(SUCCEEDED(CoCreateGuid(&id)) && StringFromGUID2(&id, guid, 40), "unique private desktop fixture name");
+    if (failures) goto done;
+    swprintf_s(name, 80, L"visjail-control-%ls", guid);
+    desktop = CreateDesktopW(name, NULL, NULL, 0, GENERIC_ALL, &attributes);
+    check(desktop != NULL, "create host-only same-station desktop fixture");
+    if (!desktop) goto done;
+    opened = OpenDesktopW(name, 0, FALSE, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS);
+    check(opened != NULL, "host opens private desktop with the rights the guest must be denied");
+    if (opened) { check(CloseDesktop(opened), "close private desktop positive control"); opened = NULL; }
+    before = desktop_security(desktop);
+    if (failures || !before) goto done;
+    printf("DESKTOP_PATH=%ls\nDESKTOP_READY\n", name);
+    fflush(stdout);
+    check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &command, 1, &count, NULL) && count == 1 && command == 'q',
+          "private desktop fixture shutdown");
+    after = desktop_security(desktop);
+    check(after && !wcscmp(before, after), "private host desktop descriptor unchanged");
+ done:
+    if (opened) CloseDesktop(opened);
+    if (desktop) check(CloseDesktop(desktop), "close private host desktop fixture");
+    if (before) LocalFree(before);
+    if (after) LocalFree(after);
+    if (descriptor) LocalFree(descriptor);
+    if (sid) LocalFree(sid);
+    if (token) CloseHandle(token);
+}
+
+static void desktop_access(const wchar_t *name, int shared) {
+    const DWORD forbidden[] = {WRITE_DAC, WRITE_OWNER, DELETE, DESKTOP_CREATEWINDOW, DESKTOP_CREATEMENU,
+        DESKTOP_HOOKCONTROL, DESKTOP_JOURNALRECORD, DESKTOP_JOURNALPLAYBACK, DESKTOP_ENUMERATE, DESKTOP_SWITCHDESKTOP};
+    HDESK opened;
+    token_check();
+    if (shared) {
+        opened = OpenDesktopW(name, 0, FALSE, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS);
+        check(opened != NULL, "guest can use the exact shared-desktop grant");
+        if (opened) check(CloseDesktop(opened), "close shared desktop positive control");
+    } else desktop_denied(name, 0, "private service Default desktop access denied");
+    for (size_t i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++)
+        desktop_denied(name, forbidden[i], "host desktop grants no stronger rights");
 }
 
 /* Reproduce service-desktop startup without changing any existing host object's ACL.
@@ -1600,7 +1670,8 @@ static void desktop_host(int argc, wchar_t **argv) {
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
     wchar_t name[128], location[160], sddl[1024], *command = NULL;
     BOOL switched = FALSE, started = FALSE;
-    check(argc > 3 && (!wcscmp(argv[2], L"private") || !wcscmp(argv[2], L"lpac")), "desktop host arguments");
+    check(argc > 3 && (!wcscmp(argv[2], L"private") || !wcscmp(argv[2], L"lpac") ||
+          !wcscmp(argv[2], L"shared")), "desktop host arguments");
     if (failures) return;
     check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "desktop fixture host token");
     if (!token) goto done;
@@ -1627,6 +1698,16 @@ static void desktop_host(int argc, wchar_t **argv) {
     station = CreateWindowStationW(name, CWF_CREATE_ONLY, WINSTA_ALL_ACCESS, &attributes);
     check(station != NULL, "create disposable test window station");
     if (!station) goto done;
+    if (!wcscmp(argv[2], L"shared")) {
+        /* Model an OS-accessible desktop on NEW objects only. The station stays private. */
+        LocalFree(descriptor);
+        descriptor = NULL;
+        swprintf_s(sddl, 1024, L"D:P(A;;GA;;;%ls)(A;;RC;;;OW)(A;;0x81;;;S-1-15-2-2)S:(ML;;NW;;;LW)", sid);
+        check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, NULL),
+              "shared desktop fixture descriptor");
+        if (!descriptor) goto done;
+        attributes.lpSecurityDescriptor = descriptor;
+    }
     switched = SetProcessWindowStation(station);
     check(switched, "select disposable test window station");
     if (!switched) goto done;
@@ -1707,8 +1788,13 @@ int wmain(int argc, wchar_t **argv) {
     else if (wcscmp(argv[1], L"desktop-host") == 0) desktop_host(argc, argv);
     else if (wcscmp(argv[1], L"desktop-state") == 0 && argc == 2) desktop_state();
     else if (wcscmp(argv[1], L"desktop-isolation") == 0) desktop_isolation(argc, argv);
-    else if (wcscmp(argv[1], L"desktop-present") == 0 && argc == 4) desktop_lifetime(argv[2], argv[3], 1);
-    else if (wcscmp(argv[1], L"desktop-absent") == 0 && argc == 4) desktop_lifetime(argv[2], argv[3], 0);
+    else if (wcscmp(argv[1], L"desktop-fixture") == 0 && argc == 2) desktop_fixture();
+    else if (wcscmp(argv[1], L"desktop-shared") == 0 && argc == 3) desktop_access(argv[2], 1);
+    else if (wcscmp(argv[1], L"desktop-private") == 0 && argc == 3) desktop_access(argv[2], 0);
+    else if (wcscmp(argv[1], L"desktop-present") == 0 && (argc == 3 || argc == 4))
+        desktop_lifetime(argv[2], argc == 4 ? argv[3] : NULL, 1);
+    else if (wcscmp(argv[1], L"desktop-absent") == 0 && (argc == 3 || argc == 4))
+        desktop_lifetime(argv[2], argc == 4 ? argv[3] : NULL, 0);
     else if (wcscmp(argv[1], L"standard-token") == 0) standard_check();
     else if (wcscmp(argv[1], L"host-handle") == 0) handle_check(argc, argv, 1);
     else if (wcscmp(argv[1], L"secret-handle") == 0) handle_check(argc, argv, 0);

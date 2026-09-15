@@ -41,7 +41,9 @@ import java.util.TreeMap;
  * writable directories. The context also has private Windows-managed profile
  * folders and registry storage, separate from the retained workspace. Each context
  * has its own desktop, so SSH and service hosts do not need to grant packages
- * access to their host desktop. Use separate contexts for mutually untrusted tasks.
+ * access to their host desktop. Access to pre-existing Windows UI objects still
+ * follows Windows ACLs; the private desktop is not an allowlist for all UI objects.
+ * Use separate contexts for mutually untrusted tasks.
  * Network access, arbitrary host-path grants, proxy ports, credential-store
  * access and Unix sockets are not options in this API.
  *

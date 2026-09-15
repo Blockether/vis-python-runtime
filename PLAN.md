@@ -500,7 +500,7 @@ both before and after archive extraction, including the corrected network
 fixture and every backpressured terminal-close case.
 
 Runtime `v0.5.18` is published from `eeae415a40e505b3fb4df8990940ad53ebd6a8eb`
-and is the latest non-draft, non-prerelease release. All eight downloaded assets
+and was the latest stable release then. All eight downloaded assets
 match their published sizes and SHA-256 digests. The JVM jar reports `0.5.18` and
 contains `WindowsJail`; all five platform archives contain their native enforcers.
 The published API ZIP passes local file/fragment link checks across 38 HTML pages,
@@ -550,6 +550,23 @@ or running gateway was changed by that release.
      pass 84 / 485 from source and 84 / 482 from the archive; no failures or errors.
      Local Java compilation, 11 / 90 affected tests, Javadoc/local links across 38 HTML
      pages, Clojure formatting/lint/reflection, PowerShell analysis and diff checks pass.
+   - CI follow-up: run `34958566674` passes the four non-Windows platforms and docs,
+     but exposes an invalid assumption that every host Default desktop denies LPAC.
+     A new disposable shared-Default fixture reproduces the failure through SSH:
+     `OpenDesktop` succeeds for its explicit `0x81` grant; the old error code was stale.
+     The denial fixture now uses a distinct, protected, host-only desktop in the same
+     station, with a successful host-open control and verified handle cleanup.
+     The private-service Default denial remains tested; the shared Default must allow
+     its exact grant and reject stronger rights. Existing SID, sibling, station-right,
+     descriptor-preservation, ConPTY and lifetime assertions remain in place.
+     This corrects the test oracle, not production confinement. Pre-existing UI access
+     follows Windows ACLs, which the API documentation now states explicitly.
+     The corrected JVM and rebuilt native-image probes pass 331 checks each, from
+     source and the extracted archive. Both runs pass the Windows API (4 / 34),
+     native boundary (11 / 68) and Java example; shared suites pass 84 / 485 and
+     84 / 482, respectively, with no failures or errors. All eight uploaded source
+     hashes match the reviewed checkout. Strict C and Java compilation, 5 release
+     tests / 73 assertions and Javadoc/local links across 38 HTML pages also pass.
    - Unknowns: cross-platform CI and the next release's rebuilt assets remain to pass.
 2. Resolve generic Windows policy and consumer integration.
    - Rationale: WindowsJail is a copy-in private-workspace API, not the generic
@@ -557,6 +574,11 @@ or running gateway was changed by that release.
    - Data: live host-path grants, path denies, proxy/open egress, inbound ports and
      local-socket/credential-service grants are not implemented by WindowsJail.
      Low-integrity write checks precede DACL grants on ordinary host files.
+     WinFsp plus a trusted broker is a possible mapped live-view substrate, not an
+     established transparent backend: a new volume does not replace arbitrary
+     existing absolute paths or revoke OS-public access. LPAC compatibility,
+     race-safe backing handles, hardlink semantics, setup and licensing need proof.
+     No driver, broker or generic backend has been installed or implemented.
    - Acceptance criteria: prove each supported policy field through actual native
      descendants; retain fail-closed rejection rather than substitute copying,
      environment-only proxy settings or host-wide ACL/integrity changes.
@@ -570,8 +592,9 @@ or running gateway was changed by that release.
    - Unknowns: integration is gated on the actual policy implementation, not just
      the presence of a Windows archive.
 
-Plan state: the noninteractive Windows launch fix is verified from source and the
-extracted archive, including actual JVM and native-image execution. The next runtime
-publication is coordinated with the separate #229 consumer fix and its final native
-validation. Generic Windows policy parity, consumer integration and the Vis beta
-remain open. Existing unrelated runtime diagnostics and Vis edits are excluded.
+Plan state: the noninteractive Windows launch fix and corrected desktop-access tests
+pass source and extracted JVM/native-image execution. Cross-platform CI and the next
+runtime release remain pending. Publication is coordinated with the separate #229
+consumer fix and its final native validation. Generic Windows policy parity,
+consumer integration and the Vis beta remain open. Existing unrelated runtime
+diagnostics and Vis edits are excluded.
