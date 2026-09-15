@@ -483,6 +483,16 @@ in every launcher. Stock Python, the jailed native-worker protocol, standard-use
 launch and the documented Java example pass too. Local documentation generation
 checks 38 HTML pages and passes its four assertions.
 
-All three implementation and verification phases are complete. Runtime `0.5.17`
-is prepared; publication remains pending the tag workflow and asset verification.
-No consumer installation, dependency pin or running gateway has been changed.
+CI run `34930599126` at `bd7239f` again passes every lane, including all four
+Windows probe executions. Release run `34930646583`, however, fails before the
+guest network checks: binding the host UDP receiver to the port chosen for TCP
+returns `Address already in use`. A free TCP port does not reserve that UDP port.
+Publication is blocked; the existing `v0.5.17` tag will not be moved.
+
+The test now lets the OS reserve each TCP/UDP and IPv4/IPv6 listener independently
+and passes all four actual ports to the guest. Positive host controls, all eight
+LPAC access-denied checks and empty-listener assertions remain mandatory. There
+is no retry, skipped check, deadline increase or production isolation change.
+Windows verification of this fixture fix is pending before the next immutable
+release, `v0.5.18`. No consumer installation, dependency pin or running gateway
+has been changed.

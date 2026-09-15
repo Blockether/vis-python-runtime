@@ -288,10 +288,12 @@ public final class WindowsJailProbe {
   private static void network(Path parent, Path guest) throws Exception {
     var ipv4 = java.net.InetAddress.getByName("127.0.0.1");
     var ipv6 = java.net.InetAddress.getByName("::1");
+    // A free TCP port can already be occupied by UDP. Let the OS reserve
+    // each family and transport independently (release run 34930646583).
     try (var tcp4 = new java.net.ServerSocket(0, 8, ipv4);
-         var tcp6 = new java.net.ServerSocket(tcp4.getLocalPort(), 8, ipv6);
-         var udp4 = new java.net.DatagramSocket(new java.net.InetSocketAddress(ipv4, tcp4.getLocalPort()));
-         var udp6 = new java.net.DatagramSocket(new java.net.InetSocketAddress(ipv6, tcp4.getLocalPort()));
+         var tcp6 = new java.net.ServerSocket(0, 8, ipv6);
+         var udp4 = new java.net.DatagramSocket(new java.net.InetSocketAddress(ipv4, 0));
+         var udp6 = new java.net.DatagramSocket(new java.net.InetSocketAddress(ipv6, 0));
          WindowsJail jail = prepare(parent, guest)) {
       // Positive controls prove both families and transports reach the host receivers.
       for (var server : List.of(tcp4, tcp6)) {
@@ -314,7 +316,10 @@ public final class WindowsJailProbe {
           check(packet.getLength() == 1 && packet.getData()[0] == 0x63, "host UDP control reaches receiver");
         }
       }
-      passed(run(jail, "network", Integer.toString(tcp4.getLocalPort())), "TCP UDP IPv4 IPv6 network denied");
+      passed(run(jail, "network",
+          Integer.toString(tcp4.getLocalPort()), Integer.toString(udp4.getLocalPort()),
+          Integer.toString(tcp6.getLocalPort()), Integer.toString(udp6.getLocalPort())),
+          "TCP UDP IPv4 IPv6 network denied");
       for (var server : List.of(tcp4, tcp6)) {
         server.setSoTimeout(200);
         try (var unexpected = server.accept()) {

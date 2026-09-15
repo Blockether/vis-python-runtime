@@ -286,16 +286,14 @@ static void network_one(int family, int type, unsigned short port, int public_ad
 static void network_check(int argc, wchar_t **argv) {
     WSADATA data;
     int public_address;
-    unsigned short port;
-    check(argc == 3, "network arguments");
-    if (argc != 3) return;
-    port = (unsigned short)_wtoi(argv[2]);
+    check(argc == 6, "network arguments");
+    if (argc != 6) return;
     check(WSAStartup(MAKEWORD(2, 2), &data) == 0, "Winsock startup");
     for (public_address = 0; public_address < 2; public_address++) {
-        network_one(AF_INET, SOCK_STREAM, port, public_address);
-        network_one(AF_INET, SOCK_DGRAM, port, public_address);
-        network_one(AF_INET6, SOCK_STREAM, port, public_address);
-        network_one(AF_INET6, SOCK_DGRAM, port, public_address);
+        network_one(AF_INET, SOCK_STREAM, (unsigned short)_wtoi(argv[2]), public_address);
+        network_one(AF_INET, SOCK_DGRAM, (unsigned short)_wtoi(argv[3]), public_address);
+        network_one(AF_INET6, SOCK_STREAM, (unsigned short)_wtoi(argv[4]), public_address);
+        network_one(AF_INET6, SOCK_DGRAM, (unsigned short)_wtoi(argv[5]), public_address);
     }
     WSACleanup();
 }
