@@ -67,8 +67,8 @@ $namespaces = @(
     'com.blockether.vis-python-runtime.windows-test'
     'com.blockether.vis-python-runtime.windows-native-test'
 )
-$arguments = @('-M:test:test-diagnostics')
-foreach ($namespace in $namespaces) { $arguments += @('-n', $namespace) }
+$testArguments = @()
+foreach ($namespace in $namespaces) { $testArguments += @('-n', $namespace) }
 $oldGuest = $env:VIS_WINDOWS_JAIL_GUEST
 Push-Location $repo
 try {
@@ -88,7 +88,8 @@ try {
     # Isolate the embedded native boundary before the shared-interpreter suites.
     & clojure -M:test:test-diagnostics -n com.blockether.vis-python-runtime.windows-native-test
     if ($LASTEXITCODE -ne 0) { throw "Windows native boundary tests failed: $LASTEXITCODE" }
-    & clojure @arguments
+    # Keep the CLI alias literal: ClojureTools parses splatted alias tokens as filenames.
+    & clojure -M:test:test-diagnostics @testArguments
     if ($LASTEXITCODE -ne 0) { throw "Windows runtime tests failed: $LASTEXITCODE" }
 }
 finally {

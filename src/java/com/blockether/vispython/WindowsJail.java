@@ -11,7 +11,10 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -36,8 +39,9 @@ import java.util.TreeMap;
  * {@link #spawn spawn} processes. The first spawn seals the application tree;
  * later staging is rejected. Processes in one context share its identity and
  * writable directories. The context also has private Windows-managed profile
- * folders and registry storage, separate from the retained workspace. Use
- * separate contexts for mutually untrusted tasks.
+ * folders and registry storage, separate from the retained workspace. Each context
+ * has its own desktop, so SSH and service hosts do not need to grant packages
+ * access to their host desktop. Use separate contexts for mutually untrusted tasks.
  * Network access, arbitrary host-path grants, proxy ports, credential-store
  * access and Unix sockets are not options in this API.
  *
@@ -61,6 +65,7 @@ public final class WindowsJail implements AutoCloseable {
       "visjail_windows_destroy", FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT),
       "visjail_windows_pid", FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT));
   private static Map<String, MethodHandle> handles;
+  private static SecureRandom directoryRandom;
 
   private final int context;
   private final Path directory;
@@ -87,6 +92,11 @@ public final class WindowsJail implements AutoCloseable {
       handles = Map.copyOf(linked);
     }
     return handles;
+  }
+
+  private static synchronized SecureRandom directoryRandom() throws NoSuchAlgorithmException {
+    if (directoryRandom == null) directoryRandom = SecureRandom.getInstance("Windows-PRNG");
+    return directoryRandom;
   }
 
   /** Why the Windows workspace backend is unavailable, or null when its archive is present. */
@@ -127,7 +137,15 @@ public final class WindowsJail implements AutoCloseable {
     if (reason != null) throw new VisPythonException("Windows jail unavailable: " + reason, Map.of());
     Path directory;
     try {
-      directory = Files.createTempDirectory(parent.toAbsolutePath(), "visjail-");
+      // The default Windows seed generator persists a CryptoAPI key container;
+      // passwordless service logons can fall back to slow threaded entropy.
+      // Windows-PRNG uses the OS random source without a persisted user key.
+      // Retain createTempDirectory's 64 random bits without lengthening IPC paths.
+      byte[] name = new byte[8];
+      directoryRandom().nextBytes(name);
+      directory = Files.createDirectory(parent.toAbsolutePath().resolve("visjail-" + HexFormat.of().formatHex(name)));
+    } catch (NoSuchAlgorithmException exception) {
+      throw new VisPythonException("Windows secure random provider is unavailable", Map.of(), exception);
     } catch (IOException exception) {
       throw new UncheckedIOException("Could not create a Windows jail workspace", exception);
     }

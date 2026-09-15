@@ -487,12 +487,91 @@ CI run `34930599126` at `bd7239f` again passes every lane, including all four
 Windows probe executions. Release run `34930646583`, however, fails before the
 guest network checks: binding the host UDP receiver to the port chosen for TCP
 returns `Address already in use`. A free TCP port does not reserve that UDP port.
-Publication is blocked; the existing `v0.5.17` tag will not be moved.
+Publication was blocked; the `v0.5.17` tag is preserved unchanged.
 
 The test now lets the OS reserve each TCP/UDP and IPv4/IPv6 listener independently
 and passes all four actual ports to the guest. Positive host controls, all eight
 LPAC access-denied checks and empty-listener assertions remain mandatory. There
 is no retry, skipped check, deadline increase or production isolation change.
-Windows verification of this fixture fix is pending before the next immutable
-release, `v0.5.18`. No consumer installation, dependency pin or running gateway
-has been changed.
+
+CI run `34931609756` and release run `34932355483` pass on all five platforms.
+The Windows release lane again passes 297 checks per JVM/native-image launcher,
+both before and after archive extraction, including the corrected network
+fixture and every backpressured terminal-close case.
+
+Runtime `v0.5.18` is published from `eeae415a40e505b3fb4df8990940ad53ebd6a8eb`
+and is the latest non-draft, non-prerelease release. All eight downloaded assets
+match their published sizes and SHA-256 digests. The JVM jar reports `0.5.18` and
+contains `WindowsJail`; all five platform archives contain their native enforcers.
+The published API ZIP passes local file/fragment link checks across 38 HTML pages,
+and the Javadoc jar across 32 pages. Both Java and Clojure Windows APIs are present.
+
+The v0.5.18 release phases are complete. No consumer installation, dependency pin
+or running gateway was changed by that release.
+
+## Windows service execution and consumer follow-up
+
+1. Repair noninteractive Windows launch.
+   - Rationale: the existing release test fails before the jailed guest reaches main
+     when its host runs through SSH in Session 0.
+   - Data: JVM and native-image reproduce STATUS_DLL_INIT_FAILED (0xc0000142);
+     ordinary guest startup and the separate embedded-runtime suites pass.
+     The service window station and desktop have no package access grants.
+   - Acceptance criteria: retain a deterministic suite regression; pass the complete
+     JVM/native-image suites from source and extracted archives without changing
+     existing host ACLs, weakening LPAC, or reducing lifetime/backpressure checks.
+   - Data: a new host-only desktop fixture reproduces the failure. Null startup
+     desktop metadata inherits an explicitly named parent desktop; token-only SSH
+     startup was not sufficient verification. An explicit empty `lpDesktop`, with
+     exactly the least-rights inherited station and SID-private desktop handles,
+     passes the standard-user private-station regression, including pipes, ConPTY,
+     actual UI identity, forbidden rights, sibling/host access and cleanup.
+     Production changes no existing host UI ACL, process station or thread desktop.
+     The aggregate timeout is separate: the JDK's persisted CryptoAPI seed context
+     fails under this passwordless SSH logon and falls back to roughly eight seconds
+     of threaded entropy per fresh JVM. Windows-PRNG uses an ephemeral OS context;
+     its secure provider works here without changing machine authentication or
+     security policy. Directory-name generation now reuses that provider and atomic
+     create, retaining the original 64 random bits and bounded IPC path length.
+     A longer candidate name exceeded Windows AF_UNIX's path bound and was rejected.
+     The complete JVM probe passes 323 checks, including real native-worker AF_UNIX
+     exchange. Direct before/after opens verify desktop lifetime without assuming
+     that an SSH host can enumerate its window station. Native-image exposed a
+     test-helper race writing empty input after a fast ConPTY guest had exited;
+     the helper no longer attempts a write when there are no input bytes.
+     The PowerShell runner now keeps the Clojure CLI alias literal: ClojureTools
+     otherwise interprets a splatted alias token as a filename. Its regression fails
+     before the change and passes through the actual Windows module after it.
+   - Verification: fresh Windows DLLs, worker and probe images pass the source and
+     extracted-archive runs. Every JVM/native-image probe passes 323 checks, including
+     the real worker AF_UNIX exchange, private/standard/service UI isolation and all
+     16 backpressured ConPTY cases. Both runs pass the Windows API (4 tests / 34
+     assertions), native boundary (11 / 68) and documented Java example. Shared suites
+     pass 84 / 485 from source and 84 / 482 from the archive; no failures or errors.
+     Local Java compilation, 11 / 90 affected tests, Javadoc/local links across 38 HTML
+     pages, Clojure formatting/lint/reflection, PowerShell analysis and diff checks pass.
+   - Unknowns: cross-platform CI and the next release's rebuilt assets remain to pass.
+2. Resolve generic Windows policy and consumer integration.
+   - Rationale: WindowsJail is a copy-in private-workspace API, not the generic
+     JailPolicy backend used by Vis shell and REPL processes.
+   - Data: live host-path grants, path denies, proxy/open egress, inbound ports and
+     local-socket/credential-service grants are not implemented by WindowsJail.
+     Low-integrity write checks precede DACL grants on ordinary host files.
+   - Acceptance criteria: prove each supported policy field through actual native
+     descendants; retain fail-closed rejection rather than substitute copying,
+     environment-only proxy settings or host-wide ACL/integrity changes.
+   - Unknowns: a supported transparent filesystem/network isolation architecture
+     and its setup requirements remain to be established.
+3. Verify distribution and the Vis beta.
+   - Rationale: runtime-only success does not prove consumer execution.
+   - Data: v0.5.18 is immutable; the consumer has not been integrated by this work.
+   - Acceptance criteria: publish a new verified runtime, integrate the consumer,
+     exercise real SDK workflows and complete the authorized beta pipelines.
+   - Unknowns: integration is gated on the actual policy implementation, not just
+     the presence of a Windows archive.
+
+Plan state: the noninteractive Windows launch fix is verified from source and the
+extracted archive, including actual JVM and native-image execution. The next runtime
+publication is coordinated with the separate #229 consumer fix and its final native
+validation. Generic Windows policy parity, consumer integration and the Vis beta
+remain open. Existing unrelated runtime diagnostics and Vis edits are excluded.

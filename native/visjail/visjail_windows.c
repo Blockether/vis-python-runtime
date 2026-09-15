@@ -33,6 +33,8 @@ typedef struct Context {
     wchar_t profile[80];
     PSID sid, registry_read;
     HANDLE job;
+    HWINSTA station;
+    HDESK desktop;
     Pin *pins;
     struct Context *next;
 } Context;
@@ -185,20 +187,21 @@ static Context *context_get(int id) {
 /* Explicit protected ACLs never import source permissions. Owner Rights removes
  * implicit owner WRITE_DAC for guest-created descendants. The host user's token
  * still has its explicit grant, intersected with package rights in the guest. */
-static int permissions(HANDLE handle, PSID package, DWORD rights, int directory) {
+static PACL private_acl(PSID package, DWORD host_rights, DWORD rights, int directory) {
     HANDLE token = NULL;
     TOKEN_USER *user = NULL;
     DWORD size = 0, result = ERROR_NOT_ENOUGH_MEMORY;
     PSID owner_rights = NULL;
     EXPLICIT_ACCESSW entries[3];
     PACL acl = NULL;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return 0;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return NULL;
     GetTokenInformation(token, TokenUser, NULL, 0, &size);
     user = malloc(size);
-    if (!user || !GetTokenInformation(token, TokenUser, user, size, &size) ||
-        !ConvertStringSidToSidW(L"S-1-3-4", &owner_rights)) goto done;
+    if (!user) goto done;
+    if (!GetTokenInformation(token, TokenUser, user, size, &size) ||
+        !ConvertStringSidToSidW(L"S-1-3-4", &owner_rights)) { result = GetLastError(); goto done; }
     ZeroMemory(entries, sizeof(entries));
-    entries[0].grfAccessPermissions = FILE_ALL_ACCESS;
+    entries[0].grfAccessPermissions = host_rights;
     entries[0].grfAccessMode = SET_ACCESS;
     entries[0].grfInheritance = directory ? SUB_CONTAINERS_AND_OBJECTS_INHERIT : NO_INHERITANCE;
     entries[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
@@ -210,14 +213,21 @@ static int permissions(HANDLE handle, PSID package, DWORD rights, int directory)
     entries[2].grfAccessPermissions = READ_CONTROL;
     entries[2].Trustee.ptstrName = (LPWSTR)owner_rights;
     result = SetEntriesInAclW(3, entries, NULL, &acl);
-    if (result == ERROR_SUCCESS)
-        result = SetSecurityInfo(handle, SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            NULL, NULL, acl, NULL);
-done:
-    if (acl) LocalFree(acl);
+ done:
     if (owner_rights) LocalFree(owner_rights);
     free(user); CloseHandle(token); SetLastError(result);
+    if (result != ERROR_SUCCESS) { if (acl) LocalFree(acl); return NULL; }
+    return acl;
+}
+
+static int permissions(HANDLE handle, PSID package, DWORD rights, int directory) {
+    PACL acl = private_acl(package, FILE_ALL_ACCESS, rights, directory);
+    DWORD result;
+    if (!acl) return 0;
+    result = SetSecurityInfo(handle, SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        NULL, NULL, acl, NULL);
+    LocalFree(acl); SetLastError(result);
     return result == ERROR_SUCCESS;
 }
 
@@ -332,6 +342,69 @@ static PSID registry_read_capability(void) {
     return result;
 }
 
+/* A service desktop need not admit packages. Pass a read-only station handle
+ * and a new SID-private desktop; never change the host station, desktop or ACLs. */
+static int private_desktop(Context *c) {
+    const DWORD guest_rights = READ_CONTROL | DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW | DESKTOP_WRITEOBJECTS;
+    const DWORD host_rights = STANDARD_RIGHTS_REQUIRED | DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW |
+        DESKTOP_CREATEMENU | DESKTOP_HOOKCONTROL | DESKTOP_JOURNALRECORD | DESKTOP_JOURNALPLAYBACK |
+        DESKTOP_ENUMERATE | DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP;
+    HWINSTA current = GetProcessWindowStation();
+    wchar_t *name = NULL;
+    DWORD needed = 0, saved, status;
+    PACL acl = NULL, label = NULL, actual_acl = NULL, actual_label = NULL;
+    PSECURITY_DESCRIPTOR low = NULL, actual = NULL;
+    SECURITY_DESCRIPTOR descriptor;
+    SECURITY_ATTRIBUTES attributes = {sizeof(attributes), &descriptor, FALSE};
+    BOOL present = FALSE, defaulted = FALSE;
+    int ok = 0;
+    if (!current) return 0;
+    GetUserObjectInformationW(current, UOI_NAME, NULL, 0, &needed);
+    if (!needed || needed > 65536) { SetLastError(ERROR_INVALID_DATA); return 0; }
+    name = calloc(1, needed);
+    if (!name) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return 0; }
+    if (!GetUserObjectInformationW(current, UOI_NAME, name, needed, &needed)) goto done;
+    c->station = OpenWindowStationW(name, FALSE, WINSTA_READATTRIBUTES);
+    if (!c->station) goto done;
+    acl = private_acl(c->sid, host_rights, guest_rights, 0);
+    if (!acl || !ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"S:(ML;;NW;;;LW)", SDDL_REVISION_1, &low, NULL) ||
+        !GetSecurityDescriptorSacl(low, &present, &label, &defaulted) || !present || !label ||
+        !InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION) ||
+        !SetSecurityDescriptorDacl(&descriptor, TRUE, acl, FALSE) ||
+        !SetSecurityDescriptorSacl(&descriptor, TRUE, label, FALSE) ||
+        !SetSecurityDescriptorControl(&descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED)) goto done;
+    c->desktop = CreateDesktopW(c->profile, NULL, NULL, 0, guest_rights, &attributes);
+    if (!c->desktop) goto done;
+    /* CreateDesktop can open an existing name. Reject any different descriptor,
+     * including inherited grants, rather than trusting that creation applied it. */
+    status = GetSecurityInfo(c->desktop, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
+        NULL, NULL, &actual_acl, &actual_label, &actual);
+    if (status != ERROR_SUCCESS) { SetLastError(status); goto done; }
+    if (!actual_acl || !actual_label || actual_acl->AclSize != acl->AclSize ||
+        actual_label->AclSize != label->AclSize || memcmp(actual_acl, acl, acl->AclSize) ||
+        memcmp(actual_label, label, label->AclSize)) { SetLastError(ERROR_ACCESS_DENIED); goto done; }
+    ok = 1;
+ done:
+    saved = GetLastError();
+    if (actual) LocalFree(actual);
+    if (low) LocalFree(low);
+    if (acl) LocalFree(acl);
+    free(name); SetLastError(saved); return ok;
+}
+
+static int close_desktop(Context *c) {
+    if (c->desktop) {
+        if (!CloseDesktop(c->desktop)) return 0;
+        c->desktop = NULL;
+    }
+    if (c->station) {
+        if (!CloseWindowStation(c->station)) return 0;
+        c->station = NULL;
+    }
+    return 1;
+}
+
 int visjail_windows_create(const char *directory, char *error, int error_cap) {
     Context *c = calloc(1, sizeof(*c));
     wchar_t name[80], *app = NULL, *work = NULL, *tmp = NULL;
@@ -369,6 +442,9 @@ int visjail_windows_create(const char *directory, char *error, int error_cap) {
         goto fail;
     }
     memcpy(c->profile, name, (wcslen(name) + 1) * sizeof(wchar_t));
+    operation = "Create private Windows desktop";
+    if (!private_desktop(c)) goto fail;
+    operation = "Create private Windows workspace";
     if (!permissions(handle, c->sid, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, 1)) goto fail;
     if (!pin_handle(&c->pins, handle)) { handle = INVALID_HANDLE_VALUE; goto fail; }
     handle = INVALID_HANDLE_VALUE;
@@ -385,6 +461,7 @@ fail:
     result = failure(error, error_cap, operation);
     if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
     if (c) {
+        close_desktop(c);
         unpin(c->pins); if (c->job) CloseHandle(c->job);
         if (c->profile[0]) {
             int cleanup = delete_profile(c->profile, error, error_cap);
@@ -913,6 +990,7 @@ int visjail_windows_destroy(int id) {
         if (closer) CloseHandle(closer);
         p->output = NULL; p->output_event = NULL; p->closer = NULL; p->context = 0;
     }
+    if (!close_desktop(c)) { result = -(int)GetLastError(); goto retry; }
     ReleaseSRWLockExclusive(&lock);
     unpin(c->pins); c->pins = NULL;
     if (c->job) { CloseHandle(c->job); c->job = NULL; }
@@ -1030,7 +1108,9 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     long parsed;
     HANDLE host_in = NULL, host_out = NULL, host_err = NULL;
     HANDLE child_in = NULL, child_out = NULL, child_err = NULL;
-    HANDLE inherit[3];
+    HANDLE inherit[5], station_inherit = NULL, desktop_inherit = NULL;
+    int inherit_count = 2;
+    DWORD attribute_count = pty ? 4 : 3;
     SIZE_T attribute_size = 0;
     STARTUPINFOEXW startup;
     PROCESS_INFORMATION info;
@@ -1127,12 +1207,15 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     }
     operation = "Configure Windows process security";
     startup.StartupInfo.cb = sizeof(startup);
+    /* NULL copies an explicit parent desktop name. An empty name lets Windows
+     * select the least-rights station and private desktop from inherited handles. */
+    startup.StartupInfo.lpDesktop = L"";
     /* NULL stdio lets ConPTY attach instead of duplicating redirected host pipes. */
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    InitializeProcThreadAttributeList(NULL, 3, 0, &attribute_size);
+    InitializeProcThreadAttributeList(NULL, attribute_count, 0, &attribute_size);
     startup.lpAttributeList = malloc(attribute_size);
     if (!startup.lpAttributeList) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto fail; }
-    if (!InitializeProcThreadAttributeList(startup.lpAttributeList, 3, 0, &attribute_size)) {
+    if (!InitializeProcThreadAttributeList(startup.lpAttributeList, attribute_count, 0, &attribute_size)) {
         free(startup.lpAttributeList); startup.lpAttributeList = NULL; goto fail;
     }
     registry_read.Sid = c->registry_read; registry_read.Attributes = SE_GROUP_ENABLED;
@@ -1142,23 +1225,30 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
             &capabilities, sizeof(capabilities), NULL, NULL) ||
         !UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
             &policy, sizeof(policy), NULL, NULL)) goto fail;
+    operation = "Pass private Windows desktop handles";
+    if (!DuplicateHandle(GetCurrentProcess(), c->station, GetCurrentProcess(), &station_inherit,
+            0, TRUE, DUPLICATE_SAME_ACCESS) ||
+        !DuplicateHandle(GetCurrentProcess(), c->desktop, GetCurrentProcess(), &desktop_inherit,
+            0, TRUE, DUPLICATE_SAME_ACCESS)) goto fail;
+    inherit[0] = station_inherit; inherit[1] = desktop_inherit;
     if (pty) {
         if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
             console, sizeof(console), NULL, NULL)) goto fail;
     } else {
-        inherit[0] = child_in; inherit[1] = child_out; inherit[2] = child_err ? child_err : child_out;
-        startup.StartupInfo.hStdInput = inherit[0]; startup.StartupInfo.hStdOutput = inherit[1];
-        startup.StartupInfo.hStdError = inherit[2];
-        if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            inherit, (child_err ? 3 : 2) * sizeof(HANDLE), NULL, NULL)) goto fail;
+        inherit[inherit_count++] = child_in; inherit[inherit_count++] = child_out;
+        if (child_err) inherit[inherit_count++] = child_err;
+        startup.StartupInfo.hStdInput = child_in; startup.StartupInfo.hStdOutput = child_out;
+        startup.StartupInfo.hStdError = child_err ? child_err : child_out;
     }
+    if (!UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inherit, (SIZE_T)inherit_count * sizeof(HANDLE), NULL, NULL)) goto fail;
     operation = "Create Windows process job";
     p = calloc(1, sizeof(*p));
     if (!p) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto fail; }
     p->job = new_job();
     if (!p->job || !(p->id = allocate_id())) goto fail;
     operation = "Create confined Windows process";
-    if (!CreateProcessW(args[0], line, NULL, NULL, !pty,
+    if (!CreateProcessW(args[0], line, NULL, NULL, TRUE,
         CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT |
             (pty ? 0 : CREATE_NO_WINDOW), block, directory, &startup.StartupInfo, &info)) goto fail;
     operation = "Assign Windows process jobs";
@@ -1189,6 +1279,8 @@ fail:
         else slot = &(*slot)->next;
     }
 done:
+    if (desktop_inherit) CloseDesktop((HDESK)desktop_inherit);
+    if (station_inherit) CloseWindowStation((HWINSTA)station_inherit);
     if (info.hThread) CloseHandle(info.hThread);
     if (info.hProcess) CloseHandle(info.hProcess);
     if (p) { if (p->job) CloseHandle(p->job); free(p); }

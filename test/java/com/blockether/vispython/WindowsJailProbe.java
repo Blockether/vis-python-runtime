@@ -38,12 +38,15 @@ public final class WindowsJailProbe {
   }
 
   private static void stage(String name, Checked action) throws Exception {
+    long started = System.nanoTime();
     System.out.println("START WindowsJail " + name);
     try { action.run(); } catch (Exception | AssertionError failed) {
       System.err.println("FAIL WindowsJail " + name);
       failed.printStackTrace(System.err);
       throw failed;
     }
+    System.out.println("DONE WindowsJail " + name + " in "
+        + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started) + " ms");
   }
 
   private static void denied(Checked action, String message) throws Exception {
@@ -72,7 +75,9 @@ public final class WindowsJailProbe {
     CompletableFuture<Void> sent = new CompletableFuture<>();
     Thread.ofPlatform().daemon().start(() -> {
       try (var stream = process.getOutputStream()) {
-        stream.write(input);
+        // A fast ConPTY guest may close its terminal before this writer runs.
+        // No input means no write; real input failures must still fail the probe.
+        if (input.length != 0) stream.write(input);
         sent.complete(null);
       } catch (Throwable failure) { sent.completeExceptionally(failure); }
     });
@@ -153,6 +158,8 @@ public final class WindowsJailProbe {
     try (WindowsJail jail = prepare(parent, guest)) {
       check(Files.isDirectory(jail.directory()), "private root exists");
       check(!jail.directory().equals(parent), "context creates a new root");
+      check(jail.directory().getFileName().toString().matches("visjail-[0-9a-f]{16}"),
+          "secure workspace names stay bounded for Windows local-socket paths");
       // CI 34876244765: the profile-expanded temporary path must exist before any spawn.
       try (var profiles = Files.list(jail.temporaryDirectory().resolve("Packages"))) {
         List<Path> paths = profiles.toList();
@@ -704,8 +711,55 @@ public final class WindowsJailProbe {
     }
   }
 
+  private static void desktopIsolation(Path parent, Path guest) throws Exception {
+    Result before = finish(new ProcessBuilder(guest.toString(), "desktop-state").start(), new byte[0]);
+    passed(before, "host UI identity and descriptors before jail launches");
+    String hostDesktop = field(before.out(), "DESKTOP");
+    String firstDesktop;
+    String secondDesktop;
+    Path invalid = Files.writeString(parent.resolve("desktop-invalid.exe"), "not a Windows executable");
+    try (WindowsJail first = prepare(parent, guest); WindowsJail second = prepare(parent, guest)) {
+      first.stage(invalid, "invalid.exe");
+      Result firstIdentity = run(first, "desktop-isolation");
+      Result secondIdentity = run(second, "desktop-isolation");
+      passed(firstIdentity, "first private desktop identity and rights");
+      passed(secondIdentity, "second private desktop identity and rights");
+      firstDesktop = field(firstIdentity.out(), "DESKTOP");
+      secondDesktop = field(secondIdentity.out(), "DESKTOP");
+      check(!firstDesktop.equals(secondDesktop), "contexts use distinct private desktops");
+      passed(finish(new ProcessBuilder(guest.toString(), "desktop-present", firstDesktop, secondDesktop).start(), new byte[0]),
+          "host can open both private desktops before context cleanup");
+      check(field(before.out(), "STATION").equals(field(firstIdentity.out(), "STATION"))
+          && field(before.out(), "STATION").equals(field(secondIdentity.out(), "STATION")),
+          "guests retain only the host station identity, not its desktop");
+      passed(run(first, "desktop-isolation", hostDesktop, secondDesktop), "pipe guest denies host and sibling desktops");
+      Process terminal = second.spawn(List.of(second.applicationDirectory().resolve("guest.exe").toString(),
+          "desktop-isolation", hostDesktop, firstDesktop), Map.of(), null, true, true, 31, 97);
+      passed(finish(terminal, new byte[0]), "ConPTY guest retains LPAC and private desktop isolation");
+      for (boolean pty : List.of(false, true)) {
+        denied(() -> first.spawn(List.of(first.applicationDirectory().resolve("invalid.exe").toString()),
+            Map.of(), null, pty, pty, pty ? 31 : 0, pty ? 97 : 0), "invalid image cannot launch");
+      }
+      passed(run(first, "descendant"), "private desktop preserves descendant confinement");
+    } finally { Files.deleteIfExists(invalid); }
+    passed(finish(new ProcessBuilder(guest.toString(), "desktop-absent", firstDesktop, secondDesktop).start(), new byte[0]),
+        "context close releases desktop handles from successful and failed launches");
+    Result after = finish(new ProcessBuilder(guest.toString(), "desktop-state").start(), new byte[0]);
+    passed(after, "host UI identity and descriptors after jail cleanup");
+    check(before.out().equals(after.out()), "host station, desktop and security descriptors remain unchanged");
+  }
+
+  private static void privateDesktopHost(Path parent, Path guest) throws Exception {
+    // A named station needs an elevated fixture creator, never an elevated jail host.
+    List<String> command = new ArrayList<>(List.of(guest.toString(), "desktop-host", "private",
+        guest.toString(), "standard-host"));
+    command.addAll(self("--desktop-child", parent, guest));
+    passed(finish(new ProcessBuilder(command).start(), new byte[0]), "private service desktop with an unprivileged jail host");
+  }
+
   private static void standardChild(Path parent, Path guest) throws Exception {
     passed(finish(new ProcessBuilder(guest.toString(), "standard-token").start(), new byte[0]), "standard host token");
+    desktopIsolation(parent, guest);
     try (WindowsJail jail = prepare(parent, guest)) {
       passed(run(jail, "token"), "standard user creates real LPAC jail");
     }
@@ -828,6 +882,13 @@ public final class WindowsJailProbe {
   }
 
   public static void main(String[] arguments) throws Exception {
+    if (arguments.length == 3 && arguments[0].equals("--desktop-child")) {
+      passed(finish(new ProcessBuilder(arguments[1], "standard-token").start(), new byte[0]),
+          "private service fixture runs without administrative privileges");
+      desktopIsolation(Path.of(arguments[2]), Path.of(arguments[1]));
+      System.out.println("PASS WindowsJail private desktop startup, isolation and cleanup");
+      return;
+    }
     if (arguments.length == 3 && arguments[0].equals("--staging-child")) {
       stagingStress(Path.of(arguments[2]), Path.of(arguments[1]));
       return;
@@ -898,6 +959,8 @@ public final class WindowsJailProbe {
             Path.of(Native.library().path())), "launcher uses the requested external runtime"));
       }
       stage("validation", () -> validation(parent, guest));
+      stage("desktop isolation", () -> desktopIsolation(parent, guest));
+      stage("private service desktop", () -> privateDesktopHost(parent, guest));
       stage("staging stress", () -> passed(
           finish(new ProcessBuilder(self("--staging-child", parent, guest)).start(), new byte[0]), "bounded staging stress"));
       stage("registry", () -> registry(parent, guest, true));

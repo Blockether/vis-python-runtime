@@ -1477,6 +1477,225 @@ done:
     return result;
 }
 
+/* Query only: these probes never change an existing UI object's descriptor or flags. */
+static int desktop_name(HANDLE object, wchar_t *name, DWORD bytes) {
+    DWORD needed = 0;
+    int ok = object && GetUserObjectInformationW(object, UOI_NAME, name, bytes, &needed);
+    check(ok, "query Windows UI object identity");
+    return ok;
+}
+
+static LPWSTR desktop_security(HANDLE object) {
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    LPWSTR text = NULL;
+    SECURITY_INFORMATION information = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+        DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+    DWORD status = GetSecurityInfo(object, SE_WINDOW_OBJECT, information, NULL, NULL, NULL, NULL, &descriptor);
+    check(status == ERROR_SUCCESS, "read host UI descriptor without changing it");
+    if (status == ERROR_SUCCESS) {
+        check(ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, SDDL_REVISION_1,
+              information, &text, NULL), "format host UI descriptor");
+    }
+    if (descriptor) LocalFree(descriptor);
+    return text;
+}
+
+static void desktop_descriptor(HANDLE object, const char *key) {
+    LPWSTR text = desktop_security(object);
+    if (text) { printf("%s=%ls\n", key, text); LocalFree(text); }
+}
+
+static void desktop_state(void) {
+    HWINSTA station = GetProcessWindowStation();
+    HDESK desktop = GetThreadDesktop(GetCurrentThreadId());
+    wchar_t name[256];
+    if (desktop_name(station, name, sizeof(name))) printf("STATION=%ls\n", name);
+    if (desktop_name(desktop, name, sizeof(name))) printf("DESKTOP=%ls\n", name);
+    desktop_descriptor(station, "STATION_SECURITY");
+    desktop_descriptor(desktop, "DESKTOP_SECURITY");
+}
+
+static void desktop_denied(const wchar_t *name, DWORD rights, const char *message) {
+    HDESK opened = OpenDesktopW(name, 0, FALSE, DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | rights);
+    DWORD error = GetLastError();
+    check(!opened && error == ERROR_ACCESS_DENIED, message);
+    if (opened) check(CloseDesktop(opened), "close unexpected desktop access");
+}
+
+static void desktop_isolation(int argc, wchar_t **argv) {
+    const DWORD forbidden_desktop[] = {WRITE_DAC, WRITE_OWNER, DELETE, DESKTOP_HOOKCONTROL,
+        DESKTOP_JOURNALRECORD, DESKTOP_JOURNALPLAYBACK, DESKTOP_SWITCHDESKTOP};
+    const DWORD forbidden_station[] = {WRITE_DAC, WRITE_OWNER, DELETE, WINSTA_ACCESSCLIPBOARD,
+        WINSTA_ACCESSGLOBALATOMS, WINSTA_CREATEDESKTOP, WINSTA_ENUMDESKTOPS,
+        WINSTA_EXITWINDOWS, WINSTA_READSCREEN, WINSTA_WRITEATTRIBUTES};
+    wchar_t station_name[256], name[256];
+    HANDLE token = NULL;
+    BYTE data[4096];
+    DWORD needed = 0;
+    PSID derived = NULL;
+    HDESK opened = NULL;
+    check(argc == 2 || argc == 4, "desktop isolation arguments");
+    if (failures) return;
+    token_check();
+    if (!desktop_name(GetProcessWindowStation(), station_name, sizeof(station_name)) ||
+        !desktop_name(GetThreadDesktop(GetCurrentThreadId()), name, sizeof(name))) return;
+    printf("STATION=%ls\nDESKTOP=%ls\n", station_name, name);
+    check(wcslen(name) == 40 && !wcsncmp(name, L"visjail.", 8), "guest uses a private Vis desktop");
+    check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "desktop guest token");
+    if (token) {
+        check(GetTokenInformation(token, TokenAppContainerSid, data, sizeof(data), &needed), "desktop package identity");
+        check(SUCCEEDED(DeriveAppContainerSidFromAppContainerName(name, &derived)) && derived,
+              "derive private desktop package identity");
+        if (!failures && derived) check(EqualSid(derived, ((TOKEN_APPCONTAINER_INFORMATION *)data)->TokenAppContainer),
+                                       "desktop name belongs to this exact package SID");
+        CloseHandle(token);
+    }
+    if (derived) FreeSid(derived);
+    opened = OpenDesktopW(name, 0, FALSE,
+        READ_CONTROL | DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS | DESKTOP_CREATEWINDOW);
+    check(opened != NULL, "guest can reopen its own desktop with only required rights");
+    if (opened) check(CloseDesktop(opened), "close guest desktop access control");
+    for (size_t i = 0; i < sizeof(forbidden_desktop) / sizeof(forbidden_desktop[0]); i++)
+        desktop_denied(name, forbidden_desktop[i], "guest cannot acquire excessive private-desktop rights");
+    for (size_t i = 0; i < sizeof(forbidden_station) / sizeof(forbidden_station[0]); i++) {
+        HWINSTA station = OpenWindowStationW(station_name, FALSE, forbidden_station[i]);
+        DWORD error = GetLastError();
+        check(!station && error == ERROR_ACCESS_DENIED, "guest cannot acquire host window-station rights");
+        if (station) check(CloseWindowStation(station), "close unexpected station access");
+    }
+    if (argc == 4) {
+        check(wcscmp(name, argv[2]) && wcscmp(name, argv[3]), "host and sibling names are distinct controls");
+        desktop_denied(argv[2], 0, "host desktop access denied");
+        desktop_denied(argv[3], 0, "sibling desktop access denied");
+    }
+}
+
+static void desktop_lifetime(const wchar_t *first, const wchar_t *second, int present) {
+    const wchar_t *names[] = {first, second};
+    /* A service host need not have WINSTA_ENUMDESKTOPS. Check only our own objects,
+     * with a successful-open control before cleanup so access denial cannot pass. */
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        HDESK desktop = OpenDesktopW(names[i], 0, FALSE, READ_CONTROL);
+        DWORD error = GetLastError();
+        if (present) check(desktop != NULL, "host can open its live private desktop");
+        else check(!desktop && error == ERROR_FILE_NOT_FOUND,
+                   "normal and failed launches leave no private desktop handles alive");
+        if (desktop) check(CloseDesktop(desktop), "close host desktop lifetime control");
+    }
+}
+
+/* Reproduce service-desktop startup without changing any existing host object's ACL.
+ * The LPAC fixture is a positive control on NEW disposable objects, not a jail policy. */
+static void desktop_host(int argc, wchar_t **argv) {
+    HANDLE token = NULL, job = NULL;
+    HWINSTA original = NULL, station = NULL;
+    HDESK desktop = NULL, original_desktop = NULL;
+    BYTE user[4096];
+    DWORD size = 0, code = 1;
+    LPWSTR sid = NULL, station_security = NULL, desktop_security_before = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    SECURITY_ATTRIBUTES attributes = {sizeof(attributes), NULL, FALSE};
+    STARTUPINFOW startup = {0};
+    PROCESS_INFORMATION process = {0};
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    wchar_t name[128], location[160], sddl[1024], *command = NULL;
+    BOOL switched = FALSE, started = FALSE;
+    check(argc > 3 && (!wcscmp(argv[2], L"private") || !wcscmp(argv[2], L"lpac")), "desktop host arguments");
+    if (failures) return;
+    check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "desktop fixture host token");
+    if (!token) goto done;
+    check(GetTokenInformation(token, TokenUser, user, sizeof(user), &size), "desktop fixture host identity");
+    if (failures) goto done;
+    check(ConvertSidToStringSidW(((TOKEN_USER *)user)->User.Sid, &sid), "desktop fixture identity string");
+    if (!sid) goto done;
+    swprintf_s(sddl, 1024, L"D:P(A;;GA;;;%ls)(A;;RC;;;OW)%lsS:(ML;;NW;;;LW)", sid,
+        !wcscmp(argv[2], L"lpac") ? L"(A;;GA;;;S-1-15-2-2)" : L"");
+    check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, NULL),
+          "private desktop fixture descriptor");
+    if (!descriptor) goto done;
+    attributes.lpSecurityDescriptor = descriptor;
+    original = GetProcessWindowStation();
+    check(original != NULL, "original host window station");
+    if (!original) goto done;
+    original_desktop = GetThreadDesktop(GetCurrentThreadId());
+    check(original_desktop != NULL, "original host thread desktop");
+    if (!original_desktop) goto done;
+    station_security = desktop_security(original);
+    desktop_security_before = desktop_security(original_desktop);
+    if (!station_security || !desktop_security_before) goto done;
+    swprintf_s(name, 128, L"visjail-test-%lu-%llu", GetCurrentProcessId(), GetTickCount64());
+    station = CreateWindowStationW(name, CWF_CREATE_ONLY, WINSTA_ALL_ACCESS, &attributes);
+    check(station != NULL, "create disposable test window station");
+    if (!station) goto done;
+    switched = SetProcessWindowStation(station);
+    check(switched, "select disposable test window station");
+    if (!switched) goto done;
+    desktop = CreateDesktopW(L"Default", NULL, NULL, 0, GENERIC_ALL, &attributes);
+    check(desktop != NULL, "create disposable test desktop");
+    if (SetProcessWindowStation(original)) switched = FALSE;
+    check(!switched, "restore original host window station");
+    if (failures) goto done;
+    swprintf_s(location, 160, L"%ls\\Default", name);
+    startup.cb = sizeof(startup);
+    startup.lpDesktop = location;
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    command = command_line(argc - 3, argv + 3);
+    check(command != NULL, "desktop host command allocation");
+    if (!command) goto done;
+    job = CreateJobObjectW(NULL, NULL);
+    check(job != NULL, "desktop host lifetime job");
+    if (!job) goto done;
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    check(SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)),
+          "desktop host kill-on-close");
+    if (failures) goto done;
+    started = CreateProcessW(argv[3], command, NULL, NULL, TRUE, CREATE_SUSPENDED,
+                             NULL, NULL, &startup, &process);
+    check(started, "launch host on disposable desktop");
+    if (!started) goto done;
+    check(AssignProcessToJobObject(job, process.hProcess), "own disposable desktop process tree");
+    if (failures) goto done;
+    check(ResumeThread(process.hThread) != (DWORD)-1, "start disposable desktop host");
+    if (failures) goto done;
+    check(WaitForSingleObject(process.hProcess, 120000) == WAIT_OBJECT_0, "desktop host watchdog");
+    if (failures) goto done;
+    check(GetExitCodeProcess(process.hProcess, &code), "desktop host exit status");
+    printf("DESKTOP_HOST_EXIT=%lu\n", code);
+    check(code == 0, "disposable desktop host succeeded");
+ done:
+    if (started && WaitForSingleObject(process.hProcess, 0) != WAIT_OBJECT_0) {
+        check(TerminateProcess(process.hProcess, 99) || WaitForSingleObject(process.hProcess, 0) == WAIT_OBJECT_0,
+              "terminate unfinished desktop host");
+        if (job) check(TerminateJobObject(job, 99), "terminate disposable desktop process tree");
+        check(WaitForSingleObject(process.hProcess, 5000) == WAIT_OBJECT_0, "desktop host cleanup watchdog");
+    }
+    if (job) CloseHandle(job);
+    if (process.hThread) CloseHandle(process.hThread);
+    if (process.hProcess) CloseHandle(process.hProcess);
+    if (switched) check(SetProcessWindowStation(original), "restore test station during cleanup");
+    if (desktop) check(CloseDesktop(desktop), "close disposable test desktop");
+    if (station) check(CloseWindowStation(station), "close disposable test station");
+    if (station_security && desktop_security_before) {
+        LPWSTR station_after = desktop_security(original);
+        LPWSTR desktop_after = desktop_security(original_desktop);
+        check(GetProcessWindowStation() == original && GetThreadDesktop(GetCurrentThreadId()) == original_desktop,
+              "fixture preserves original host station and thread desktop");
+        check(station_after && !wcscmp(station_security, station_after), "original host station descriptor unchanged");
+        check(desktop_after && !wcscmp(desktop_security_before, desktop_after), "original host desktop descriptor unchanged");
+        if (station_after) LocalFree(station_after);
+        if (desktop_after) LocalFree(desktop_after);
+    }
+    if (station_security) LocalFree(station_security);
+    if (desktop_security_before) LocalFree(desktop_security_before);
+    if (descriptor) LocalFree(descriptor);
+    if (sid) LocalFree(sid);
+    if (token) CloseHandle(token);
+    free(command);
+}
+
 int wmain(int argc, wchar_t **argv) {
     int i;
     if (argc < 2) return 2;
@@ -1485,6 +1704,11 @@ int wmain(int argc, wchar_t **argv) {
     else if (wcscmp(argv[1], L"junction") == 0 && argc == 4) junction(argv[2], argv[3]);
     else if (wcscmp(argv[1], L"leak-host") == 0) host_launch(argc, argv, 0);
     else if (wcscmp(argv[1], L"standard-host") == 0) host_launch(argc, argv, 1);
+    else if (wcscmp(argv[1], L"desktop-host") == 0) desktop_host(argc, argv);
+    else if (wcscmp(argv[1], L"desktop-state") == 0 && argc == 2) desktop_state();
+    else if (wcscmp(argv[1], L"desktop-isolation") == 0) desktop_isolation(argc, argv);
+    else if (wcscmp(argv[1], L"desktop-present") == 0 && argc == 4) desktop_lifetime(argv[2], argv[3], 1);
+    else if (wcscmp(argv[1], L"desktop-absent") == 0 && argc == 4) desktop_lifetime(argv[2], argv[3], 0);
     else if (wcscmp(argv[1], L"standard-token") == 0) standard_check();
     else if (wcscmp(argv[1], L"host-handle") == 0) handle_check(argc, argv, 1);
     else if (wcscmp(argv[1], L"secret-handle") == 0) handle_check(argc, argv, 0);

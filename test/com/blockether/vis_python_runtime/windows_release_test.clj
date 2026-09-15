@@ -75,6 +75,9 @@
   (let [script (slurp "scripts/test-windows.ps1")]
     (is (= 3 (count (re-seq #"-M:test:test-diagnostics" script)))
         "The OS jail, embedded native boundary and shared suites retain the watchdog")
+    ;; ClojureTools treats a splatted -M option as a clojure.main filename.
+    (is (re-find #"(?m)^\s*& clojure -M:test:test-diagnostics @testArguments\s*$" script)
+        "Pass the CLI alias directly and splat only test-runner arguments")
     (doseq [namespace ["com.blockether.vis-python-runtime.asyncio-test"
                        "com.blockether.vis-python-runtime.test-diagnostics-test"
                        "com.blockether.vis-python-runtime.windows-jail-test"]]
