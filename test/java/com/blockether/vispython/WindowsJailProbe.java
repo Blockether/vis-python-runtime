@@ -12,13 +12,14 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** Test-only main: run on the JVM and as a native-image FFM launcher, never ship in the jar. */
 public final class WindowsJailProbe {
   private static final int LIMIT = 2 * 1024 * 1024;
-  private static int checks;
+  private static final AtomicInteger checks = new AtomicInteger();
 
   private WindowsJailProbe() {}
 
@@ -27,11 +28,13 @@ public final class WindowsJailProbe {
     String err() { return new String(error, StandardCharsets.UTF_8).replace("\r\n", "\n"); }
   }
 
+  private enum TerminalClose { ACTIVE, REAPED, CONSUMER_CLOSED }
+
   @FunctionalInterface private interface Checked { void run() throws Exception; }
 
   private static void check(boolean condition, String message) {
     if (!condition) throw new AssertionError(message);
-    checks++;
+    checks.incrementAndGet();
   }
 
   private static void stage(String name, Checked action) throws Exception {
@@ -44,7 +47,7 @@ public final class WindowsJailProbe {
   }
 
   private static void denied(Checked action, String message) throws Exception {
-    try { action.run(); } catch (Exception expected) { checks++; return; }
+    try { action.run(); } catch (Exception expected) { checks.incrementAndGet(); return; }
     throw new AssertionError(message);
   }
 
@@ -84,7 +87,7 @@ public final class WindowsJailProbe {
         } catch (Exception | AssertionError captureFailure) { timeout.addSuppressed(captureFailure); }
         throw timeout;
       }
-      checks++;
+      checks.incrementAndGet();
       sent.get(5, TimeUnit.SECONDS);
       return new Result(process.exitValue(), out.get(5, TimeUnit.SECONDS), err.get(5, TimeUnit.SECONDS));
     } finally {
@@ -316,14 +319,14 @@ public final class WindowsJailProbe {
         server.setSoTimeout(200);
         try (var unexpected = server.accept()) {
           throw new AssertionError("network-off child reached host listener: " + unexpected.getRemoteSocketAddress());
-        } catch (java.net.SocketTimeoutException expected) { checks++; }
+        } catch (java.net.SocketTimeoutException expected) { checks.incrementAndGet(); }
       }
       for (var socket : List.of(udp4, udp6)) {
         socket.setSoTimeout(200);
         try {
           socket.receive(new java.net.DatagramPacket(new byte[64], 64));
           throw new AssertionError("network-off guest delivered UDP to host");
-        } catch (java.net.SocketTimeoutException expected) { checks++; }
+        } catch (java.net.SocketTimeoutException expected) { checks.incrementAndGet(); }
       }
     }
   }
@@ -346,7 +349,7 @@ public final class WindowsJailProbe {
   private static void gone(long pid) throws Exception {
     long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
     while (System.nanoTime() < deadline) {
-      if (ProcessHandle.of(pid).map(handle -> !handle.isAlive()).orElse(true)) { checks++; return; }
+      if (ProcessHandle.of(pid).map(handle -> !handle.isAlive()).orElse(true)) { checks.incrementAndGet(); return; }
       Thread.sleep(20);
     }
     throw new AssertionError("descendant survived job teardown: " + pid);
@@ -415,7 +418,8 @@ public final class WindowsJailProbe {
     return result;
   }
 
-  private static void terminalBackpressure(Path parent, Path guest, boolean reapFirst) throws Exception {
+  private static void terminalBackpressure(Path parent, Path guest, TerminalClose closeMode,
+      CountDownLatch closeReady) throws Exception {
     System.out.println("START WindowsJail ConPTY preparation");
     WindowsJail jail = prepare(parent, guest);
     System.out.println("START WindowsJail ConPTY flood spawn");
@@ -466,17 +470,30 @@ public final class WindowsJailProbe {
         try {
           write.get(100, TimeUnit.MILLISECONDS);
           throw new AssertionError("ConPTY oversized write must remain blocked before close");
-        } catch (java.util.concurrent.TimeoutException expected) { checks++; }
+        } catch (java.util.concurrent.TimeoutException expected) { checks.incrementAndGet(); }
       });
       check(!read.isDone(), "ConPTY consumer stays alive without draining at close");
       check(process.isAlive(), "flood guest remains active before context close");
       check(!write.isDone(), "ConPTY stdin is active under backpressure at close");
-      if (reapFirst) {
+      if (closeMode == TerminalClose.REAPED) {
         stage("ConPTY reaper before context close", () -> {
           process.destroyForcibly();
           check(process.waitFor(5, TimeUnit.SECONDS), "ConPTY reaper finishes with the consumer still paused");
         });
+      } else if (closeMode == TerminalClose.CONSUMER_CLOSED) {
+        stage("ConPTY logical close before context close", () -> {
+          Thread pump = Thread.getAllStackTraces().keySet().stream()
+              .filter(thread -> thread.getName().equals("visjail-pty-read-" + process.pid()))
+              .findFirst().orElseThrow(() -> new AssertionError("ConPTY native reader is missing"));
+          process.getInputStream().close();
+          pump.join(5000);
+          check(!pump.isAlive(), "ConPTY native reader completes logical master close before context close");
+        });
       }
+      stage("ConPTY simultaneous close readiness", () -> {
+        closeReady.countDown();
+        check(closeReady.await(10, TimeUnit.SECONDS), "all ConPTY contexts reach backpressure before close");
+      });
       stage("ConPTY context close", () -> background(jail::close).get(10, TimeUnit.SECONDS));
       stage("ConPTY process exit", () ->
           check(process.waitFor(5, TimeUnit.SECONDS), "ConPTY backpressure close kills process"));
@@ -815,10 +832,38 @@ public final class WindowsJailProbe {
       System.out.println("PASS WindowsJail ConPTY with redirected host handles");
       return;
     }
-    if (arguments.length == 3 && (arguments[0].equals("--terminal-child") || arguments[0].equals("--reaped-terminal-child"))) {
-      boolean reapFirst = arguments[0].equals("--reaped-terminal-child");
-      terminalBackpressure(Path.of(arguments[2]), Path.of(arguments[1]), reapFirst);
-      System.out.println("PASS WindowsJail " + (reapFirst ? "reaped" : "active") + " ConPTY close");
+    if (arguments.length == 3 && arguments[0].equals("--concurrent-terminal-child")) {
+      try (WindowsJail launching = prepare(Path.of(arguments[2]), Path.of(arguments[1]))) {
+        CountDownLatch closeReady = new CountDownLatch(2);
+        CompletableFuture<Void> first = background(() -> terminalBackpressure(
+            Path.of(arguments[2]), Path.of(arguments[1]), TerminalClose.ACTIVE, closeReady));
+        CompletableFuture<Void> second = background(() -> terminalBackpressure(
+            Path.of(arguments[2]), Path.of(arguments[1]), TerminalClose.ACTIVE, closeReady));
+        CompletableFuture<Void> launches = background(() -> {
+          check(closeReady.await(10, TimeUnit.SECONDS), "launch churn starts with concurrent context cleanup");
+          for (int attempt = 0; attempt < 8; attempt++) {
+            Process process = launching.spawn(
+                List.of(launching.applicationDirectory().resolve("guest.exe").toString(), "pty"),
+                Map.of(), null, true, true, 31, 97);
+            Result result = finish(process, "ping\r\n".getBytes(StandardCharsets.UTF_8));
+            passed(result, "concurrent launch retains finite ConPTY output and trailing PASS");
+            check(result.out().contains("PTY=31x97"), "concurrent launch retains terminal dimensions");
+          }
+        });
+        CompletableFuture.allOf(first, second, launches).get(20, TimeUnit.SECONDS);
+      }
+      System.out.println("PASS WindowsJail concurrent ConPTY close");
+      return;
+    }
+    if (arguments.length == 3 && (arguments[0].equals("--terminal-child") || arguments[0].equals("--reaped-terminal-child")
+        || arguments[0].equals("--closed-terminal-child"))) {
+      TerminalClose closeMode = switch (arguments[0]) {
+        case "--reaped-terminal-child" -> TerminalClose.REAPED;
+        case "--closed-terminal-child" -> TerminalClose.CONSUMER_CLOSED;
+        default -> TerminalClose.ACTIVE;
+      };
+      terminalBackpressure(Path.of(arguments[2]), Path.of(arguments[1]), closeMode, new CountDownLatch(1));
+      System.out.println("PASS WindowsJail " + closeMode + " ConPTY close");
       return;
     }
     if (arguments.length == 3 && arguments[0].equals("--inherited-child")) {
@@ -864,6 +909,10 @@ public final class WindowsJailProbe {
             finish(new ProcessBuilder(self("--terminal-child", parent, guest)).start(), new byte[0]), "bounded active ConPTY close"));
         stage("reaped ConPTY close " + (attempt + 1), () -> passed(
             finish(new ProcessBuilder(self("--reaped-terminal-child", parent, guest)).start(), new byte[0]), "bounded reaped ConPTY close"));
+        stage("consumer-closed ConPTY close " + (attempt + 1), () -> passed(
+            finish(new ProcessBuilder(self("--closed-terminal-child", parent, guest)).start(), new byte[0]), "bounded consumer-closed ConPTY close"));
+        stage("concurrent ConPTY close " + (attempt + 1), () -> passed(
+            finish(new ProcessBuilder(self("--concurrent-terminal-child", parent, guest)).start(), new byte[0]), "bounded concurrent ConPTY close"));
       }
       stage("parent crash", () -> parentCrash(parent, guest));
       stage("inherited handles and standard user", () -> restrictedHosts(parent, guest));

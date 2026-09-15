@@ -37,7 +37,7 @@ typedef struct Context {
     struct Context *next;
 } Context;
 typedef struct Stream {
-    int id, refs, closed;
+    int id, refs, closed, process;
     Context *context;
     HANDLE read, write, cancel;
     SRWLOCK reader;
@@ -47,8 +47,8 @@ typedef struct Stream {
     struct Stream *next;
 } Stream;
 typedef struct Process {
-    int id, context, reaped, waited;
-    HANDLE process, job, closer;
+    int id, context, reaped, waited, cleaning;
+    HANDLE process, job, closer, output, output_event;
     HPCON console;
     DWORD pid, code;
     struct Process *next;
@@ -541,6 +541,12 @@ done:
     free(app); ReleaseSRWLockExclusive(&lock); return result;
 }
 
+static Process *process_get(int id) {
+    Process *p;
+    for (p = processes; p; p = p->next) if (p->id == id) return p;
+    return NULL;
+}
+
 static Stream *stream_get(int id) {
     Stream *s;
     AcquireSRWLockExclusive(&lock);
@@ -548,27 +554,25 @@ static Stream *stream_get(int id) {
     ReleaseSRWLockExclusive(&lock); return s;
 }
 
-/* Caller owns the table lock; publish disposal only after the handles close. */
+/* Caller owns the table lock; no native reader remains when ownership moves. */
 static void stream_dispose(Stream *s) {
+    Process *p = s->process ? process_get(s->process) : NULL;
     if (s->pending) {
         DWORD ignored;
         CancelIoEx(s->read, &s->peek);
         GetOverlappedResult(s->read, &s->peek, &ignored, TRUE);
     }
-    if (s->read && s->write && s->read != s->write) {
-        /* Closing the terminal master explicitly breaks both client channels. */
-        DWORD read_error = DisconnectNamedPipe(s->read) ? ERROR_SUCCESS : GetLastError();
-        DWORD write_error = DisconnectNamedPipe(s->write) ? ERROR_SUCCESS : GetLastError();
-        fprintf(stderr, "Windows jail duplex %d: disconnect read=%lu write=%lu\n",
-            s->id, read_error, write_error); fflush(stderr);
+    /* A closed consumer no longer wants output. Keep its pipe connected so
+     * context teardown can drain ConPTY without depending on the Java pump. */
+    if (p && !s->eof && (p->console ||
+        (p->closer && WaitForSingleObject(p->closer, 0) != WAIT_OBJECT_0))) {
+        p->output = s->read; p->output_event = s->peek.hEvent;
+        s->read = NULL; s->peek.hEvent = NULL;
     }
-    BOOL read_closed = !s->read || CloseHandle(s->read);
-    BOOL write_closed = !s->write || s->write == s->read || CloseHandle(s->write);
-    CloseHandle(s->peek.hEvent); CloseHandle(s->cancel);
-    if (s->read && s->write && s->read != s->write) {
-        fprintf(stderr, "Windows jail duplex %d: read closed=%d write closed=%d live=%d\n",
-            s->id, (int)read_closed, (int)write_closed, s->context->live_streams); fflush(stderr);
-    }
+    if (s->read) CloseHandle(s->read);
+    if (s->write && s->write != s->read) CloseHandle(s->write);
+    if (s->peek.hEvent) CloseHandle(s->peek.hEvent);
+    CloseHandle(s->cancel);
     if (--s->context->live_streams == 0) WakeAllConditionVariable(&streams_closed);
     free(s);
 }
@@ -737,12 +741,6 @@ static int pipe_pair(HANDLE *host, HANDLE *child, int host_reads) {
     *host = server; *child = client; return 1;
 }
 
-static Process *process_get(int id) {
-    Process *p;
-    for (p = processes; p; p = p->next) if (p->id == id) return p;
-    return NULL;
-}
-
 int visjail_windows_pid(int id) {
     Process *p;
     int result;
@@ -773,10 +771,46 @@ int visjail_kill(int id, int signal_number) {
 }
 
 static DWORD close_console(void *console) {
-    fprintf(stderr, "Windows jail async console begin\n"); fflush(stderr);
     ClosePseudoConsole((HPCON)console);
-    fprintf(stderr, "Windows jail async console end\n"); fflush(stderr);
     return 0;
+}
+
+/* Drain only abandoned output, until EOF or the closer returns. Every submitted
+ * read completes before its stack storage is released, including error paths. */
+static int drain_console(HANDLE output, HANDLE event, HANDLE closer) {
+    unsigned char buffer[8192];
+    HANDLE waits[2] = {closer, event};
+    if (!output) return 0;
+    if (!event || !closer) return -ERROR_INVALID_HANDLE;
+    for (;;) {
+        OVERLAPPED read = {0};
+        DWORD count = 0, code, waited, wait_error, cancel_error = ERROR_SUCCESS;
+        waited = WaitForSingleObject(closer, 0);
+        if (waited == WAIT_OBJECT_0) return 0;
+        if (waited != WAIT_TIMEOUT) return -(int)GetLastError();
+        read.hEvent = event;
+        if (!ResetEvent(event)) return -(int)GetLastError();
+        if (ReadFile(output, buffer, sizeof(buffer), &count, &read)) {
+            if (!count) return 0;
+            continue;
+        }
+        code = GetLastError();
+        if (code == ERROR_BROKEN_PIPE || code == ERROR_PIPE_NOT_CONNECTED) return 0;
+        if (code != ERROR_IO_PENDING) return -(int)code;
+        waited = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+        wait_error = waited == WAIT_FAILED ? GetLastError() : ERROR_GEN_FAILURE;
+        if (waited != WAIT_OBJECT_0 + 1 && !CancelIoEx(output, &read)) {
+            cancel_error = GetLastError();
+            if (cancel_error == ERROR_NOT_FOUND) cancel_error = ERROR_SUCCESS;
+        }
+        code = GetOverlappedResult(output, &read, &count, TRUE) ? ERROR_SUCCESS : GetLastError();
+        if (waited != WAIT_OBJECT_0 && waited != WAIT_OBJECT_0 + 1) return -(int)wait_error;
+        if (cancel_error) return -(int)cancel_error;
+        if (waited == WAIT_OBJECT_0 && code == ERROR_OPERATION_ABORTED) return 0;
+        if (code == ERROR_BROKEN_PIPE || code == ERROR_PIPE_NOT_CONNECTED) return 0;
+        if (code) return -(int)code;
+        if (waited == WAIT_OBJECT_0 || !count) return 0;
+    }
 }
 
 int visjail_wait(int id, int nohang, int *exit_code) {
@@ -806,11 +840,12 @@ int visjail_wait(int id, int nohang, int *exit_code) {
     if (p && !p->reaped) {
         if (!finish_job(p->job)) result = -(int)GetLastError();
         else {
+            Context *c = context_get(p->context);
             p->reaped = 1; p->code = code;
             CloseHandle(p->process); p->process = NULL;
             CloseHandle(p->job); p->job = NULL;
             /* A closing context owns ConPTY teardown after its canceled IO drains. */
-            if (p->console && context_get(p->context)) {
+            if (p->console && c && !c->poisoned) {
                 /* Normal exit still flushes output to the independent reader. */
                 p->closer = CreateThread(NULL, 0, close_console, p->console, 0, NULL);
                 if (p->closer) p->console = NULL;
@@ -827,63 +862,72 @@ int visjail_windows_destroy(int id) {
     Process *p;
     Stream **sp;
     int result = -ERROR_INVALID_HANDLE;
-    fprintf(stderr, "Windows jail %d: table\n", id); fflush(stderr);
     AcquireSRWLockExclusive(&lock);
     for (slot = &contexts; *slot && (*slot)->id != id; slot = &(*slot)->next) {}
     c = *slot;
     if (!c) { ReleaseSRWLockExclusive(&lock); return result; }
+    c->poisoned = 1;
     if (c->job && !finish_job(c->job)) {
         result = -(int)GetLastError(); ReleaseSRWLockExclusive(&lock); return result;
     }
-    fprintf(stderr, "Windows jail %d: job finished live=%d\n", id, c->live_streams); fflush(stderr);
     *slot = c->next;
     for (sp = &streams; *sp;) {
         if ((*sp)->context == c) stream_close_locked(sp); else sp = &(*sp)->next;
     }
-    /* Logical close only cancels IO. ConPTY needs the physical output handle
-     * closed before teardown, including streams already removed by close(). */
-    fprintf(stderr, "Windows jail %d: stream barrier live=%d\n", id, c->live_streams); fflush(stderr);
-    while (c->live_streams) SleepConditionVariableSRW(&streams_closed, &lock, INFINITE, 0);
-    fprintf(stderr, "Windows jail %d: streams disposed\n", id); fflush(stderr);
+    /* Include independently closed streams with outstanding IO references.
+     * Their final release transfers terminal output only after IO quiesces. */
+    while (c->live_streams) {
+        if (!SleepConditionVariableSRW(&streams_closed, &lock, INFINITE, 0)) {
+            result = -(int)GetLastError(); goto retry;
+        }
+    }
     for (;;) {
-        HPCON console;
-        HANDLE closer;
+        HANDLE output, event, closer;
         for (p = processes; p && p->context != id; p = p->next) {}
         if (!p) break;
-        /* Preserve a handle-free exit record even when Java's reaper has not
-         * entered wait yet. A later wait consumes it; IDs are never recycled. */
+        /* Preserve an exit record even when Java's reaper has not entered wait. */
         if (!p->reaped) {
             if (!GetExitCodeProcess(p->process, &p->code)) p->code = 1;
             p->reaped = 1;
         }
-        p->context = 0;
-        console = p->console; closer = p->closer;
-        p->console = NULL; p->closer = NULL;
         if (p->process) { CloseHandle(p->process); p->process = NULL; }
         if (p->job) { CloseHandle(p->job); p->job = NULL; }
+        if (p->console) {
+            p->closer = CreateThread(NULL, 0, close_console, p->console, 0, NULL);
+            if (!p->closer) { result = -(int)GetLastError(); goto retry; }
+            p->console = NULL;
+        }
+        /* Another context may launch and reclaim records while this lock is
+         * released. Keep both the record and its handles owned until success. */
+        p->cleaning = 1;
+        output = p->output; event = p->output_event; closer = p->closer;
         ReleaseSRWLockExclusive(&lock);
-        /* Console teardown never holds the global handle-table lock. */
-        fprintf(stderr, "Windows jail %d: direct console=%d\n", id, console != NULL); fflush(stderr);
-        if (console) ClosePseudoConsole(console);
-        fprintf(stderr, "Windows jail %d: async closer=%d\n", id, closer != NULL); fflush(stderr);
-        if (closer) { WaitForSingleObject(closer, INFINITE); CloseHandle(closer); }
+        result = drain_console(output, event, closer);
+        if (!result && closer && WaitForSingleObject(closer, INFINITE) != WAIT_OBJECT_0)
+            result = -(int)GetLastError();
         AcquireSRWLockExclusive(&lock);
+        p->cleaning = 0;
+        if (result) goto retry;
+        if (output) CloseHandle(output);
+        if (event) CloseHandle(event);
+        if (closer) CloseHandle(closer);
+        p->output = NULL; p->output_event = NULL; p->closer = NULL; p->context = 0;
     }
     ReleaseSRWLockExclusive(&lock);
-    fprintf(stderr, "Windows jail %d: pins\n", id); fflush(stderr);
     unpin(c->pins); c->pins = NULL;
     if (c->job) { CloseHandle(c->job); c->job = NULL; }
-    fprintf(stderr, "Windows jail %d: profile\n", id); fflush(stderr);
     result = delete_profile(c->profile, NULL, 0);
-    fprintf(stderr, "Windows jail %d: profile returned=%d\n", id, result); fflush(stderr);
     if (result) {
-        /* Retain only cleanup state so close can retry without permitting launches. */
-        c->poisoned = 1;
-        AcquireSRWLockExclusive(&lock); c->next = contexts; contexts = c;
-        ReleaseSRWLockExclusive(&lock); return result;
+        AcquireSRWLockExclusive(&lock);
+        goto retry;
     }
     FreeSid(c->sid); LocalFree(c->registry_read); free(c->path); free(c);
     return 0;
+retry:
+    /* A failed close keeps cleanup ownership but never permits another launch. */
+    c->next = contexts; contexts = c;
+    ReleaseSRWLockExclusive(&lock);
+    return result;
 }
 
 static wchar_t **decode_blob(const char *blob, int length, int *count) {
@@ -1065,7 +1109,8 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     /* Reclaim completed records/closer thread handles before another launch. */
     for (Process **slot = &processes; *slot;) {
         Process *old = *slot;
-        if (old->reaped && old->waited && !old->console && (!old->closer || WaitForSingleObject(old->closer, 0) == WAIT_OBJECT_0)) {
+        if (old->reaped && old->waited && !old->cleaning && !old->output && !old->console &&
+            (!old->closer || WaitForSingleObject(old->closer, 0) == WAIT_OBJECT_0)) {
             *slot = old->next; if (old->closer) CloseHandle(old->closer); free(old);
         } else slot = &old->next;
     }
@@ -1130,6 +1175,7 @@ int visjail_spawn(const char *argv_blob, int argv_len, const char *env_blob, int
     if (ResumeThread(info.hThread) == (DWORD)-1) goto fail;
     p->process = info.hProcess; p->pid = info.dwProcessId; p->context = c->id; p->console = console;
     p->next = processes; processes = p;
+    if (pty) input->process = p->id;
     result[0] = p->id; result[1] = input->id; result[2] = pty ? input->id : output->id;
     result[3] = pty ? input->id : errstream ? errstream->id : -1;
     info.hProcess = NULL; console = NULL; p = NULL;

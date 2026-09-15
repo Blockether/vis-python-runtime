@@ -452,3 +452,26 @@ already-held debug privilege only in its own test process; unavailable access is
 reported, never treated as verification. Its three-second watchdog and forced
 cleanup do not change the test's success deadlines or outer watchdog. Production
 teardown, isolation and release status are unchanged while this wait is diagnosed.
+
+Run 34928490534 again passes JVM 281 and fails the first native-image active
+close. Its bounded wait-chain helper succeeds: the closing thread waits for
+`conhost.exe`, whose blocked threads depend on another blocked critical-section
+owner. The final owner wait is unsupported by WCT; this does not identify a
+particular IO call. The next implementation uses Microsoft's alternative teardown
+contract: keep draining terminal output until the console closer returns.
+
+After logical close and the last native IO reference, abandoned terminal output
+and its event move to the non-recycled process record. Context close kills the
+job, quiesces all streams, starts or reuses the console closer, and drains with a
+fixed 8KiB buffer independently of Java. It also watches the closer so it does
+not wait for an additional EOF after close completes. Normal open-stream output
+is never discard-drained. Record reclamation excludes owned output and active
+cleanup; errors preserve a poisoned, retryable context and its native handles.
+The failed disconnect experiment and all production debug prints are removed.
+The suite retains the existing active/reaped cases and adds four prior-logical-
+close and four simultaneous-context children per launcher. A reader-thread join
+proves prior logical close; shared check counts are now atomic. Confinement,
+backpressure thresholds and success watchdogs are unchanged. Windows execution
+of this implementation and publication remain pending. Concurrent children also
+launch eight finite-output terminals in a third context, retaining their final
+`PASS` marker while exercising record reclamation during the other closes.
