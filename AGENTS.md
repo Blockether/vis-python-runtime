@@ -11,8 +11,11 @@ caused by the change and report any remaining blockers. Documentation changes ne
 checks, not a native rebuild. Runtime changes need affected tests; JVM and native-image results are
 separate verdicts. Do not report a build as verified runtime behavior.
 
-Commit, push, publish or mutate external systems only when requested. Confirm destructive actions
-and history rewrites; do not restart a consumer's running gateway as an incidental test step.
+Commit, push, publish or mutate external systems only when requested. A consumer task authorized
+end to end (an issue fix in Vis, for example) also authorizes this repository's part of it: decide
+the commit, push, consumer pin bump and, when native libraries change, the release yourself, then
+report them. Confirm destructive actions and history rewrites; do not restart a consumer's running
+gateway as an incidental test step.
 Use the configured human git identity, never `root`. Commit subjects use `type(scope): summary`
 under 72 characters and a `Vis-Session: <bare-uuid>` trailer. Never bypass hooks.
 No profanity, private deployment details or credentials in tracked content or commit messages.

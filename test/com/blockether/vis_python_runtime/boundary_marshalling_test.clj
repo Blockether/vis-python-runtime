@@ -83,6 +83,28 @@
               "except KeyError as exc:\n    assert '(none)' in str(exc)\n"
               "else:\n    raise AssertionError('empty record accepted a field')\n"
               "print('missing fields explained')")))))
+    ;; Regression Blockether/vis#259: a guessed attribute is explained like a guessed key.
+    (testing "unknown attributes report available fields and keep getattr fallbacks"
+      (is
+        (=
+          "missing attributes explained"
+          (ran
+            session
+            (str
+              "for name in ('methods', '__dict__'):\n"
+              "    try:\n        getattr(item, name)\n" "    except AttributeError as exc:\n"
+              "        assert name in str(exc) and 'BuildStatus' in str(exc)\n"
+              "        assert all(field in str(exc) for field in ('state', 'items', 'keys', 'values', 'get'))\n"
+              "    else:\n        raise AssertionError('unknown attribute accepted')\n"
+              "assert not hasattr(item, 'methods')\n"
+              "assert getattr(item, 'methods', 'fallback') == 'fallback'\n"
+              "try:\n    item.items[0].missing\n"
+              "except AttributeError as exc:\n    assert 'Job has no field' in str(exc) and 'number' in str(exc)\n"
+              "else:\n    raise AssertionError('nested record accepted an attribute')\n"
+              "try:\n    empty.missing\n"
+              "except AttributeError as exc:\n    assert '(none)' in str(exc)\n"
+              "else:\n    raise AssertionError('empty record accepted an attribute')\n"
+              "print('missing attributes explained')")))))
     (testing "non-string indices and both assignment forms remain unsupported"
       (is (= "records frozen"
              (ran session

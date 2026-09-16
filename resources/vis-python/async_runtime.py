@@ -863,20 +863,32 @@ def __vis_typed_result__(__vis_d__):
             if type(__vis_attrs__[__vis_sequence_field__]) not in (list, tuple):
                 raise TypeError("sequence field must contain a list or tuple")
 
+        def __vis_missing_field__(self, name):
+            return (
+                f"{type(self).__name__} has no field {name!r}; "
+                f"available fields: {', '.join(__vis_fields__) or '(none)'}"
+            )
+
         def __vis_getitem__(self, key):
             if not isinstance(key, str):
                 if __vis_sequence_field__ is not None:
                     return getattr(self, __vis_sequence_field__)[key]
                 raise TypeError(f"{type(self).__name__} field name must be a string")
             if key not in __vis_fields__:
-                raise KeyError(
-                    f"{type(self).__name__} has no field {key!r}; "
-                    f"available fields: {', '.join(__vis_fields__) or '(none)'}"
-                )
+                raise KeyError(__vis_missing_field__(self, key))
             return getattr(self, key)
 
+        def __vis_getattr__(self, name):
+            # Reached only after normal lookup fails: name the real fields, as
+            # `__getitem__` does, so a guessed attribute corrects itself.
+            raise AttributeError(__vis_missing_field__(self, name))
+
         # Explicitly disable Python's integer-subscription iteration fallback.
-        __vis_namespace__ = {"__getitem__": __vis_getitem__, "__iter__": None}
+        __vis_namespace__ = {
+            "__getitem__": __vis_getitem__,
+            "__getattr__": __vis_getattr__,
+            "__iter__": None,
+        }
         if __vis_sequence_field__ is not None:
 
             def __vis_iter__(self):
