@@ -850,9 +850,23 @@ def __vis_typed_result__(__vis_d__):
             for __k__, __v__ in __vis_d__["__vis_attrs__"].items()
         }
         __vis_fields__ = tuple(__vis_attrs__)
+        __vis_sequence_field__ = None
+        if "__vis_sequence_field__" in __vis_d__:
+            __vis_sequence_field__ = __vis_d__["__vis_sequence_field__"]
+            if (
+                not isinstance(__vis_sequence_field__, str)
+                or not __vis_sequence_field__.isidentifier()
+                or __vis_sequence_field__.startswith("_")
+                or __vis_sequence_field__ not in __vis_attrs__
+            ):
+                raise ValueError("sequence field must name a public serialized field")
+            if type(__vis_attrs__[__vis_sequence_field__]) not in (list, tuple):
+                raise TypeError("sequence field must contain a list or tuple")
 
         def __vis_getitem__(self, key):
             if not isinstance(key, str):
+                if __vis_sequence_field__ is not None:
+                    return getattr(self, __vis_sequence_field__)[key]
                 raise TypeError(f"{type(self).__name__} field name must be a string")
             if key not in __vis_fields__:
                 raise KeyError(
@@ -861,10 +875,22 @@ def __vis_typed_result__(__vis_d__):
                 )
             return getattr(self, key)
 
+        # Explicitly disable Python's integer-subscription iteration fallback.
+        __vis_namespace__ = {"__getitem__": __vis_getitem__, "__iter__": None}
+        if __vis_sequence_field__ is not None:
+
+            def __vis_iter__(self):
+                return iter(getattr(self, __vis_sequence_field__))
+
+            def __vis_len__(self):
+                return len(getattr(self, __vis_sequence_field__))
+
+            __vis_namespace__.update(__iter__=__vis_iter__, __len__=__vis_len__)
+
         __vis_cls__ = __vis_dataclasses__.make_dataclass(
             __vis_d__["__vis_object__"],
             [(name, object) for name in __vis_attrs__],
-            namespace={"__getitem__": __vis_getitem__},
+            namespace=__vis_namespace__,
             frozen=True,
             slots=True,
         )

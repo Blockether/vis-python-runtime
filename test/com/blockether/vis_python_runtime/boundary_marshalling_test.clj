@@ -98,6 +98,82 @@
                        "assert item['state'] == 'ready' and item['items'][0]['number'] == 42\n"
                        "print('records frozen')")))))))
 
+;; Regression Blockether/vis#256: only an explicit public list field grants sequence behavior.
+(harness/defbuilt-test
+  generated-record-sequence-test
+  (let [page
+        {"__vis_object__" "Page" "__vis_attrs__" {"title" "First"}}
+
+        envelope
+        {"__vis_object__" "PageList"
+         "__vis_sequence_field__" "results"
+         "__vis_attrs__" {"results" [page page] "total" 20}}
+
+        session
+        (harness/tool-session {"ledger.pages" (fn [[empty?]]
+                                                (cond-> envelope
+                                                  empty?
+                                                  (assoc-in ["__vis_attrs__" "results"] [])))
+                               "ledger.plain" (fn [_]
+                                                (dissoc envelope "__vis_sequence_field__"))
+                               "ledger.invalid" (fn [[field value]]
+                                                  (-> envelope
+                                                      (assoc "__vis_sequence_field__" field)
+                                                      (assoc-in ["__vis_attrs__" "results"]
+                                                                value)))})]
+
+    (is
+      (= "sequence behavior verified"
+         (ran session
+              (str "import dataclasses\n" "r = await ledger.pages(False)\n"
+                   "assert [p.title for p in r] == ['First', 'First']\n"
+                   "assert len(r) == 2 and r.total == 20 and bool(r)\n"
+                   "assert r[0] is r.results[0] and r[-1] is r.results[-1]\n"
+                   "assert r[:] == r.results and r[::-1] == r.results[::-1]\n"
+                   "assert r['results'] is r.results and r['total'] == 20\n"
+                   "assert next(iter(r))['title'] == 'First'\n"
+                   "assert dataclasses.is_dataclass(r[0])\n"
+                   "assert not hasattr(r, '__dict__') and not hasattr(r, 'append')\n"
+                   "for key in (2, -3):\n" "    try:\n        r[key]\n"
+                   "    except IndexError:\n        pass\n"
+                   "    else:\n        raise AssertionError('out of bounds accepted')\n"
+                   "for key in (None, 1.5, [], {}):\n" "    try:\n        r[key]\n"
+                   "    except TypeError:\n        pass\n"
+                   "    else:\n        raise AssertionError('invalid index accepted')\n"
+                   "try:\n    r['missing']\n"
+                   "except KeyError as exc:\n    assert 'available fields' in str(exc)\n"
+                   "else:\n    raise AssertionError('unknown field accepted')\n"
+                   "try:\n    r.results = []\n"
+                   "except dataclasses.FrozenInstanceError:\n    pass\n"
+                   "else:\n    raise AssertionError('field assignment accepted')\n"
+                   "try:\n    r[0] = None\n" "except TypeError:\n    pass\n"
+                   "else:\n    raise AssertionError('item assignment accepted')\n"
+                   "empty = await ledger.pages(True)\n"
+                   "assert not empty and len(empty) == 0 and list(empty) == []\n"
+                   "print('sequence behavior verified')"))))
+    (is (= "plain record stays field-only"
+           (ran session
+                (str
+                  "plain = await ledger.plain()\n" "assert plain['results'][0].title == 'First'\n"
+                  "for operation in (lambda: iter(plain), lambda: len(plain), lambda: plain[0]):\n"
+                  "    try:\n        operation()\n"
+                  "    except TypeError:\n        pass\n"
+                  "    else:\n        raise AssertionError('implicit sequence behavior')\n"
+                  "try:\n    list(plain)\n"
+                  "except TypeError as exc:\n    assert 'not iterable' in str(exc)\n"
+                  "else:\n    raise AssertionError('legacy iteration fallback')\n"
+                  "print('plain record stays field-only')"))))
+    (is (= "invalid declarations refused"
+           (ran session
+                (str
+                  "for field, value in [(None, []), (0, []), ('missing', []), ('_private', []), "
+                  "('results', None), ('results', {}), ('results', 'abc')]:\n"
+                  "    try:\n        await ledger.invalid(field, value)\n"
+                  "    except (TypeError, ValueError) as exc:\n"
+                  "        assert 'sequence' in str(exc).lower()\n"
+                  "    else:\n        raise AssertionError('invalid sequence metadata accepted')\n"
+                  "print('invalid declarations refused')"))))))
+
 (harness/defbuilt-test
   pyify-container-preservation-test
   (let [session (harness/block-session)]
