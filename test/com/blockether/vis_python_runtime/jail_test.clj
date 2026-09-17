@@ -116,6 +116,11 @@
            (is (str/includes?
                  (compile {:deny-read ["~/.does-not-exist"]})
                  (str "(subpath \"" (System/getProperty "user.home") "/.does-not-exist\")"))))
+         (testing "a glob deny rule compiles to a regex, so a file created later is denied"
+           (let [p (compile {:deny-read [(str root "/**/.env") (str root "/keys")]})]
+             (is (str/includes? p "(deny file-read*(regex #\"^"))
+             (is (str/includes? p "/.*/\\.env($|/)\")"))
+             (is (str/includes? p (str "(subpath \"" root "/keys\")")))))
          (testing "ancestors of a granted root are metadata literals, never subpaths"
            ;; The temp dir itself is always granted, so grant a nested child and
            ;; look at ITS parent.
@@ -194,6 +199,9 @@
 
              (is (some #{["--tmpfs" dir]} (partition 2 1 args)))
              (is (some #{["--ro-bind-try" "/dev/null" file]} (partition 3 1 args)))))
+         (testing "a glob deny rule has no mount point, so bubblewrap skips it"
+           (let [args (compile {:deny-read [(str root "/**/.env")]})]
+             (is (not (some #(str/includes? % "**") args)))))
          (finally (delete-tree root)))))
 
 (deftest native-bridge-does-not-interpret-policy-arguments-test
@@ -250,6 +258,29 @@
              (is (.waitFor p 5 TimeUnit/SECONDS))
              (is (not (.isAlive p)))))
          (finally (when (.exists outside) (io/delete-file outside true)) (delete-tree root)))))
+
+(deftest seatbelt-enforces-a-pattern-deny-test
+  ;; Vis #263: a deny rule may be a pattern. Enumerating its matches when the policy is
+  ;; built would miss every file that appears afterwards, so the pattern itself compiles
+  ;; into the profile.
+  (when (str/includes? (str/lower-case (System/getProperty "os.name")) "mac")
+    (let [root
+          (temp-dir)
+
+          nested
+          (Files/createDirectories (.resolve root "service") (make-array FileAttribute 0))
+
+          secret
+          (str nested "/.env")]
+
+      (try (spit secret "hidden-token")
+           (let [result (run-process ["/bin/sh" "-c" (str "cat " secret)]
+                                     (options root
+                                              {:policy {:read-write [(str root)]
+                                                        :deny-read [(str root "/**/.env")]}}))]
+             (is (not= 0 (:exit result)))
+             (is (not (str/includes? (:out result) "hidden-token"))))
+           (finally (delete-tree root))))))
 
 (deftest filtered-egress-crosses-only-the-native-loopback-bridge-test
   (let [root

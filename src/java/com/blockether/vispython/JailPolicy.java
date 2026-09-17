@@ -21,6 +21,11 @@ import java.util.Set;
  * reachable on every interface; loopback listeners are always allowed.
  * {@code keychain} opens the OS credential store: the Security services and
  * keychain databases on macOS, the D-Bus session bus on Linux.
+ *
+ * <p>A deny entry may be a glob pattern ({@code *} inside a segment, {@code **} across
+ * directories, {@code ?}, {@code [] } and {@code {}}). Seatbelt enforces a pattern as
+ * written, so files that appear later are denied too; bubblewrap mounts paths and skips
+ * what it cannot express, so a policy that must hold on Linux also names exact paths.
  */
 public record JailPolicy(List<String> readWrite, List<String> readOnly, List<String> denyRead,
     List<String> denyWrite, List<String> denyExec, List<String> unixConnect, Egress egress,
@@ -144,6 +149,12 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
   /** Real paths only; a deny target that does not exist keeps its expanded spelling. */
   record Resolved(List<String> readWrite, List<String> readOnly, List<String> denyRead,
       List<String> denyWrite, List<String> denyExec) {}
+
+  /** True when a deny entry is a PATTERN rather than one path. */
+  static boolean isPattern(String value) {
+    return value.indexOf('*') >= 0 || value.indexOf('?') >= 0 || value.indexOf('[') >= 0
+        || value.indexOf('{') >= 0;
+  }
 
   static boolean isDirectory(String path) {
     return Files.isDirectory(Path.of(path));

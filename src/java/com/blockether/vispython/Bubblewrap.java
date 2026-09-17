@@ -46,6 +46,21 @@ public final class Bubblewrap {
     return policy.inbound().isEmpty() ? 0 : policy.inbound().get(0);
   }
 
+  /**
+   * The entries bubblewrap can mount: it binds paths, and a glob deny rule names none.
+   * Seatbelt enforces those patterns as written; here they are skipped rather than bound
+   * at their literal spelling.
+   */
+  private static List<String> bindable(List<String> entries) {
+    List<String> paths = new ArrayList<>();
+    for (String entry : entries) {
+      if (!JailPolicy.isPattern(entry)) {
+        paths.add(entry);
+      }
+    }
+    return paths;
+  }
+
   public static List<String> compile(JailPolicy policy) {
     JailPolicy.Resolved resolved = policy.resolve();
     List<String> args = new ArrayList<>(List.of("--die-with-parent", "--proc", "/proc", "--dev", "/dev"));
@@ -59,10 +74,10 @@ public final class Bubblewrap {
     for (String path : resolved.readWrite()) {
       bind(args, "--bind-try", path, path);
     }
-    for (String path : resolved.denyWrite()) {
+    for (String path : bindable(resolved.denyWrite())) {
       bind(args, "--ro-bind-try", path, path);
     }
-    for (String path : resolved.denyRead()) {
+    for (String path : bindable(resolved.denyRead())) {
       if (JailPolicy.isDirectory(path)) {
         args.add("--tmpfs");
         args.add(path);
@@ -73,7 +88,7 @@ public final class Bubblewrap {
     // A denied binary is masked with a character device so execve fails, at its own path
     // and at every existing bin-dir alias of its name, since merged-usr mounts both.
     Set<String> masked = new LinkedHashSet<>();
-    for (String path : resolved.denyExec()) {
+    for (String path : bindable(resolved.denyExec())) {
       String name = Path.of(path).getFileName().toString();
       masked.add(path);
       for (String dir : BIN_DIRS) {

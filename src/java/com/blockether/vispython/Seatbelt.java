@@ -23,6 +23,8 @@ public final class Seatbelt {
   // The JDK canonicalizes entropy-device paths before opening the allowed device files.
   private static final List<String> METADATA_DIRS = List.of("/", "/Users", "/Volumes", "/private",
       "/opt", "/etc", "/var", "/tmp", "/home", "/dev");
+  /** Characters a path may contain that a regex would otherwise read as syntax. */
+  private static final String REGEX_METACHARACTERS = "\\.+^$|()";
 
   private Seatbelt() {}
 
@@ -34,6 +36,70 @@ public final class Seatbelt {
     StringBuilder out = new StringBuilder();
     for (String path : paths) {
       out.append("(subpath ").append(quote(path)).append(')');
+    }
+    return out.toString();
+  }
+
+  /** What a deny glob becomes: an SBPL regex literal, whose text is the regex itself. */
+  private static String regexLiteral(String regex) {
+    return "#\"" + regex.replace("\"", "\\\"") + "\"";
+  }
+
+  /**
+   * A deny glob as an anchored regex over absolute paths: {@code *} matches inside one path
+   * segment, {@code **} crosses directories, and a match closes the subtree below it. A
+   * pattern keeps denying files that appear after the profile was compiled, which an
+   * enumerated list of paths cannot do.
+   */
+  static String globRegex(String glob) {
+    StringBuilder out = new StringBuilder("^");
+    int braces = 0;
+    for (int i = 0; i < glob.length(); i++) {
+      char c = glob.charAt(i);
+      if (c == '*') {
+        boolean crossing = i + 1 < glob.length() && glob.charAt(i + 1) == '*';
+        out.append(crossing ? ".*" : "[^/]*");
+        i += crossing ? 1 : 0;
+      } else if (c == '?') {
+        out.append("[^/]");
+      } else if (c == '[') {
+        int close = glob.indexOf(']', i + 1);
+        if (close < 0) {
+          out.append("\\[");
+        } else {
+          String body = glob.substring(i + 1, close);
+          out.append('[').append(body.startsWith("!") ? "^" + body.substring(1) : body).append(']');
+          i = close;
+        }
+      } else if (c == '{') {
+        braces++;
+        out.append('(');
+      } else if (c == '}' && braces > 0) {
+        braces--;
+        out.append(')');
+      } else if (c == ',' && braces > 0) {
+        out.append('|');
+      } else if (REGEX_METACHARACTERS.indexOf(c) >= 0) {
+        out.append('\\').append(c);
+      } else {
+        out.append(c);
+      }
+    }
+    return out.append("($|/)").toString();
+  }
+
+  /**
+   * One deny list as SBPL filters: an exact path closes its own subtree, a glob pattern
+   * becomes the equivalent regex, so a matching file created later is denied as well.
+   */
+  private static String denyTargets(Iterable<String> paths) {
+    StringBuilder out = new StringBuilder();
+    for (String path : paths) {
+      if (JailPolicy.isPattern(path)) {
+        out.append("(regex ").append(regexLiteral(globRegex(path))).append(')');
+      } else {
+        out.append("(subpath ").append(quote(path)).append(')');
+      }
     }
     return out.toString();
   }
@@ -102,14 +168,14 @@ public final class Seatbelt {
         .append("(literal \"/dev/null\")(literal \"/dev/tty\")(literal \"/dev/stdout\")")
         .append("(literal \"/dev/stderr\")").append(subpaths(resolved.readWrite())).append(')');
     if (!resolved.denyWrite().isEmpty()) {
-      out.append("(deny file-write*").append(subpaths(resolved.denyWrite())).append(')');
+      out.append("(deny file-write*").append(denyTargets(resolved.denyWrite())).append(')');
     }
     if (!resolved.denyRead().isEmpty()) {
-      out.append("(deny file-read*").append(subpaths(resolved.denyRead())).append(')');
+      out.append("(deny file-read*").append(denyTargets(resolved.denyRead())).append(')');
     }
     // A file-read deny does not stop exec of a signed binary; only process-exec* does.
     if (!resolved.denyExec().isEmpty()) {
-      out.append("(deny process-exec*").append(subpaths(resolved.denyExec())).append(')');
+      out.append("(deny process-exec*").append(denyTargets(resolved.denyExec())).append(')');
     }
     out.append(network(policy));
     List<String> sockets = JailPolicy.realPaths(policy.unixConnect());
