@@ -458,6 +458,16 @@ class __VisShellLogs__:
         # the string operation models naturally try while retaining `logs(...)` paging.
         return self()["out"].splitlines(keepends)
 
+    def __getattr__(self, __vis_name__):
+        # The read-only string methods a log PAGE answers, on the reader itself:
+        # `sh.logs.find("error")` reads the current complete log, the way
+        # `sh.logs.splitlines()` above already does.
+        if __vis_name__ in __VisShell__.__vis_log_text_reads__:
+            return getattr(self()["out"], __vis_name__)
+        raise AttributeError(
+            "'%s' object has no attribute '%s'" % (type(self).__name__, __vis_name__)
+        )
+
     def __getitem__(self, __vis_key__):
         return self.__vis_shell__.__vis_logs__()[__vis_key__]
 
@@ -516,6 +526,30 @@ class __VisShell__(__VisResult__):
         "bytes": "limit",
     }
     __vis_log_page_cap__ = 10
+    __vis_log_text_reads__ = frozenset(
+        (
+            "count",
+            "endswith",
+            "find",
+            "index",
+            "lower",
+            "lstrip",
+            "partition",
+            "removeprefix",
+            "removesuffix",
+            "replace",
+            "rfind",
+            "rindex",
+            "rpartition",
+            "rsplit",
+            "rstrip",
+            "split",
+            "splitlines",
+            "startswith",
+            "strip",
+            "upper",
+        )
+    )
 
     def __getitem__(self, __vis_key__):
         # A LOG PAGE is the map that carries status and cursors, but its payload is
@@ -539,6 +573,23 @@ class __VisShell__(__VisResult__):
 
     def __radd__(self, other):
         return self.__vis_log_text_concat__(other, True)
+
+    def __getattr__(self, __vis_name__):
+        # A LOG PAGE carries its payload as text, so the read-only string methods
+        # a reader reaches for next — `page.find("@@ -325")`, `page.splitlines()`
+        # — answer from `out`, the payload the slice and the concatenations above
+        # already read. Only that allowlist is delegated: mapping names keep their
+        # dict meaning, and every other shell stage stays a plain result map.
+        if (
+            __vis_name__ in self.__vis_log_text_reads__
+            and dict.get(self, "op") == "_shell_logs"
+        ):
+            __vis_out__ = dict.get(self, "out")
+            if isinstance(__vis_out__, str):
+                return getattr(__vis_out__, __vis_name__)
+        raise AttributeError(
+            "'%s' object has no attribute '%s'" % (type(self).__name__, __vis_name__)
+        )
 
     def __vis_log_page__(self, __vis_args__):
         __vis_page__ = self.__vis_op__("_shell_logs", __vis_args__)
