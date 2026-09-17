@@ -372,6 +372,27 @@ def __vis_exec_call__(c):
         c.k = {}
 
 
+def __vis_name_tip__(__vis_names__, __vis_wanted__):
+    # The " Did you mean …?" clause a miss ends with. A NEAR name contains the
+    # guess or is contained BY it, so 'stdou' finds 'stdout' and 'output' finds
+    # 'out'. Shared by the key miss below and the attribute miss on a handle, so
+    # both corrections read the same.
+    __vis_low__ = __vis_wanted__.lower()
+    __vis_near__ = [
+        __vis_x__
+        for __vis_x__ in __vis_names__
+        if isinstance(__vis_x__, str)
+        and (__vis_low__ in __vis_x__.lower() or __vis_x__.lower() in __vis_low__)
+    ]
+    if not __vis_near__:
+        return ""
+    return (
+        " Did you mean "
+        + " / ".join([repr(__vis_x__) for __vis_x__ in __vis_near__])
+        + "?"
+    )
+
+
 def __vis_key_hint__(__vis_d__, __vis_k__):
     # A missing key on a TOOL RESULT is a LOOKUP mistake, not a broken tool: shapes
     # differ per tool (shell -> out/exit/duration_ms, run_tests -> output,
@@ -393,22 +414,7 @@ def __vis_key_hint__(__vis_d__, __vis_k__):
             + ": a dict is not sliceable or positional — use list(d), d.items(), or a "
             "string key. Keys: " + __vis_have__
         )
-    __vis_low__ = __vis_k__.lower()
-    __vis_near__ = [
-        __vis_x__
-        for __vis_x__ in __vis_keys__
-        if isinstance(__vis_x__, str)
-        and (__vis_low__ in __vis_x__.lower() or __vis_x__.lower() in __vis_low__)
-    ]
-    __vis_tip__ = (
-        (
-            " Did you mean "
-            + " / ".join([repr(__vis_x__) for __vis_x__ in __vis_near__])
-            + "?"
-        )
-        if __vis_near__
-        else ""
-    )
+    __vis_tip__ = __vis_name_tip__(__vis_keys__, __vis_k__)
     return (
         repr(__vis_k__)
         + " is not a key of "
@@ -502,12 +508,6 @@ class __VisShell__(__VisResult__):
         return __vis_settle__(fn(__vis_args__))
 
     @property
-    def status(self):
-        # A shell handle is a dict, but process results conventionally expose status as
-        # an attribute. Keep the canonical map key while accepting that one common read.
-        return self["status"]
-
-    @property
     def stdout(self):
         # Quiet compatibility aliases for the guesses Python process APIs invite.
         # Keep them out of the result map and docs: `out` remains canonical.
@@ -574,6 +574,21 @@ class __VisShell__(__VisResult__):
     def __radd__(self, other):
         return self.__vis_log_text_concat__(other, True)
 
+    def __vis_attr_hint__(self, __vis_name__):
+        # The ATTRIBUTE twin of `__vis_key_hint__`: name the fields this result
+        # DOES carry and the methods that drive the process, so one wrong dot ends
+        # the guessing instead of costing a re-run.
+        __vis_keys__ = list(self)
+        return (
+            repr(__vis_name__)
+            + " is not a field of this shell result. Every field answers by key"
+            + " AND by attribute: r['out'] is r.out. Keys: "
+            + (", ".join([repr(__vis_k__) for __vis_k__ in __vis_keys__]) or "(none)")
+            + "."
+            + __vis_name_tip__(__vis_keys__, __vis_name__)
+            + " Methods: logs(offset, lines), wait(secs), type(text), stop()."
+        )
+
     def __getattr__(self, __vis_name__):
         # A LOG PAGE carries its payload as text, so the read-only string methods
         # a reader reaches for next — `page.find("@@ -325")`, `page.splitlines()`
@@ -587,9 +602,18 @@ class __VisShell__(__VisResult__):
             __vis_out__ = dict.get(self, "out")
             if isinstance(__vis_out__, str):
                 return getattr(__vis_out__, __vis_name__)
-        raise AttributeError(
-            "'%s' object has no attribute '%s'" % (type(self).__name__, __vis_name__)
-        )
+        if __vis_name__.startswith("_"):
+            raise AttributeError(__vis_name__)
+        # Every FIELD this result carries answers by DOT as well as by key:
+        # `sh.wait(30).out` reads the same thing `sh.wait(30)["out"]` does. A
+        # process result is conventionally read that way, so the dot is the first
+        # reach — and it was the ONLY one that failed while `status` and `stdout`
+        # happened to answer, which made the map look like an object with three
+        # fields. The MAP stays canonical: nothing is added to it, `"out" in sh`
+        # is still the key test, and dict names keep their dict meaning.
+        if __vis_name__ in self:
+            return dict.__getitem__(self, __vis_name__)
+        raise AttributeError(self.__vis_attr_hint__(__vis_name__))
 
     def __vis_log_page__(self, __vis_args__):
         __vis_page__ = self.__vis_op__("_shell_logs", __vis_args__)

@@ -123,3 +123,37 @@
       (is (str/includes? out "'rg_in', True")))
     (testing "the probe costs the value none of its native type"
       (is (str/includes? out "'native', True, True, True")))))
+
+(harness/defbuilt-test
+  shell-fields-answer-by-attribute-test
+  ;; Session report 7794f83a-3903-479f-8208-d29e8f1ebecf: `sh.wait(60).out` raised
+  ;; AttributeError while `.status` and `.stdout` answered, so a shell handle read as
+  ;; an object with three fields instead of the map every shell stage returns.
+  (let [session
+        (harness/tool-session {"shell_result"
+                               (fn [_]
+                                 (array-map "op" "shell" "id" "sh-1" "status" "exited" "out"
+                                            "hi" "exit" 0))})
+
+        said
+        (->> (ran session
+                  (str "r = await shell_result()\n"
+                       "print('DOT', r.out == r['out'], r.exit == 0, r.status == 'exited')\n"
+                       "print('MAP', sorted(dict(r)) == ['exit', 'id', 'op', 'out', 'status'],"
+                       " 'stdout' not in r)\n"
+                       "try:\n    r.output\nexcept AttributeError as e:\n    print('MISS', e)"))
+             str/split-lines
+             (map #(str/split % #" " 2))
+             (into {}))]
+
+    (testing "every field of a shell result answers by attribute as well as by key"
+      (is (= "True True True" (said "DOT"))))
+    (testing "the dot READS the map without growing it"
+      ;; `stdout` stays an alias for `out` rather than a second field, so
+      ;; `dict(r)` and `json.dumps(r)` still carry exactly what the host sent.
+      (is (= "True True" (said "MAP"))))
+    (testing "a field the result does NOT carry names the ones it does, and the methods"
+      (is (str/includes? (said "MISS") "'output' is not a field of this shell result"))
+      (is (str/includes? (said "MISS") "Keys: 'op', 'id', 'status', 'out', 'exit'"))
+      (is (str/includes? (said "MISS") "Did you mean 'out'?"))
+      (is (str/includes? (said "MISS") "Methods: logs(offset, lines), wait(secs)")))))
