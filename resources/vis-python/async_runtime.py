@@ -2475,26 +2475,119 @@ class __vis_AsyncioMeta__(type):
         raise AttributeError("asyncio." + name + " is unavailable in vis: " + why)
 
 
-def __vis_tool_proto__(nm, params):
-    # A signature-only stub lets inspection show the host's declared parameters
-    # while the real callable remains permissive. It has no source because its
-    # implementation lives in the host.
+__vis_deferred_annotations__ = __import__("__future__").annotations.compiler_flag
+
+
+def __vis_annotation_vocabulary__():
+    # The names a host-declared annotation may resolve to — builtin classes,
+    # typing's forms, the abstract collections and the few stdlib protocols a
+    # tool signature names — keyed bare and dotted. Built once per session, on
+    # first use, so a session that never stamps a tool never imports `typing`.
+    g = globals()
+    vocab = g.get("__vis_annotation_vocab__")
+    if vocab is None:
+        vocab = {}
+        for nm, value in list(__vis_real_vars__(__vis_builtins_mod__).items()):
+            if isinstance(value, type) and not nm.startswith("_"):
+                vocab[nm] = value
+        for modname, names in (
+            ("typing", None),
+            ("collections.abc", None),
+            (
+                "collections",
+                ("deque", "defaultdict", "OrderedDict", "Counter", "ChainMap"),
+            ),
+            ("os", ("PathLike",)),
+            ("re", ("Pattern", "Match")),
+        ):
+            mod = __import__(modname, None, None, ("__all__",))
+            for nm in names or getattr(mod, "__all__", ()):
+                value = getattr(mod, nm, None)
+                if value is not None:
+                    vocab[nm] = value
+                    vocab[modname + "." + nm] = value
+        g["__vis_annotation_vocab__"] = vocab
+    return vocab
+
+
+def __vis_annotation_value__(node, vocab):
+    # One annotation AST node as the object it names, from `vocab` alone: no
+    # session name is looked up and nothing is called. A node outside that
+    # grammar raises LookupError, and the caller keeps the text instead.
+    ast = __vis_ast__
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, (ast.Name, ast.Attribute)):
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            raise LookupError("attribute base")
+        parts.append(node.id)
+        key = ".".join(reversed(parts))
+        if key not in vocab:
+            raise LookupError(key)
+        return vocab[key]
+    if isinstance(node, ast.Tuple):
+        return tuple(__vis_annotation_value__(e, vocab) for e in node.elts)
+    if isinstance(node, ast.List):
+        return [__vis_annotation_value__(e, vocab) for e in node.elts]
+    if isinstance(node, ast.Subscript):
+        origin = __vis_annotation_value__(node.value, vocab)
+        return origin[__vis_annotation_value__(node.slice, vocab)]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left = __vis_annotation_value__(node.left, vocab)
+        right = __vis_annotation_value__(node.right, vocab)
+        return vocab["typing.Union"][left, right]
+    raise LookupError(type(node).__name__)
+
+
+def __vis_annotation_object__(text, vocab):
+    # The object one annotation TEXT names, or the text itself — the forward
+    # reference it already is — when it names anything outside the vocabulary.
+    try:
+        node = __vis_ast__.parse(text, mode="eval").body
+        return __vis_annotation_value__(node, vocab)
+    except Exception:
+        return text
+
+
+def __vis_tool_proto__(nm, sig):
+    # A signature-only stub lets inspection show the host's declared signature —
+    # parameters, annotations and return — while the real callable remains
+    # permissive. It has no source because its implementation lives in the host.
+    # The text compiles with its annotations DEFERRED, so none of them runs; each
+    # is then read statically against the fixed vocabulary, and one naming
+    # anything else stays the string a forward reference is.
     ns = {}
     try:
-        __vis_real_exec__("def __vis_proto__(" + params + "): pass", ns)
-    except SyntaxError:
+        code = __vis_builtins_mod__.compile(
+            "def __vis_proto__" + sig + ": pass",
+            "<vis-proto>",
+            "exec",
+            __vis_deferred_annotations__,
+            True,
+        )
+        __vis_real_exec__(code, ns)
+    except Exception:
         return None
     proto = ns["__vis_proto__"]
     proto.__name__ = nm
     proto.__qualname__ = nm
+    vocab = __vis_annotation_vocabulary__()
+    proto.__annotations__ = {
+        k: __vis_annotation_object__(v, vocab) for k, v in proto.__annotations__.items()
+    }
     return proto
 
 
 def __vis_stamp_tool__(fn, nm):
     # Give ONE tool wrapper the two facts only the host knows: the contract
     # `doc(nm)` answers (as `__doc__`, so `help(tool)` and `inspect.getdoc`
-    # answer it too) and the declared parameter list (through `__wrapped__`, so
-    # `inspect.signature` stops reporting the trampoline's own `(*a, **k)`).
+    # answer it too) and the declared signature (through `__wrapped__`, so
+    # `inspect.signature` stops reporting the trampoline's own `(*a, **k)`, and
+    # as `__annotations__`, so `typing.get_type_hints` reads the same types).
     # The host doc WINS every time: re-stamping is how a doc seeded AFTER the
     # binding still lands — an aliased extension binds per turn and seeds its
     # doc one step later.
@@ -2505,11 +2598,12 @@ def __vis_stamp_tool__(fn, nm):
             fn.__doc__ = doc
         except Exception:
             pass
-    params = (g.get("__vis_sigs__") or {}).get(nm)
-    if params is not None and getattr(fn, "__wrapped__", None) is None:
-        proto = __vis_tool_proto__(nm, params)
+    sig = (g.get("__vis_sigs__") or {}).get(nm)
+    if sig is not None and getattr(fn, "__wrapped__", None) is None:
+        proto = __vis_tool_proto__(nm, sig)
         if proto is not None:
             fn.__wrapped__ = proto
+            fn.__annotations__ = dict(proto.__annotations__)
     return fn
 
 
