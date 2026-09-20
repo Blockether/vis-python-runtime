@@ -157,3 +157,35 @@
       (is (str/includes? (said "MISS") "Keys: 'op', 'id', 'status', 'out', 'exit'"))
       (is (str/includes? (said "MISS") "Did you mean 'out'?"))
       (is (str/includes? (said "MISS") "Methods: logs(offset, lines), wait(secs)")))))
+
+(harness/defbuilt-test
+  non-string-op-key-rebuilds-test
+  ;; Session report 5f6d6c9e-12e1-47be-bf40-dec47985df30: an MCP tool echoed the
+  ;; server's JSON Schema, where `properties.op` is a MAP, and every such result
+  ;; died with "cannot use '__VisDict__' as a set element" before the model saw
+  ;; it — the shell-handle sniff hashed that map against the shell ops. Only a
+  ;; string can name an op.
+  (let [session
+        (harness/tool-session
+          {"schema_result" (fn [_]
+                             (array-map "op" "mcp_call"
+                                        "input_schema" {"properties" {"op" {"const" "replace"
+                                                                            "type" "string"}}}))})
+
+        said
+        (->> (ran session
+                  (str "r = await schema_result()\n"
+                       "props = r['input_schema']['properties']\n"
+                       "print('OP', r['op'], props['op']['const'])\n"
+                       "print('MAP', isinstance(props, dict), isinstance(props['op'], dict))\n"
+                       "try:\n    props['patch']\nexcept KeyError as e:\n    print('MISS', e)"))
+             str/split-lines
+             (map #(str/split % #" " 2))
+             (into {}))]
+
+    (testing "a nested map whose 'op' is not a string rebuilds instead of raising"
+      (is (= "mcp_call replace" (said "OP"))))
+    (testing "the schema map and the entry named 'op' stay ordinary maps"
+      (is (= "True True" (said "MAP"))))
+    (testing "a miss inside such a map still answers with its own keys"
+      (is (str/includes? (said "MISS") "'patch' is not a key of this result map. Keys: 'op'.")))))

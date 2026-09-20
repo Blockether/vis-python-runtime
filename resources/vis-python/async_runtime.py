@@ -400,8 +400,14 @@ def __vis_key_hint__(__vis_d__, __vis_k__):
     # the model guesses another name and spins. Name the tool, the near miss, and every
     # key it DID return — one wrong guess then ends the guessing.
     __vis_keys__ = list(__vis_d__.keys())
+    # Only a STRING names the tool: a nested schema map may hold an 'op' key of any
+    # shape, and its repr is not a tool name.
     __vis_op__ = __vis_d__.get("op")
-    __vis_who__ = (repr(__vis_op__) + " result") if __vis_op__ else "this result map"
+    __vis_who__ = (
+        (repr(__vis_op__) + " result")
+        if isinstance(__vis_op__, str) and __vis_op__
+        else "this result map"
+    )
     __vis_have__ = (
         ", ".join([repr(__vis_x__) for __vis_x__ in __vis_keys__]) or "(no keys)"
     )
@@ -985,8 +991,15 @@ def __vis_typed_result__(__vis_d__):
     __vis_t__ = {
         __k__: __vis_typed_value__(__v__) for __k__, __v__ in __vis_d__.items()
     }
-    if "op" in __vis_t__:
-        if __vis_t__.get("op") in __VisShell__.__vis_shell_ops__ and "id" in __vis_t__:
+    # A tool names its operation with a STRING. A nested map may carry an `op` key
+    # of ANY shape — a JSON Schema describes a patch operation as
+    # `properties.op = {"const": "replace"}` — and hashing that map against the
+    # shell ops raised `cannot use '__VisDict__' as a set element`, killing the
+    # WHOLE result before the model saw it. Only a string can name a shell stage
+    # or mark a tool result; anything else is just a map.
+    __vis_op__ = __vis_t__.get("op")
+    if isinstance(__vis_op__, str):
+        if __vis_op__ in __VisShell__.__vis_shell_ops__ and "id" in __vis_t__:
             return __VisShell__(__vis_t__)
         return __VisResult__(__vis_t__)
     return __VisDict__(__vis_t__)
