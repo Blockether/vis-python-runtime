@@ -783,3 +783,20 @@ except ValueError as exc:
       (is (thrown-with-msg? Exception
                             #"extension tool path collides"
                             (runtime/install-tool! session "tree.branch.leaf"))))))
+
+;; Regression, vis session f2cfccd5: a block left `py = '…'` behind, the session
+;; saved it as a const, and after the restore EVERY bind raised `extension tool
+;; namespace collides with global: py`. That session never ran another block, and
+;; the consumer reported the dead worker as a provider outage.
+(harness/defbuilt-test
+  dotted-tool-takes-its-root-from-a-stale-global-test
+  (testing "a tool namespace takes its root over the way a flat tool already does"
+    (harness/bind-tools! {"py.run" (fn [[value]]
+                                     (str "ran:" value))})
+    (let [session (harness/block-session)]
+      (runtime/exec! session "py = 'restored from a snapshot'")
+      (is (= "py.run" (runtime/install-tool! session "py.run")))
+      (let [answer (block session "print(await py.run('x'))")]
+        (is (nil? (:error answer)) (pr-str answer))
+        (is (= "ran:x" (out answer))))
+      (is (= "True" (runtime/eval-str session "str('py' in __vis_protected_names__)"))))))

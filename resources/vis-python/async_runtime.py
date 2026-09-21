@@ -2671,11 +2671,16 @@ def __vis_set_dotted_tool__(nm, realfn):
     root = parts[0]
     g = globals()
     namespace = g.get(root)
-    if namespace is None:
+    if not isinstance(namespace, __vis_ToolNamespace__):
+        # The namespace OWNS its root name. Anything else sitting there is an
+        # ordinary global - a block's own variable, or one restored from a saved
+        # session file - that predates this bind, and refusing left the session
+        # unusable: every later block failed to bind ANY tool, and the engine
+        # reported it as a provider outage. Flat tools already overwrite their
+        # name, so take the root over the same way; install_tool then protects
+        # it from being shadowed again.
         namespace = __vis_ToolNamespace__(root)
         g[root] = namespace
-    if not isinstance(namespace, __vis_ToolNamespace__):
-        raise ValueError("extension tool namespace collides with global: " + root)
     for index, part in enumerate(parts[1:-1], 1):
         members = object.__getattribute__(namespace, "__vis_members__")
         child = members.get(part)
