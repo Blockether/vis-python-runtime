@@ -204,6 +204,17 @@ public final class WindowsJailProbe {
             "missing executable preserves the failing operation and native error: " + expected.getMessage());
       }
       passed(run(jail, "token"), "token");
+      Path stagedInput = jail.applicationDirectory().resolve("data/input.txt");
+      passed(run(jail, "sealed-metadata", stagedGuest.toString(), stagedInput.toString(),
+          jail.applicationDirectory().toString()), "LPAC exclusive metadata resolution of sealed app paths");
+      passed(finish(new ProcessBuilder(guest.toString(), "sealed-metadata", stagedGuest.toString(),
+          stagedInput.toString(), jail.applicationDirectory().toString()).start(), new byte[0]),
+          "host exclusive metadata resolution of sealed app paths");
+      passed(finish(new ProcessBuilder(guest.toString(), "sealed-mutation-guard", stagedInput.toString()).start(),
+          new byte[0]), "sealed file pins continue to block host mutation");
+      check(Files.readString(stagedInput).equals("source-data"), "sealed file bytes remain unchanged");
+      denied(() -> Files.move(stagedInput, stagedInput.resolveSibling("moved.txt")),
+          "sealed application file could be renamed");
       denied(() -> jail.stage(source, "late.txt"), "staging remains open after spawn");
       denied(() -> jail.spawn(List.of(guest.toString(), "token"), Map.of(), null, false, false, 0, 0),
           "host executable outside staged app accepted");

@@ -56,6 +56,59 @@ static void staged_denied(const wchar_t *path, DWORD access, const char *name) {
     else printf("STAGED_DENIAL=%lu %s\n", error, name);
 }
 
+/* CPython getpath opens an exclusive, zero-access handle before resolving its path.
+ * Metadata queries must coexist with the lifetime pins without allowing mutation. */
+static void sealed_metadata(const wchar_t *path) {
+    BY_HANDLE_FILE_INFORMATION expected = {0}, actual = {0};
+    wchar_t resolved[32768];
+    DWORD length;
+    HANDLE file = CreateFileW(path, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    check(file != INVALID_HANDLE_VALUE, "metadata target exists and permits attributes");
+    if (file == INVALID_HANDLE_VALUE) return;
+    check(GetFileInformationByHandle(file, &expected), "read metadata target identity");
+    CloseHandle(file);
+    file = CreateFileW(path, 0, 0, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    check(file != INVALID_HANDLE_VALUE, "exclusive zero-access metadata open");
+    if (file == INVALID_HANDLE_VALUE) return;
+    length = GetFinalPathNameByHandleW(file, resolved, 32768, VOLUME_NAME_DOS);
+    check(length > 0 && length < 32768, "resolve sealed metadata final path");
+    check(GetFileInformationByHandle(file, &actual) &&
+        expected.dwVolumeSerialNumber == actual.dwVolumeSerialNumber &&
+        expected.nFileIndexHigh == actual.nFileIndexHigh && expected.nFileIndexLow == actual.nFileIndexLow,
+        "metadata handle names the same sealed object");
+    CloseHandle(file);
+    if (!length || length >= 32768) return;
+    file = CreateFileW(resolved, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    check(file != INVALID_HANDLE_VALUE, "reopen the resolved metadata path");
+    if (file == INVALID_HANDLE_VALUE) return;
+    check(GetFileInformationByHandle(file, &actual) &&
+        expected.dwVolumeSerialNumber == actual.dwVolumeSerialNumber &&
+        expected.nFileIndexHigh == actual.nFileIndexHigh && expected.nFileIndexLow == actual.nFileIndexLow,
+        "resolved metadata path retains the sealed object identity");
+    CloseHandle(file);
+}
+
+static void sealed_mutation_guard(const wchar_t *path) {
+    const DWORD accesses[] = {GENERIC_WRITE, FILE_WRITE_DATA, FILE_APPEND_DATA, DELETE};
+    for (size_t i = 0; i < sizeof(accesses) / sizeof(accesses[0]); i++) {
+        HANDLE file = CreateFileW(path, accesses[i], FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        DWORD error = GetLastError();
+        check(file == INVALID_HANDLE_VALUE && error == ERROR_SHARING_VIOLATION,
+            "host write, append and delete handles remain blocked by sealing pins");
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    }
+    {
+        BOOL deleted = DeleteFileW(path);
+        DWORD error = GetLastError();
+        check(!deleted && error == ERROR_SHARING_VIOLATION, "host deletion remains blocked by sealing pins");
+    }
+}
+
 static void system_root_check(void) {
     wchar_t directory[MAX_PATH + 1], value[MAX_PATH + 1];
     UINT length = GetSystemWindowsDirectoryW(directory, MAX_PATH + 1);
@@ -1979,6 +2032,12 @@ int wmain(int argc, wchar_t **argv) {
         registry_host(wcscmp(argv[2], L"machine") == 0);
     else if (wcscmp(argv[1], L"registry") == 0) registry_check(argc, argv);
     else if (wcscmp(argv[1], L"token") == 0) token_check();
+    else if (wcscmp(argv[1], L"sealed-metadata") == 0 && argc > 2) {
+        for (i = 2; i < argc; i++) sealed_metadata(argv[i]);
+    }
+    else if (wcscmp(argv[1], L"sealed-mutation-guard") == 0 && argc > 2) {
+        for (i = 2; i < argc; i++) sealed_mutation_guard(argv[i]);
+    }
     else if (wcscmp(argv[1], L"security") == 0) security_check(argc, argv);
     else if (wcscmp(argv[1], L"denied-file") == 0 && argc == 3) {
         denied(argv[2], GENERIC_READ, "sibling profile read denied");

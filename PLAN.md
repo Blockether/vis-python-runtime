@@ -605,7 +605,10 @@ or running gateway was changed by that release.
       layouts pass Windows API (4 tests / 34 assertions) and native boundary
       (11 / 68) suites; shared suites pass 84 / 492 and 84 / 489 respectively.
       A regression also verifies that the helper survives runtime staging.
-    - Unknowns: interactive CI and the next release's rebuilt assets remain to pass.
+      CI `34976196649` at `aef6f1f` passes all five platform jobs and API documentation.
+      The Windows job repeats all four 366-check probes and both extracted/source
+      suite gates on an interactive hosted runner.
+    - Unknowns: the next release's rebuilt assets remain to pass.
 2. Resolve generic Windows policy and consumer integration.
    - Rationale: WindowsJail is a copy-in private-workspace API, not the generic
      JailPolicy backend used by Vis shell and REPL processes.
@@ -614,14 +617,21 @@ or running gateway was changed by that release.
      Low-integrity write checks precede DACL grants on ordinary host files.
       A test fixture evaluates per-silo BindFlt mappings of original paths to a
       WinFsp live view backed by pinned host handles outside the silo. The signed
-      WinFsp 2.1 driver loads and its dispatcher starts with Secure Boot enabled,
-      but the first mapping returns `0x80070001`; separate NTFS controls are being
-      tested before attributing this failure to the filesystem substrate.
-      Package-scoped WFP soft and hard permits still return Winsock 10013 for
-      loopback. Own-workspace AF_UNIX connects succeed while sibling/outside
-      paths fail; abstract sockets fail even in the trusted control. Credential
-      tests distinguish an SSH logon without a credential set from a synthetic
-      service-logon control; neither establishes a usable LPAC credential grant.
+      WinFsp 2.1 driver loads and its dispatcher starts with Secure Boot enabled.
+      Both NTFS-to-NTFS controls pass, before and after assigning a process to the
+      silo, and preserve the host's original view. The equivalent WinFsp target
+      fails with `0x80070001` in both cases, before guest I/O.
+      [Microsoft confirms that BindFlt does not support custom filesystems](https://github.com/microsoft/Windows-Containers/issues/335#issuecomment-1489497360).
+      This rules out the tested composition on Windows Server 2022, not every
+      possible Windows filesystem backend. No failing internal FSCTL was traced.
+      Package-scoped WFP soft and hard permits still return Winsock 10013 at
+      `socket(AF_INET)` creation, before connecting to the selected loopback port.
+      Connect-layer filters alone cannot supply the missing socket capability.
+      Own-workspace AF_UNIX connects succeed while sibling/outside paths fail;
+      abstract sockets fail even in the trusted control. A synthetic credential
+      is readable in the trusted service-logon control but the unchanged LPAC
+      receives `RPC_S_INVALID_BINDING`; no usable optional credential grant is
+      established. Test filters, processes, mounts and credentials are cleaned up.
       These fixtures are not a production backend or a policy-support claim.
     - Acceptance criteria: enforce live read/write grants, read-only grants and
       deny-read/write/execute precedence; OFF/PROXY/OPEN egress; every inbound port;
@@ -630,6 +640,15 @@ or running gateway was changed by that release.
       escapes, and retain fail-closed behavior throughout implementation.
     - Unknowns: filesystem composition, race-safe backing resolution, execution
       denial, network/socket/credential mediation, lifecycle, setup and licensing.
+      A private DOS device map is only path presentation; raw NT paths still need
+      an independent boundary. An additional restricting SID remains an untested
+      candidate, not a proven deny-wins mechanism for arbitrary host DACLs. Its
+      smallest next gate checks final token restrictions and direct raw-NT reads
+      against newly created normal-, NULL- and empty-DACL fixtures, with trusted
+      controls. Descendants, executable sections and exact AF_UNIX remain separate
+      requirements even if that gate passes. A kernel filter would also need a
+      proven write broker, Microsoft signing and distribution prerequisites; it
+      is not a complete policy implementation by itself.
       Copying, environment-only proxies and host-wide permission changes do not
       satisfy the policy contract.
 3. Verify distribution and the Vis beta.
@@ -641,14 +660,18 @@ or running gateway was changed by that release.
      the presence of a Windows archive.
 
 Plan state: the bounded UI helper passes source and extracted Windows security
-and lifecycle gates; interactive CI and release assets remain to verify. The
-Node 20 MSVC action is replaced by a local DevShell setup script; actual x64
-exports, workflow lint and PowerShell lint pass. GraalVM CE 25.3.4.1 preloads a
-warning count of two even when the driver emits no warnings, as confirmed by
-`--dry-run` and upstream issue oracle/graal#14253. A fixed stable CE release is
-not yet available; no warning counter or diagnostic is suppressed. The optional
-WinFsp test SDK also emits an ABI-alignment warning; production builds do not
-include that dependency.
+and lifecycle gates, including interactive CI. All five platform jobs and API
+documentation pass at `aef6f1f`; release assets remain to verify. The Node 20 MSVC
+action is replaced by a local DevShell setup script; actual x64 exports, workflow
+lint and PowerShell lint pass. GraalVM CE 25.3.4.1 preloads a warning count of two
+even when the driver emits no warnings, as confirmed by `--dry-run` and upstream
+issue oracle/graal#14253. A fixed stable CE release is not yet available; no
+warning counter or diagnostic is suppressed. The optional WinFsp test SDK also
+emits an ABI-alignment warning; production builds do not include that dependency.
+The stock CPython documentation example additionally emits `Failed to find real
+location` during `getpath` initialization in both source and extracted Windows
+CI runs. The exact failing Win32 operation remains to be measured; no security
+pin or permission is relaxed to silence it.
 
 No new release tag is published. Generic Windows policy parity, consumer
 integration and the Vis beta remain open. A passing UI helper or filesystem
