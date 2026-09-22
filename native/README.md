@@ -44,6 +44,39 @@ never assembles an enforcer command.
 Consumers get the whole tree from the per-platform archive built with
 `clojure -T:build platform-archive :platform <tag>`.
 
+## Collect worker hang evidence
+
+If a worker stops answering Python operations, you can request a private stack
+sample before terminating it. Configure it before applying interpreter confinement:
+`stack-diagnostics` takes an absolute, non-existing destination in its `code` field
+and answers a value with `status: "ready"`. The parent must create the destination's
+private directory first. Setup creates an empty `0600` file; it does not grant
+Python permission to read or write that path.
+
+Request `dump-stacks` only when you need evidence. It replaces the file and answers
+`written`, `unavailable`, `busy` or `failed`, with a fixed reason when relevant.
+An empty `stack-diagnostics` path closes the retained descriptor. Normal worker
+connection shutdown also attempts this cleanup. A closed or replaced descriptor
+is not reused for a later dump.
+
+Stack collection does not acquire the GIL or install or deliver signals. It copies
+memory through the operating system before inspecting it, so concurrent thread or
+frame removal produces incomplete samples instead of dereferencing freed memory.
+The implementation currently supports release, GIL-enabled CPython **3.14.7** on
+macOS and Linux. Other builds, including Windows, answer `unsupported-build`;
+an operating-system policy that denies memory sampling answers `memory-read-failed`.
+A CPython update requires reviewing the pinned private layouts before enabling it.
+
+Each sample is limited to 64 threads, 64 frames per thread and 100 code points per
+file or function name. It records definition lines and bytecode offsets, **not
+current source lines**. Names and paths may contain private information: keep the
+artifact local and review it before sharing. Source text and local values are not
+included. This file is separate from the payload-free diagnostic ring.
+
+Always bound the complete control exchange in the parent, including socket writes.
+Disk IO can still stall; unavailable or partial evidence must not prevent worker
+retirement. Sampling is best effort, not a consistent debugger snapshot.
+
 ## Windows x64
 
 Use PowerShell 7.3 or newer in a Visual Studio x64 Native Tools environment:
