@@ -393,6 +393,24 @@ def __vis_name_tip__(__vis_names__, __vis_wanted__):
     )
 
 
+def __vis_result_who__(__vis_d__):
+    # Only a STRING names the tool: a nested schema map may hold an 'op' key of any
+    # shape, and its repr is not a tool name.
+    __vis_op__ = __vis_d__.get("op")
+    if isinstance(__vis_op__, str) and __vis_op__:
+        return repr(__vis_op__) + " result"
+    return "this result map"
+
+
+def __vis_dot_example__(__vis_keys__):
+    # Show the key/attribute equivalence on a field this result ACTUALLY carries, so
+    # the example is checkable against the keys printed beside it.
+    for __vis_k__ in __vis_keys__:
+        if isinstance(__vis_k__, str) and __vis_k__.isidentifier():
+            return "r[" + repr(__vis_k__) + "] is r." + __vis_k__
+    return "r[key] is r.key"
+
+
 def __vis_key_hint__(__vis_d__, __vis_k__):
     # A missing key on a TOOL RESULT is a LOOKUP mistake, not a broken tool: shapes
     # differ per tool (shell -> out/exit/duration_ms, run_tests -> output,
@@ -400,14 +418,7 @@ def __vis_key_hint__(__vis_d__, __vis_k__):
     # the model guesses another name and spins. Name the tool, the near miss, and every
     # key it DID return — one wrong guess then ends the guessing.
     __vis_keys__ = list(__vis_d__.keys())
-    # Only a STRING names the tool: a nested schema map may hold an 'op' key of any
-    # shape, and its repr is not a tool name.
-    __vis_op__ = __vis_d__.get("op")
-    __vis_who__ = (
-        (repr(__vis_op__) + " result")
-        if isinstance(__vis_op__, str) and __vis_op__
-        else "this result map"
-    )
+    __vis_who__ = __vis_result_who__(__vis_d__)
     __vis_have__ = (
         ", ".join([repr(__vis_x__) for __vis_x__ in __vis_keys__]) or "(no keys)"
     )
@@ -437,11 +448,54 @@ def __vis_key_hint__(__vis_d__, __vis_k__):
 class __VisDict__(dict):
     # EVERY map rebuilt from the host boundary: a tool result, each nested map inside
     # it, and `session`. Still a real dict (json / mutation / isinstance / {**d} all
-    # work), but a missing key raises the self-describing KeyError above instead of a
-    # bare one. Result shapes are per-tool by design; this makes the shape readable at
-    # the moment of the miss instead of costing a re-run.
+    # work), with two differences that make a shape readable where it is read: a
+    # missing key raises the self-describing KeyError above instead of a bare one,
+    # and every field the map carries answers by DOT as well as by key. Result shapes
+    # are per-tool by design; both halves end a wrong reach at the first guess
+    # instead of costing a re-run.
+    __vis_attr_methods__ = ""
+
     def __missing__(self, __vis_k__):
         raise KeyError(__vis_key_hint__(self, __vis_k__))
+
+    def __vis_attr_subject__(self):
+        # What the attribute hint calls this map: a result names the tool that
+        # answered it, a live handle names what it IS.
+        return __vis_result_who__(self)
+
+    def __vis_attr_hint__(self, __vis_name__):
+        # The ATTRIBUTE twin of `__vis_key_hint__`: name the fields this result DOES
+        # carry — and the methods that drive it, when it has any — so one wrong dot
+        # ends the guessing instead of costing a re-run.
+        __vis_keys__ = list(self)
+        return (
+            repr(__vis_name__)
+            + " is not a field of "
+            + self.__vis_attr_subject__()
+            + ". Every field answers by key AND by attribute: "
+            + __vis_dot_example__(__vis_keys__)
+            + ". Keys: "
+            + (", ".join([repr(__vis_k__) for __vis_k__ in __vis_keys__]) or "(none)")
+            + "."
+            + __vis_name_tip__(__vis_keys__, __vis_name__)
+            + self.__vis_attr_methods__
+        )
+
+    def __getattr__(self, __vis_name__):
+        # The DOT is the other half of the same reach: `r.transcript` is what gets
+        # written right after `r['transcript']` answered, and an AttributeError there
+        # reads as "this result does not carry it" — so the field is fetched a second
+        # time, or the whole tool re-run, for data already in hand. The MAP stays
+        # canonical: nothing is added to it, `'out' in r` is still the key test, and
+        # dict names (`r.get`, `r.keys`, `r.items`) keep their dict meaning.
+        if __vis_name__.startswith("_"):
+            # Private and dunder lookups are PROTOCOL probes — copy, pickle, the
+            # inspectors — and must stay absent rather than be answered from
+            # whatever key happens to share the name.
+            raise AttributeError(__vis_name__)
+        if __vis_name__ in self:
+            return dict.__getitem__(self, __vis_name__)
+        raise AttributeError(self.__vis_attr_hint__(__vis_name__))
 
 
 class __VisResult__(__VisDict__):
@@ -580,27 +634,22 @@ class __VisShell__(__VisResult__):
     def __radd__(self, other):
         return self.__vis_log_text_concat__(other, True)
 
-    def __vis_attr_hint__(self, __vis_name__):
-        # The ATTRIBUTE twin of `__vis_key_hint__`: name the fields this result
-        # DOES carry and the methods that drive the process, so one wrong dot ends
-        # the guessing instead of costing a re-run.
-        __vis_keys__ = list(self)
-        return (
-            repr(__vis_name__)
-            + " is not a field of this shell result. Every field answers by key"
-            + " AND by attribute: r['out'] is r.out. Keys: "
-            + (", ".join([repr(__vis_k__) for __vis_k__ in __vis_keys__]) or "(none)")
-            + "."
-            + __vis_name_tip__(__vis_keys__, __vis_name__)
-            + " Methods: logs(offset, lines), wait(secs), type(text), stop()."
-        )
+    __vis_attr_methods__ = (
+        " Methods: logs(offset, lines), wait(secs), type(text), stop()."
+    )
+
+    def __vis_attr_subject__(self):
+        # Every stage of the shell family answers the same map, so the op that
+        # produced this one does not narrow the shape the hint describes.
+        return "this shell result"
 
     def __getattr__(self, __vis_name__):
         # A LOG PAGE carries its payload as text, so the read-only string methods
         # a reader reaches for next — `page.find("@@ -325")`, `page.splitlines()`
         # — answer from `out`, the payload the slice and the concatenations above
-        # already read. Only that allowlist is delegated: mapping names keep their
-        # dict meaning, and every other shell stage stays a plain result map.
+        # already read. Only that allowlist is delegated here; every other name is a
+        # FIELD of the map, answered by `__VisDict__` above (`sh.wait(30).out` reads
+        # what `sh.wait(30)["out"]` does), and mapping names keep their dict meaning.
         if (
             __vis_name__ in self.__vis_log_text_reads__
             and dict.get(self, "op") == "_shell_logs"
@@ -608,18 +657,7 @@ class __VisShell__(__VisResult__):
             __vis_out__ = dict.get(self, "out")
             if isinstance(__vis_out__, str):
                 return getattr(__vis_out__, __vis_name__)
-        if __vis_name__.startswith("_"):
-            raise AttributeError(__vis_name__)
-        # Every FIELD this result carries answers by DOT as well as by key:
-        # `sh.wait(30).out` reads the same thing `sh.wait(30)["out"]` does. A
-        # process result is conventionally read that way, so the dot is the first
-        # reach — and it was the ONLY one that failed while `status` and `stdout`
-        # happened to answer, which made the map look like an object with three
-        # fields. The MAP stays canonical: nothing is added to it, `"out" in sh`
-        # is still the key test, and dict names keep their dict meaning.
-        if __vis_name__ in self:
-            return dict.__getitem__(self, __vis_name__)
-        raise AttributeError(self.__vis_attr_hint__(__vis_name__))
+        return super().__getattr__(__vis_name__)
 
     def __vis_log_page__(self, __vis_args__):
         __vis_page__ = self.__vis_op__("_shell_logs", __vis_args__)

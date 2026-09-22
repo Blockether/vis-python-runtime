@@ -16,6 +16,11 @@
    `res.get('op')` sweep dies with `'list' object has no attribute 'get'` on the
    one result that was not a map.
 
+   A field is reached by DOT as readily as by key. Every map the boundary
+   rebuilds answers `r.transcript` with exactly what `r['transcript']` answers,
+   and a dot that misses names the fields the map does carry — otherwise the
+   field already in hand gets read a second time, or the tool re-run for it.
+
    These cases live here because the message and the probe are the RUNTIME's:
    the consumer only sees them after a pin bump."
   (:require [clojure.string :as str]
@@ -125,15 +130,63 @@
       (is (str/includes? out "'native', True, True, True")))))
 
 (harness/defbuilt-test
+  result-fields-answer-by-attribute-test
+  ;; Session report fd553c3f-a123-4f63-afae-969e07c6f064: `h.transcript` raised
+  ;; AttributeError on a read_session result whose `h['transcript']` answered, so a
+  ;; field already in hand was fetched again by re-running the tool. The dot belongs
+  ;; to EVERY map the boundary rebuilds, not only to the shell handle below.
+  (let [session
+        (harness/tool-session {"session_result" (fn [_]
+                                                  (array-map "op" "read_session"
+                                                             "session_id" "s-1"
+                                                             "transcript" {"turns" [{"index" 1}]}
+                                                             "items" "not the method"))})
+
+        said
+        (->> (ran session
+                  (str
+                    "r = await session_result()\n" "print('DOT', r.transcript is r['transcript'],"
+                    " r.transcript.turns[0].index == 1, r.session_id == 's-1')\n"
+                    "print('MAP', sorted(dict(r)) == ['items', 'op', 'session_id', 'transcript'],"
+                    " callable(r.items), r['items'] == 'not the method')\n"
+                    "print('PRIVATE', hasattr(r, '_ipython_canary_method_should_not_exist_'),"
+                    " hasattr(r, '__deepcopy__'))\n"
+                    "try:\n    r.transcripts\nexcept AttributeError as e:\n    print('MISS', e)\n"
+                    "try:\n    r['transcript']['iterations']\n"
+                    "except KeyError as e:\n    print('KEY', e)"))
+             str/split-lines
+             (map #(str/split % #" " 2))
+             (into {}))]
+
+    (testing "a field answers by attribute with the SAME object its key answers, at any depth"
+      (is (= "True True True" (said "DOT"))))
+    (testing "the dot READS the map without growing it, and dict names keep their dict meaning"
+      ;; `r.items` stays the mapping method; the field of that name is still `r['items']`.
+      (is (= "True True True" (said "MAP"))))
+    (testing "private and dunder lookups stay absent, so copy and the inspectors still see a dict"
+      (is (= "False False" (said "PRIVATE"))))
+    (testing "a field the result does NOT carry names the tool, its fields and the near miss"
+      (is (str/includes? (said "MISS") "'transcripts' is not a field of 'read_session' result"))
+      (is (str/includes? (said "MISS")
+                         "Every field answers by key AND by attribute: r['op'] is r.op"))
+      (is (str/includes? (said "MISS") "Keys: 'op', 'session_id', 'transcript', 'items'"))
+      (is (str/includes? (said "MISS") "Did you mean 'transcript'?"))
+      (is (not (str/includes? (said "MISS") "Methods:"))
+          "only a live handle names methods; a plain result map has none"))
+    (testing "the KEY half of the same miss is unchanged"
+      (is (str/includes? (said "KEY")
+                         "'iterations' is not a key of this result map. Keys: 'turns'.")))))
+
+(harness/defbuilt-test
   shell-fields-answer-by-attribute-test
   ;; Session report 7794f83a-3903-479f-8208-d29e8f1ebecf: `sh.wait(60).out` raised
   ;; AttributeError while `.status` and `.stdout` answered, so a shell handle read as
   ;; an object with three fields instead of the map every shell stage returns.
   (let [session
-        (harness/tool-session {"shell_result"
-                               (fn [_]
-                                 (array-map "op" "shell" "id" "sh-1" "status" "exited" "out"
-                                            "hi" "exit" 0))})
+        (harness/tool-session
+          {"shell_result"
+           (fn [_]
+             (array-map "op" "shell" "id" "sh-1" "status" "exited" "out" "hi" "exit" 0))})
 
         said
         (->> (ran session

@@ -94,14 +94,20 @@
         (is (str/includes? out "faketool"))
         ;; the trailing empty list is the proof the repr did not settle
         (is (str/ends-with? out ", []]"))))
-    (testing "no blanket __getattr__ auto-run: a non-slot attribute raises"
-      (is (= "safe"
+    (testing "an attribute use settles ONCE and reads the field the result carries"
+      ;; `faketool(...)['stdout']` and `faketool(...).stdout` are the same
+      ;; single-expression use of ONE call: the settled map answers both, the
+      ;; second reach does not run the tool again, and a name the result does
+      ;; not carry still raises.
+      (is (= "['hi', 1, 'safe']"
              (ran s
-                  (str "def _t():\n"
-                       "    box = [__vis_deferred__(lambda: {'stdout': 'hi'}, 'faketool')()]\n"
-                       "    try:\n" "        box[0].stdout\n"
-                       "        return 'leaked'\n" "    except AttributeError:\n"
-                       "        return 'safe'\n" "print(_t())")))))))
+                  (str "def _t():\n" "    ran = []\n"
+                       "    box = [__vis_deferred__("
+                       "lambda: ran.append(1) or {'stdout': 'hi'}, 'faketool')()]\n"
+                       "    got = box[0].stdout\n" "    try:\n"
+                       "        box[0].output\n" "        miss = 'leaked'\n"
+                       "    except AttributeError:\n" "        miss = 'safe'\n"
+                       "    return [got, len(ran), miss]\n" "print(_t())")))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Statement-depth settle. A stub HOST tool stands in for a vis tool: the
