@@ -301,6 +301,24 @@ static void vis_py_record(int level, const char *event, const char *fields, ...)
 #define VIS_PY_PAR_QUOTA 8
 #define VIS_PY_SESSION_NAME 128
 
+/* A block owns one entry budget, shared with its native gather workers. The
+   GIL protects the counter and references; abandoned batches can outlive the
+   caller, so the budget cannot live on its stack. Host/bootstrap calls outside
+   run_block do not spend a guest block's budget. */
+#define VIS_PY_SCAN_ENTRIES 10000
+
+typedef struct {
+    Py_ssize_t remaining;
+    unsigned int references;
+} vis_py_scan_budget;
+
+static _Thread_local vis_py_scan_budget *vis_py_scan_current = NULL;
+
+static void vis_py_scan_release(vis_py_scan_budget *budget)
+{
+    if (budget != NULL && --budget->references == 0) free(budget);
+}
+
 static void vis_py_run_push(const char *session);
 static void vis_py_run_pop(void);
 static const char *vis_py_current_session(void);
@@ -333,6 +351,7 @@ struct vis_py_batch {
     PyObject *thunks; /* the sequence every thunk is borrowed from */
     vis_py_task *task;
     char session[VIS_PY_SESSION_NAME];
+    vis_py_scan_budget *scan_budget;
     int count;
     int done;        /* tasks finished */
     int outstanding; /* tasks queued or running, still touching this batch */
@@ -350,6 +369,7 @@ static void vis_py_batch_free(vis_py_batch *batch)
         Py_XDECREF(batch->task[i].error);
     }
     Py_XDECREF(batch->thunks);
+    vis_py_scan_release(batch->scan_budget);
     free(batch->task);
     free(batch);
 }
@@ -482,10 +502,12 @@ static void *vis_py_worker_main(void *arg)
            the other. */
         gil = PyGILState_Ensure();
         batch = task->batch;
+        vis_py_scan_current = batch->scan_budget;
         vis_py_run_push(batch->session);
         value = PyObject_CallNoArgs(task->thunk);
         error = (value == NULL) ? PyErr_GetRaisedException() : NULL;
         vis_py_run_pop();
+        vis_py_scan_current = NULL;
 
         pthread_mutex_lock(&vis_py_pool.lock);
         task->value = value;
@@ -976,6 +998,142 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
     return 0;
 }
 
+/* --------------------------------------------------------------------------
+ * Directory traversal. Audit events see only the opening of a directory, not
+ * its entries. Guard the native iterator slot AND its explicit __next__
+ * descriptor, so pathlib, glob, walk and cached aliases all spend the same
+ * budget. RuntimeError is deliberate: these walkers suppress OSError.
+ * ------------------------------------------------------------------------ */
+
+static iternextfunc vis_py_scandir_original_next;
+typedef PyObject *(*vis_py_fastcall)(PyObject *, PyObject *const *, Py_ssize_t, PyObject *);
+static vis_py_fastcall vis_py_scandir_original;
+static vis_py_fastcall vis_py_listdir_original;
+static PyMethodDef vis_py_listdir_guard_def;
+
+static PyObject *vis_py_scandir_next(PyObject *iterator)
+{
+    PyObject *entry = vis_py_scandir_original_next(iterator);
+    PyObject *path, *closed;
+
+    /* Fetch once past the budget to distinguish exhaustion from an exactly
+       full scan. Never return that entry or count matches instead of visits. */
+    if (entry == NULL || vis_py_scan_current == NULL) return entry;
+    if (vis_py_scan_current->remaining > 0) {
+        vis_py_scan_current->remaining--;
+        return entry;
+    }
+    path = PyObject_GetAttrString(entry, "path");
+    Py_DECREF(entry);
+    if (path == NULL) return NULL;
+    closed = PyObject_CallMethod(iterator, "close", NULL);
+    Py_XDECREF(closed);
+    PyErr_Clear();
+    PyErr_Format(PyExc_RuntimeError,
+                 "directory traversal exceeded %d entries in this Python block "
+                 "while scanning the directory containing %R; "
+                 "narrow the path or use grep/ls for workspace searches",
+                 VIS_PY_SCAN_ENTRIES, path);
+    Py_DECREF(path);
+    return NULL;
+}
+
+/* listdir is eager. Use the same native scandir primitive while a block is
+   active rather than allocating an unbounded list before checking its size.
+   Keep CPython's original implementation for host/bootstrap calls. */
+static PyObject *vis_py_listdir(PyObject *self, PyObject *const *args,
+                               Py_ssize_t nargs, PyObject *kwnames)
+{
+    PyObject *path = Py_None, *iterator, *entries, *entry, *name, *closed, *error;
+    Py_ssize_t keywords = kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames);
+
+    if (vis_py_scan_current == NULL || nargs + keywords > 1 ||
+        (keywords == 1 && PyUnicode_CompareWithASCIIString(
+            PyTuple_GET_ITEM(kwnames, 0), "path") != 0)) {
+        return vis_py_listdir_original(self, args, nargs, kwnames);
+    }
+    if (nargs + keywords == 1) path = args[0];
+    if (PySys_Audit("os.listdir", "O", path) < 0) return NULL;
+    iterator = vis_py_scandir_original(self, args, nargs, kwnames);
+    if (iterator == NULL) return NULL;
+    entries = PyList_New(0);
+    if (entries != NULL) {
+        while ((entry = vis_py_scandir_next(iterator)) != NULL) {
+            name = PyObject_GetAttrString(entry, "name");
+            Py_DECREF(entry);
+            if (name == NULL) break;
+            int status = PyList_Append(entries, name);
+            Py_DECREF(name);
+            if (status < 0) break;
+        }
+    }
+    error = PyErr_GetRaisedException();
+    closed = PyObject_CallMethod(iterator, "close", NULL);
+    Py_XDECREF(closed);
+    Py_DECREF(iterator);
+    if (error != NULL) PyErr_SetRaisedException(error);
+    if (PyErr_Occurred()) Py_CLEAR(entries);
+    return entries;
+}
+
+/* Install before accepting guest code. No CPython-private iterator layout is
+   assumed; reject an unexpected callable/slot ABI instead of running unguarded. */
+static int vis_py_install_scan_guard(const char *home)
+{
+    PyObject *module = NULL, *scandir = NULL, *listdir = NULL;
+    PyObject *iterator = NULL, *path = NULL, *descriptor, *closed;
+    PyTypeObject *type;
+    int status = -1;
+
+#if defined(_WIN32)
+    module = PyImport_ImportModule("nt");
+#else
+    module = PyImport_ImportModule("posix");
+#endif
+    if (module == NULL) goto done;
+    scandir = PyObject_GetAttrString(module, "scandir");
+    listdir = PyObject_GetAttrString(module, "listdir");
+    if (scandir == NULL || listdir == NULL) goto done;
+    if (!PyCFunction_Check(scandir) || !PyCFunction_Check(listdir) ||
+        PyCFunction_GET_FLAGS(scandir) != (METH_FASTCALL | METH_KEYWORDS) ||
+        PyCFunction_GET_FLAGS(listdir) != (METH_FASTCALL | METH_KEYWORDS)) {
+        PyErr_SetString(PyExc_RuntimeError, "unexpected directory enumeration ABI");
+        goto done;
+    }
+    path = PyUnicode_DecodeFSDefault(home != NULL && home[0] != '\0' ? home : ".");
+    if (path == NULL) goto done;
+    iterator = PyObject_CallOneArg(scandir, path);
+    if (iterator == NULL) goto done;
+    type = Py_TYPE(iterator);
+    descriptor = PyDict_GetItemString(type->tp_dict, "__next__");
+    if (type->tp_iternext == NULL || descriptor == NULL ||
+        Py_TYPE(descriptor) != &PyWrapperDescr_Type || PyDescr_TYPE(descriptor) != type ||
+        ((PyWrapperDescrObject *)descriptor)->d_wrapped != (void *)type->tp_iternext) {
+        PyErr_SetString(PyExc_RuntimeError, "unexpected directory iterator ABI");
+        goto done;
+    }
+    closed = PyObject_CallMethod(iterator, "close", NULL);
+    if (closed == NULL) goto done;
+    Py_DECREF(closed);
+    vis_py_scandir_original_next = type->tp_iternext;
+    ((PyWrapperDescrObject *)descriptor)->d_wrapped = (void *)vis_py_scandir_next;
+    type->tp_iternext = vis_py_scandir_next;
+    PyType_Modified(type);
+    vis_py_scandir_original = (vis_py_fastcall)(void (*)(void))PyCFunction_GET_FUNCTION(scandir);
+    vis_py_listdir_original = (vis_py_fastcall)(void (*)(void))PyCFunction_GET_FUNCTION(listdir);
+    vis_py_listdir_guard_def = *((PyCFunctionObject *)listdir)->m_ml;
+    vis_py_listdir_guard_def.ml_meth = (PyCFunction)(void (*)(void))vis_py_listdir;
+    ((PyCFunctionObject *)listdir)->m_ml = &vis_py_listdir_guard_def;
+    status = 0;
+done:
+    Py_XDECREF(iterator);
+    Py_XDECREF(path);
+    Py_XDECREF(listdir);
+    Py_XDECREF(scandir);
+    Py_XDECREF(module);
+    return status;
+}
+
 #if defined(_WIN32)
 /* CPython's WindowsConsoleIO bypasses the open audit event. Guard both type
    construction and the existing __init__ descriptor, including cached bound
@@ -1340,6 +1498,8 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
         return PyErr_NoMemory();
     }
     batch->thunks = thunks; /* the batch owns the sequence from here on */
+    batch->scan_budget = vis_py_scan_current;
+    if (batch->scan_budget != NULL) batch->scan_budget->references++;
     session = vis_py_current_session();
     snprintf(batch->session, sizeof batch->session, "%s", session == NULL ? "" : session);
     batch->count = (int)count;
@@ -2546,6 +2706,11 @@ VIS_PY_EXPORT int vispython_initialize(const char *home, const char *executable,
         vis_py_copy_out("the interpreter did not start", out, cap);
         return VIS_PY_ERR_INIT;
     }
+    if (vis_py_install_scan_guard(home) != 0) {
+        vis_py_take_error(out, cap);
+        (void)PyEval_SaveThread();
+        return VIS_PY_ERR_INIT;
+    }
 #if defined(_WIN32)
     vis_py_windows_console_guard_error = vis_py_install_windows_console_guard();
     if (vis_py_windows_console_guard_error != NULL) {
@@ -2827,14 +2992,29 @@ VIS_PY_EXPORT int vispython_run_block(const char *module_name, const char *code,
 {
     PyGILState_STATE gil;
     int status;
+    vis_py_scan_budget *previous;
 
     if (!vis_py_started) {
         return VIS_PY_ERR_INIT;
     }
     gil = PyGILState_Ensure();
+    previous = vis_py_scan_current;
+    if (previous == NULL) {
+        vis_py_scan_current = calloc(1, sizeof *vis_py_scan_current);
+        if (vis_py_scan_current == NULL) {
+            PyErr_NoMemory();
+            vis_py_take_error(out, cap);
+            PyGILState_Release(gil);
+            return VIS_PY_ERR_PYTHON;
+        }
+        vis_py_scan_current->remaining = VIS_PY_SCAN_ENTRIES;
+        vis_py_scan_current->references = 1;
+    }
     vis_py_run_push(module_name);
     status = vis_py_run_block_locked(module_name, code, out, cap);
     vis_py_run_pop();
+    if (previous == NULL) vis_py_scan_release(vis_py_scan_current);
+    vis_py_scan_current = previous;
     PyGILState_Release(gil);
     return status;
 }

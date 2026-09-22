@@ -382,7 +382,12 @@
    Install the session with [[install-runtime!]] first. Printed output is the
    only success channel; a trailing expression is discarded. `error` is null
    on success or a Python error string; prior stdout is preserved on failure.
-   Loading and bridge errors can still throw `VisPythonException`."
+   Loading and bridge errors can still throw `VisPythonException`.
+
+   Directory enumeration shares a 10,000-entry budget across the block and its
+   native gather workers, even without confinement. This counts entries visited
+   by scandir/listdir, not glob matches. Exhaustion is a recoverable RuntimeError;
+   the next block starts fresh without clearing session globals."
   ([code] (run-block default-session code))
   ([session code] (Interpreter/runBlock session code)))
 

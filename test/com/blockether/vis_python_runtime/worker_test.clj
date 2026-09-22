@@ -258,6 +258,32 @@
                 (value! worker "run-block" "session" session "code" "print(await echo('hi'))"))]
           (is (nil? (get answer "error")) (str (get answer "error")))
           (is (= "<hi>" (str/trim (str (get answer "stdout")))))))
+      (testing "directory exhaustion is recoverable across the worker wire (Vis #279)"
+        (value! worker
+                "exec"
+                "session" session
+                "code" (str "import os, pathlib\n"
+                            "scan_root = pathlib.Path(" (pr-str (str root))
+                            ") / 'scan-budget'\n"
+                            "scan_root.mkdir()\n(scan_root / 'entry').touch()\n"))
+        (let [answer
+              (json/read-str (value! worker
+                                     "run-block"
+                                     "session" session
+                                     "code" (str "scan_kept = 279\n"
+                                                 "for _ in range(10001):\n"
+                                                 "    list(scan_root.rglob('*.missing'))")))
+
+              recovered
+              (json/read-str (value! worker
+                                     "run-block"
+                                     "session" session
+                                     "code" "print(scan_kept, len(os.listdir(scan_root)))"))]
+
+          (is (str/includes? (str (get answer "error")) "10000"))
+          (is (str/includes? (str (get answer "error")) "grep/ls"))
+          (is (nil? (get recovered "error")) (pr-str recovered))
+          (is (= "279 1\n" (get recovered "stdout")))))
       (testing "a library Future runs on a real asyncio Task beside a host call"
         (value!
           worker
