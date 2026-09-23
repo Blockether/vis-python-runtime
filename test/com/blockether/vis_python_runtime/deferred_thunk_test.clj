@@ -109,6 +109,24 @@
                        "    except AttributeError:\n" "        miss = 'safe'\n"
                        "    return [got, len(ran), miss]\n" "print(_t())")))))))
 
+(harness/defbuilt-test
+  deferred-call-inline-concat-test
+  (let [calls
+        (atom [])
+
+        s
+        (harness/tool-session {"cat" (fn [args]
+                                       (swap! calls conj [:cat args])
+                                       "body")
+                               "grep" (fn [args]
+                                        (swap! calls conj [:grep args])
+                                        "hits")})]
+
+    (testing "inline text concatenation settles one call in either operand position"
+      (is (= "['prefixbody', 'hitssuffix']"
+             (ran s "print(['prefix' + cat('doc'), grep('needle') + 'suffix'])")))
+      (is (= [[:cat ["doc"]] [:grep ["needle"]]] @calls)))))
+
 ;; ---------------------------------------------------------------------------
 ;; Statement-depth settle. A stub HOST tool stands in for a vis tool: the
 ;; runtime's own `bind-host!` / `install-tool!` door, counted on the Clojure

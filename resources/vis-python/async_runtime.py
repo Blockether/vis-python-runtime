@@ -244,6 +244,14 @@ class __vis_Call__:
     def __contains__(self, k):
         return k in __vis_settle__(self)
 
+    # Binary + consumes one call result immediately; preserve the settled value's
+    # Python operator behavior instead of exposing the deferred placeholder.
+    def __add__(self, other):
+        return __vis_settle__(self) + other
+
+    def __radd__(self, other):
+        return other + __vis_settle__(self)
+
     # ATTRIBUTE auto-settle, same reasoning as `__getitem__` above: `r.get(...)`
     # or `r.items()` on a still-deferred call is a single-expression use of that
     # ONE result, and an unresolved `__vis_Call__` reaching user space is exactly
