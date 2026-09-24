@@ -3562,12 +3562,12 @@ def __vis_normalize_module__(tree, flags):
         )
 
     __vis_nodes__ = list(__vis_ast__.walk(tree))
-    __vis_top__ = {id(__vis_node__) for __vis_node__ in tree.body}
+    __vis_top__ = {__vis_builtins__.id(__vis_node__) for __vis_node__ in tree.body}
     __vis_coro__ = set()
     for __vis_node__ in __vis_nodes__:
         if isinstance(__vis_node__, __vis_ast__.AsyncFunctionDef):
             for __vis_sub__ in __vis_ast__.walk(__vis_node__):
-                __vis_coro__.add(id(__vis_sub__))
+                __vis_coro__.add(__vis_builtins__.id(__vis_sub__))
     for __vis_node__ in __vis_nodes__:
         if not isinstance(
             __vis_node__,
@@ -3585,7 +3585,7 @@ def __vis_normalize_module__(tree, flags):
         __vis_v__ = __vis_node__.value
         if __vis_v__ is None:  # a bare `x: int` annotation has no value
             continue
-        if id(__vis_node__) in __vis_top__:
+        if __vis_builtins__.id(__vis_node__) in __vis_top__:
             __vis_node__.value = __vis_wrap__(__vis_v__)
         elif isinstance(__vis_v__, __vis_ast__.Constant):
             # A bare string statement is a DOCSTRING: wrapping it in a call would
@@ -3597,7 +3597,7 @@ def __vis_normalize_module__(tree, flags):
             # every helper kind, `async def` included, and reaches into the container
             # the helper answers with. See `__vis_settle_return__`.
             __vis_node__.value = __vis_wrap__(__vis_v__, "__vis_settle_return__")
-        elif id(__vis_node__) in __vis_coro__:
+        elif __vis_builtins__.id(__vis_node__) in __vis_coro__:
             continue
         else:
             __vis_node__.value = __vis_wrap__(__vis_v__, "__vis_settle_stmt__")
@@ -4212,7 +4212,7 @@ def __vis_defs_snapshot__():
         code = __vis_def_code__(v)
         f = getattr(code, "co_filename", "") if code is not None else ""
         if isinstance(f, str) and f.startswith("<prog:"):
-            key = id(code)
+            key = __vis_builtins__.id(code)
             if key in seen:
                 # Two names, ONE function: emit the source once. A name the chunk
                 # already binds needs no alias line at all.

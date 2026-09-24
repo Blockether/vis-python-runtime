@@ -91,6 +91,29 @@
                                             "print(await patch(test))"))))
                            (is (= "csv" (ran session "print(format)"))))))
 
+(harness/defbuilt-test
+  user-id-loop-keeps-future-blocks-runnable-test
+  ;; A loop target is an ordinary persistent variable. The runtime's AST
+  ;; transformer must not call that string as if it were builtins.id.
+  (let [session
+        (harness/block-session)
+
+        looped
+        (block session "for id in ['first', 'last']:\n    pass")
+
+        follow-up
+        (block session "print(id, 42)")]
+
+    (testing "the user loop succeeds without changing id's semantics" (is (nil? (:error looped))))
+    (testing "the following block executes and reads the saved value"
+      (is (nil? (:error follow-up)))
+      (is (= "last 42" (str/trim (str (:stdout follow-up))))))
+    (testing "later blocks still execute"
+      (is (= "still running" (ran session "print('still running')"))))
+    (testing "helpers remain snapshotable after id is shadowed"
+      (is (nil? (:error (block session "def twice(n):\n    return n * 2"))))
+      (is (str/includes? (harness/ev session "__vis_defs_snapshot__()") "def twice(n):")))))
+
 (harness/defbuilt-test print-survives-a-block-that-shadows-it-test
                        ;; `print` is the sandbox's own (`__vis_print__`, the block's one success
                        ;; channel), so it is protected exactly like a tool: a block may spell it as a
