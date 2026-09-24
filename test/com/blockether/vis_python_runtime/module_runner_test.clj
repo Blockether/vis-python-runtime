@@ -28,7 +28,7 @@
              "        raise SystemExit(code)\n"
              "    with patch.object(sys, 'argv', original), patch.dict(sys.modules, {name: module}), patch.object(runpy, 'run_module', execute):\n"
              "        results.append(__vis_run_module__(name))\n"
-             "        results.append(__vis_module_exit__)\n"
+             "        results.append(__vis_cli_exit__)\n"
              "        results.append(sys.argv is original and original == ['launcher', '-q', '--', 'test_example.py'])\n"
              "results"))]
         (is (= (vec (mapcat (fn [code]
@@ -63,7 +63,7 @@
              "        results.append(__vis_run_module__('module_once_probe'))\n"
              "        results.append(list(builtins._vis_module_runs))\n"
              "        results.append(__import__('vis_runtime').run_sync_block(\"__vis_run_module__('module_async_probe')\", globals()))\n"
-             "        results.append(globals().get('__vis_module_exit__'))\n"
+             "        results.append(globals().get('__vis_cli_exit__'))\n"
              "    finally:\n" "        sys.path.remove(directory)\n"
              "        sys.modules.pop('module_once_probe', None)\n"
              "        sys.modules.pop('module_async_probe', None)\n"
@@ -72,4 +72,37 @@
         (is (= ["__main__"] (nth result 1)))
         (is (= {"stdout" "module-result 42\n" "error" nil} (nth result 2)))
         (is (= 7 (nth result 3))))
+      (finally (runtime/trust! session false) (runtime/close-session! session)))))
+
+(defbuilt-test
+  file-executes-as-main-test
+  ;; Regression #287: file mode must run __main__ with its script directory importable.
+  (runtime/initialize!)
+  (let [session "file-runner-main"]
+    (runtime/trust! session)
+    (try
+      (runtime/install-runtime! session)
+      (runtime/exec! session (slurp (io/resource "vis-python/module_runner.py")))
+      (let
+        [result
+         (ev
+           session
+           (str
+             "import sys, tempfile, pathlib\n" "with tempfile.TemporaryDirectory() as directory:\n"
+             "    folder = pathlib.Path(directory)\n"
+             "    (folder / 'sibling_probe.py').write_text('VALUE = 42\\n')\n"
+             "    script = folder / 'file_probe.py'\n"
+             "    script.write_text(\"import sys, asyncio\\nfrom sibling_probe import VALUE\\nprint(__name__, __file__, sys.argv[1], VALUE, asyncio.run(asyncio.sleep(0, result=7)))\\nraise SystemExit(9)\\n\")\n"
+             "    original_path, original_argv = list(sys.path), sys.argv\n"
+             "    sys.argv = [str(script), 'argument']\n"
+             "    try:\n"
+             "        answer = __import__('vis_runtime').run_sync_block(f'__vis_run_file__({str(script)!r})', globals())\n"
+             "        result = [answer, str(script), __vis_cli_exit__, sys.path == original_path, sys.argv == [str(script), 'argument']]\n"
+             "    finally:\n"
+             "        sys.argv = original_argv\n" "result\n"))]
+        (is (= {"stdout" (str "__main__ " (second result) " argument 42 7\n") "error" nil}
+               (first result)))
+        (is (= 9 (nth result 2)))
+        (is (true? (nth result 3)))
+        (is (true? (nth result 4))))
       (finally (runtime/trust! session false) (runtime/close-session! session)))))
