@@ -153,6 +153,31 @@
     (testing "the session survives its interrupted block"
       (is (= "2" (ran session "print(1 + 1)"))))))
 
+;; Vis session 32bcc713: a long asyncio sleep outlived the host's block wall and
+;; retired Python instead of yielding to the interrupt, ending the active turn.
+(harness/defbuilt-test
+  interrupt-unwinds-an-asyncio-sleep-test
+  (doseq [sleep-call ["await asyncio.sleep(3)" "await asyncio.wait_for(asyncio.sleep(3), 4)"]]
+    (let [sleeping (promise)
+          session (harness/tool-session {"ready" (fn [_]
+                                                   (deliver sleeping true)
+                                                   "go")})
+          answer (future (block session (str "import asyncio\nawait ready()\n" sleep-call)))]
+
+      (is (true? (deref sleeping 30000 false)) "the block never reached sleep")
+      (Thread/sleep 150)
+      (let [landed (runtime/interrupt!)
+            settled (deref answer 1200 ::hung)]
+
+        (is (true? landed) sleep-call)
+        (is (not= ::hung settled) "sleep ignored the host's interrupt window")
+        (when (not= ::hung settled)
+          (is (some? (:error settled)) (str sleep-call " => " (pr-str settled)))
+          (when (= sleep-call "await asyncio.sleep(3)")
+            (is (str/includes? (str (:error settled)) "KeyboardInterrupt")
+                (str sleep-call " => " (pr-str settled))))
+          (is (= "2" (ran session "print(1 + 1)"))))))))
+
 (harness/defbuilt-test interrupt-with-nothing-running-test
                        (testing "false when no thread is running guest code"
                          ;; The same answer a host gets when the interrupt could not reach the block

@@ -4,6 +4,7 @@ import collections as __vis_collections__
 import errno as __vis_errno__
 import io as __vis_io__
 import linecache as __vis_linecache__
+import math as __vis_math__
 import time as __vis_time__
 import weakref as __vis_weakref__
 
@@ -1603,6 +1604,21 @@ class InvalidStateError(Exception):
     pass
 
 
+def __vis_interruptible_sleep__(delay):
+    # CPython delivers a host KeyboardInterrupt only after a blocking C sleep
+    # returns. Yield to Python regularly so a block wall can unwind this session
+    # instead of retiring its interpreter after the host's interrupt window.
+    deadline = __vis_time__.monotonic() + delay
+    if delay <= 0.1 or not __vis_math__.isfinite(deadline):
+        __vis_time__.sleep(delay)
+        return
+    while True:
+        remaining = deadline - __vis_time__.monotonic()
+        if remaining <= 0:
+            return
+        __vis_time__.sleep(min(remaining, 0.1))
+
+
 class __vis_Sleep__:
     # A real blocking sleep wrapped as an awaitable. There is deliberately no
     # selector/event-loop thread. Under gather it runs on the host's bounded,
@@ -1622,16 +1638,16 @@ class __vis_Sleep__:
         self.delay = 0.0
         self.result = None
         if timeout is not None and float(timeout) < delay:
-            __vis_time__.sleep(max(0.0, float(timeout)))
+            __vis_interruptible_sleep__(max(0.0, float(timeout)))
             raise TimeoutError()
-        __vis_time__.sleep(delay)
+        __vis_interruptible_sleep__(delay)
         return result
 
     def __vis_bounded__(self, timeout):
         return __vis_Blocking__(self._bounded, timeout)
 
     def __await__(self):
-        __vis_time__.sleep(max(0.0, self.delay))
+        __vis_interruptible_sleep__(max(0.0, self.delay))
         result = self.result
         # Like a completed coroutine frame, a retained sleep awaitable must not keep
         # an arbitrary result payload alive after handing it to its caller.
