@@ -4,9 +4,10 @@ import collections as __vis_collections__
 import errno as __vis_errno__
 import io as __vis_io__
 import linecache as __vis_linecache__
-import math as __vis_math__
 import time as __vis_time__
 import weakref as __vis_weakref__
+
+from vis_runtime import interruptible_sleep as __vis_interruptible_sleep__
 
 
 # ── deterministic flush for handles the block still HOLDS. CPython closes and
@@ -1602,21 +1603,6 @@ class CancelledError(BaseException):
 
 class InvalidStateError(Exception):
     pass
-
-
-def __vis_interruptible_sleep__(delay):
-    # CPython delivers a host KeyboardInterrupt only after a blocking C sleep
-    # returns. Yield to Python regularly so a block wall can unwind this session
-    # instead of retiring its interpreter after the host's interrupt window.
-    deadline = __vis_time__.monotonic() + delay
-    if delay <= 0.1 or not __vis_math__.isfinite(deadline):
-        __vis_time__.sleep(delay)
-        return
-    while True:
-        remaining = deadline - __vis_time__.monotonic()
-        if remaining <= 0:
-            return
-        __vis_time__.sleep(min(remaining, 0.1))
 
 
 class __vis_Sleep__:

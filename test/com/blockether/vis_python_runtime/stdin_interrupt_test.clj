@@ -155,14 +155,16 @@
 
 ;; Vis session 32bcc713: a long asyncio sleep outlived the host's block wall and
 ;; retired Python instead of yielding to the interrupt, ending the active turn.
+;; A native `time.sleep` held the interpreter in C the same way.
 (harness/defbuilt-test
-  interrupt-unwinds-an-asyncio-sleep-test
-  (doseq [sleep-call ["await asyncio.sleep(3)" "await asyncio.wait_for(asyncio.sleep(3), 4)"]]
+  interrupt-unwinds-a-sleep-test
+  (doseq [sleep-call ["await asyncio.sleep(3)" "await asyncio.wait_for(asyncio.sleep(3), 4)"
+                      "time.sleep(3)"]]
     (let [sleeping (promise)
           session (harness/tool-session {"ready" (fn [_]
                                                    (deliver sleeping true)
                                                    "go")})
-          answer (future (block session (str "import asyncio\nawait ready()\n" sleep-call)))]
+          answer (future (block session (str "import asyncio, time\nawait ready()\n" sleep-call)))]
 
       (is (true? (deref sleeping 30000 false)) "the block never reached sleep")
       (Thread/sleep 150)
@@ -173,10 +175,26 @@
         (is (not= ::hung settled) "sleep ignored the host's interrupt window")
         (when (not= ::hung settled)
           (is (some? (:error settled)) (str sleep-call " => " (pr-str settled)))
-          (when (= sleep-call "await asyncio.sleep(3)")
+          (when-not (str/includes? sleep-call "wait_for")
             (is (str/includes? (str (:error settled)) "KeyboardInterrupt")
                 (str sleep-call " => " (pr-str settled))))
           (is (= "2" (ran session "print(1 + 1)"))))))))
+
+(harness/defbuilt-test
+  sliced-sleep-keeps-the-time-sleep-contract-test
+  (let [session (harness/block-session)]
+    (testing "the whole delay still elapses"
+      (is (= "True"
+             (ran session
+                  (str "import time\nstarted = time.monotonic()\ntime.sleep(0.35)\n"
+                       "print(time.monotonic() - started >= 0.35)")))))
+    (testing "invalid delays raise what the native sleep raises"
+      (is (= "ValueError ValueError TypeError OverflowError"
+             (ran session
+                  (str "import time\nraised = []\n"
+                       "for delay in (-1, float('nan'), '1', float('inf')):\n" "    try:\n"
+                       "        time.sleep(delay)\n" "    except Exception as exc:\n"
+                       "        raised.append(type(exc).__name__)\n" "print(*raised)")))))))
 
 (harness/defbuilt-test interrupt-with-nothing-running-test
                        (testing "false when no thread is running guest code"

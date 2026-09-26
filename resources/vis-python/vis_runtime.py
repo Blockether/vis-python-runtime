@@ -25,6 +25,7 @@ import io
 import json
 import os
 import sys
+import time
 
 #: Module that carries the sandbox runtime. Overridable so a port can point at
 #: the module in its new home without a code change.
@@ -58,6 +59,49 @@ def _preinit_mimetypes():
 
 
 _preinit_mimetypes()
+
+
+#: Longest stretch `time.sleep` stays in C before it returns to Python. The host
+#: stops a timed-out block with an asynchronous KeyboardInterrupt, which CPython
+#: raises only between bytecodes, and retires the interpreter when the block has
+#: not unwound within the host's interrupt window.
+SLEEP_SLICE_SECONDS = 0.1
+
+#: `time.sleep` counts nanoseconds in a signed 64-bit integer; a longer request is
+#: its own OverflowError rather than a sleep.
+_LONGEST_SLEEP_SECONDS = (2**63 - 1) / 1e9
+
+_native_sleep = getattr(time.sleep, "__vis_native_sleep__", time.sleep)
+_monotonic = time.monotonic
+
+
+def interruptible_sleep(seconds, /):
+    """`time.sleep` that the host's interrupt can unwind.
+
+    One native `time.sleep(420)` runs no bytecode until it returns, so the
+    interrupt waits for the whole sleep and the host retires the interpreter
+    instead. Short slices keep the total delay and return to Python in time.
+    Any other argument, including an invalid one, goes to the native sleep, so
+    its errors stay CPython's.
+    """
+    if not (
+        isinstance(seconds, (int, float))
+        and SLEEP_SLICE_SECONDS < seconds < _LONGEST_SLEEP_SECONDS
+    ):
+        return _native_sleep(seconds)
+    deadline = _monotonic() + seconds
+    while True:
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            return None
+        _native_sleep(min(remaining, SLEEP_SLICE_SECONDS))
+
+
+interruptible_sleep.__vis_native_sleep__ = _native_sleep
+# One interpreter serves every session, so this is process state like the
+# `mimetypes` table above. The host imports this module before any block runs,
+# which makes `from time import sleep` in a block bind this function as well.
+time.sleep = interruptible_sleep
 
 
 def module_code(module):
