@@ -165,7 +165,9 @@ def par(thunks):
     a call started is still running when it raises. An interrupt - a
     BaseException that is not an Exception - is the exception: thunks that have
     not started never do, the running ones are waited for, and it is raised
-    ahead of any ordinary failure.
+    ahead of any ordinary failure. The host's interrupt of the block waiting
+    here also raises in every thunk still running, so they unwind with it
+    instead of finishing first, and `par` raises it once.
     """
     import _vis_host
 

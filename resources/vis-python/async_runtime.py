@@ -200,11 +200,23 @@ def __vis_clean_msg__(exc):
     return s
 
 
+def __vis_is_interrupt__(exc):
+    # An interrupt stops the block instead of reporting a failure: the host's
+    # KeyboardInterrupt, SystemExit and cancellation. Every settle path lets it
+    # through as itself, so an `except Exception:` cannot swallow it.
+    import asyncio as std_asyncio
+
+    return isinstance(
+        exc, (KeyboardInterrupt, SystemExit, CancelledError, std_asyncio.CancelledError)
+    )
+
+
 def __vis_wrap_tool_exc__(exc):
     # A native Python exception passes through untouched (its own type/message are
-    # the contract). A host exception outside that hierarchy is wrapped so
-    # `except Exception` catches it; the original remains available for mapping.
-    if isinstance(exc, Exception):
+    # the contract), and so does an interrupt. A host exception outside that
+    # hierarchy is wrapped so `except Exception` catches it; the original remains
+    # available for mapping.
+    if isinstance(exc, Exception) or __vis_is_interrupt__(exc):
         return exc
     return __vis_ToolError__(exc, __vis_clean_msg__(exc))
 
@@ -1131,8 +1143,11 @@ def __vis_slot_thunk__(index, aw, failures):
         try:
             return __vis_settle_child__(aw)
         except BaseException as exc:
-            __vis_mark_slot__(exc, index)
-            failures.append((index, __vis_failure_text__(exc)))
+            # An interrupt is the block's, not this slot's failure: it stays as
+            # it came, without `[i]` and outside the failures.
+            if not __vis_is_interrupt__(exc):
+                __vis_mark_slot__(exc, index)
+                failures.append((index, __vis_failure_text__(exc)))
             raise
 
     return __vis_slot__
@@ -1194,6 +1209,10 @@ def __vis_settle_gather__(v):
                 failure = None
                 try:
                     out.append(__vis_settle_child__(aw))
+                except (KeyboardInterrupt, SystemExit):
+                    # The block's interrupt is no slot's result: it stops the
+                    # gather here, as it would stop asyncio's.
+                    raise
                 except BaseException as exc:
                     failure = exc
                 if failure is not None:

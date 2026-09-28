@@ -125,6 +125,103 @@
                              "except BaseException as e:\n" "    print(repr(e), ran)"))))
     (runtime/threads! 0 0 8)))
 
+;; Vis session b7ff5cee: the host's interrupt reached only the thread waiting in
+;; `par`, which runs no Python until its batch settles. Every running thunk went
+;; on to its end, and thunks the quota had held back started after the interrupt.
+(def ^:private slow-thunks
+  "Thunks and a coroutine that take three seconds, asleep or spinning, recording
+   when they START as well as when they finish."
+  (str "import asyncio\n" "started = []\n"
+       "def slow(n):\n" "    def run():\n"
+       "        started.append(n)\n" "        time.sleep(3)\n"
+       "        ran.append(n)\n" "        return n\n"
+       "    return run\n" "def spin(n):\n"
+       "    def run():\n" "        started.append(n)\n"
+       "        end = time.monotonic() + 3\n" "        while time.monotonic() < end:\n"
+       "            pass\n" "        ran.append(n)\n"
+       "        return n\n" "    return run\n"
+       "async def nap(n):\n" "    started.append(n)\n"
+       "    await asyncio.sleep(3)\n" "    ran.append(n)\n"))
+
+(defn- interrupted
+  "Run `code` in a fresh session with `tools` once its `ready()` has answered,
+   interrupt it ONCE 300 ms later, and answer how the block ended and how long
+   that took."
+  [code tools]
+  (let [ready
+        (promise)
+
+        session
+        (harness/tool-session (assoc tools
+                                "ready" (fn [_]
+                                          (deliver ready true)
+                                          "go")))
+
+        answer
+        (future (block session (str failing-thunks slow-thunks "await ready()\n" code)))]
+
+    (is (true? (deref ready 30000 false)) "the block never reached its gather")
+    (Thread/sleep 300)
+    (let [landed
+          (runtime/interrupt!)
+
+          start
+          (System/nanoTime)
+
+          settled
+          (deref answer 5000 ::hung)]
+
+      {:landed landed
+       :ms (quot (- (System/nanoTime) start) 1000000)
+       :settled settled
+       :session session})))
+
+(harness/defbuilt-test
+  par-interrupt-test
+  (testing "the interrupt reaches every running thunk and starts no other"
+    (runtime/threads! 0 0 2)
+    (let [{:keys [landed ms settled session]}
+          (interrupted (str "try:\n"
+                            "    vis_runtime.par([slow(0), spin(1), slow(2), spin(3), slow(4)])\n"
+                            "except Exception as e:\n" "    print('swallowed', repr(e))\n"
+                            "finally:\n" "    print(sorted(started), ran)")
+                       {})]
+      (is (true? landed))
+      (is (not= ::hung settled) "the block outlived its interrupt by five seconds")
+      (is (< ms 1200) (str "the block took " ms " ms to unwind"))
+      (is (str/includes? (str (:error settled)) "KeyboardInterrupt") (pr-str settled))
+      (is (= "[0, 1] []" (str/trim (str (:stdout settled)))))
+      (is (= "2" (str/trim (str (:stdout (block session "print(1 + 1)"))))) "the session survives"))
+    (runtime/threads! 0 0 8))
+  (testing "the block takes the interrupt once"
+    (let [{:keys [settled]} (interrupted (str "try:\n"
+                                              "    vis_runtime.par([slow(0), spin(1)])\n"
+                                              "except KeyboardInterrupt:\n"
+                                              "    print('interrupted')\n" "print('went on', ran)")
+                                         {})]
+      (is (nil? (:error settled)) (pr-str settled))
+      (is (= "interrupted\nwent on []" (str/trim (str (:stdout settled)))))))
+  (testing "a gather hands the interrupt on, where `except Exception` cannot catch it"
+    (let [{:keys [ms settled]} (interrupted
+                                 (str "try:\n" "    await asyncio.gather(nap(0), nap(1))\n"
+                                      "except Exception as e:\n" "    print('swallowed', repr(e))\n"
+                                      "finally:\n" "    print(sorted(started), ran)")
+                                 {})]
+      (is (< ms 1200) (str "the gather took " ms " ms to unwind"))
+      (is (str/includes? (str (:error settled)) "KeyboardInterrupt") (pr-str settled))
+      (is (= "[0, 1] []" (str/trim (str (:stdout settled)))))))
+  (testing "a call that fails after the interrupt still ends the gather in it"
+    ;; Vis fails the host calls still in flight once its interrupt has landed.
+    (let [{:keys [ms settled]} (interrupted
+                                 (str "try:\n" "    await asyncio.gather(hold(), nap(1))\n"
+                                      "except Exception as e:\n" "    print('swallowed', repr(e))")
+                                 {"hold" (fn [_]
+                                           (Thread/sleep 600)
+                                           (throw (ex-info "the call was cut off" {})))})]
+      (is (< ms 1200) (str "the gather took " ms " ms to unwind"))
+      (is (str/includes? (str (:error settled)) "KeyboardInterrupt") (pr-str settled))
+      (is (= "" (str/trim (str (:stdout settled))))))))
+
 (harness/defbuilt-test nested-par-test
                        (testing "a par inside a par child runs inline instead of deadlocking"
                          (let [session (harness/block-session)]

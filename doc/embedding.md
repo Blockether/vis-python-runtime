@@ -107,8 +107,10 @@ session sharing the sandbox's interpreter.
 
 `interrupt` / `interrupt!` requests `KeyboardInterrupt` from another thread.
 Delivery happens at a Python execution boundary, not necessarily while Python is
-blocked in native code or a host callback. It is not a hard timeout. A host that
-requires a hard deadline needs control of the worker process as well.
+blocked in native code or a host callback. When the interrupted block is waiting
+on a `gather`, the gather stops too: slots that have not started never run, and
+every running slot gets the same `KeyboardInterrupt`. It is not a hard timeout. A
+host that requires a hard deadline needs control of the worker process as well.
 
 ## Confinement has two layers
 

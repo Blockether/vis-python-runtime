@@ -337,7 +337,9 @@ static int vis_py_par_quota = VIS_PY_PAR_QUOTA;
    once the whole batch is done: nothing can cancel a thunk mid-call, so raising
    first let a sibling's write land AFTER the block had seen the error. An
    interrupt - a BaseException that is not an Exception - STOPS the batch
-   instead, because a block being unwound must not start new work. */
+   instead, because a block being unwound must not start new work. The host's
+   interrupt of the thread waiting in `par` stops it the same way, and reaches
+   the threads running its thunks as well. */
 typedef struct vis_py_batch vis_py_batch;
 
 typedef struct vis_py_task {
@@ -346,6 +348,7 @@ typedef struct vis_py_task {
     PyObject *error;
     vis_py_batch *batch;
     int finished;
+    unsigned long runner; /* the thread running the thunk, 0 while none is */
     struct vis_py_task *next;
 } vis_py_task;
 
@@ -357,7 +360,10 @@ struct vis_py_batch {
     int count;
     int done;        /* tasks finished, run or stopped */
     int outstanding; /* tasks queued or running, still touching this batch */
-    int stopped;     /* a thunk was interrupted: no other task of it starts */
+    int stopped;     /* interrupted: no other task of it starts */
+    int interrupted; /* by the host, through the thread waiting on it */
+    unsigned long owner; /* the thread whose `par` this is */
+    vis_py_batch *next;  /* the next batch a `par` still waits on */
 };
 
 /* Drop everything a batch still owns. Needs the GIL: the values and failures
@@ -383,6 +389,7 @@ static struct {
     pthread_t worker[VIS_PY_WORKERS_MAX];
     vis_py_task *head;
     vis_py_task *tail;
+    vis_py_batch *batches; /* every batch a `par` still waits on */
     int running; /* workers created */
     int idle;    /* workers waiting for a task, holding no thread state */
     int started;
@@ -391,6 +398,7 @@ static struct {
                  PTHREAD_COND_INITIALIZER,
                  PTHREAD_COND_INITIALIZER,
                  {0},
+                 NULL,
                  NULL,
                  NULL,
                  0,
@@ -481,7 +489,8 @@ static int vis_py_stops_batch(PyObject *error)
 /* Run one claimed task on THIS thread, which holds the GIL, and record how it
    ended. A task of a stopped batch is not started at all: the interrupt that
    stops a batch is recorded holding the GIL too, so a thunk either got the
-   interpreter before it or never runs. */
+   interpreter before it or never runs. A running thunk names its thread, which
+   is where the host's interrupt has to raise to stop it. */
 static void vis_py_task_run(vis_py_task *task)
 {
     vis_py_batch *batch = task->batch;
@@ -492,6 +501,9 @@ static void vis_py_task_run(vis_py_task *task)
 
     pthread_mutex_lock(&vis_py_pool.lock);
     stopped = batch->stopped;
+    if (!stopped) {
+        task->runner = PyThread_get_thread_ident();
+    }
     pthread_mutex_unlock(&vis_py_pool.lock);
     if (!stopped) {
         vis_py_scan_current = batch->scan_budget;
@@ -504,6 +516,7 @@ static void vis_py_task_run(vis_py_task *task)
     }
 
     pthread_mutex_lock(&vis_py_pool.lock);
+    task->runner = 0;
     task->value = value;
     task->error = error;
     task->finished = 1;
@@ -1501,6 +1514,7 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
     PyObject *values = NULL;
     PyObject *failure = NULL;
     vis_py_batch *batch;
+    vis_py_batch **link;
     PyThreadState *save;
     Py_ssize_t count;
     Py_ssize_t i;
@@ -1511,6 +1525,7 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
     int submitted = 0;
     int saturated = 0;
     int stopped = 0;
+    int interrupted;
     int settled;
     int claimed;
     int waited;
@@ -1554,6 +1569,13 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
         batch->task[i].thunk = PySequence_Fast_GET_ITEM(thunks, i);
         batch->task[i].batch = batch;
     }
+    /* Until it settles, the batch is where the host's interrupt finds the
+       thunks this thread is waiting on. */
+    batch->owner = PyThread_get_thread_ident();
+    pthread_mutex_lock(&vis_py_pool.lock);
+    batch->next = vis_py_pool.batches;
+    vis_py_pool.batches = batch;
+    pthread_mutex_unlock(&vis_py_pool.lock);
     quota = vis_py_par_quota < 1 ? 1 : vis_py_par_quota;
     for (i = 0; i < count; i++) {
         pthread_mutex_lock(&vis_py_pool.lock);
@@ -1641,6 +1663,17 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
         PyEval_RestoreThread(save);
     }
 
+    /* Settled, so the host's interrupt has nothing left to reach here. */
+    pthread_mutex_lock(&vis_py_pool.lock);
+    for (link = &vis_py_pool.batches; *link != NULL; link = &(*link)->next) {
+        if (*link == batch) {
+            *link = batch->next;
+            break;
+        }
+    }
+    interrupted = batch->interrupted;
+    pthread_mutex_unlock(&vis_py_pool.lock);
+
     /* The first interrupt wins outright, because the block it landed in is
        being unwound; otherwise the first failure by position is raised. */
     for (i = 0; i < count; i++) {
@@ -1656,9 +1689,22 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
             chosen = i;
         }
     }
+    if (interrupted) {
+        /* The host's interrupt is pending on THIS thread too, and would land a
+           second time in whatever caught the one raised here. It is raised
+           once: a thunk's own, or a fresh one when every running thunk had
+           returned before it could land. */
+        PyThreadState_SetAsyncExc(batch->owner, NULL);
+        if (chosen >= 0 && !vis_py_stops_batch(batch->task[chosen].error)) {
+            chosen = -1;
+        }
+    }
     if (chosen >= 0) {
         failure = batch->task[chosen].error;
         batch->task[chosen].error = NULL; /* raised below, no longer the batch's */
+    } else if (interrupted) {
+        PyErr_SetNone(PyExc_KeyboardInterrupt);
+        failure = PyErr_GetRaisedException();
     } else {
         values = PyList_New(count);
         if (values != NULL) {
@@ -2891,6 +2937,37 @@ static int vis_py_exec_locked(const char *module_name, const char *code, char *o
    when it looked. */
 static volatile unsigned long vis_py_running_thread = 0;
 
+/* Stop every batch `owner` waits on and name the threads running its thunks,
+   `owner` aside. Needs the GIL, which a thunk holds when it starts, so each
+   thunk is either named here or finds its batch stopped and never starts. The
+   broadcast wakes the `par` waiting on the batch: it runs no Python while it
+   waits, so it would not see the exception raised in its own thread. */
+static int vis_py_interrupt_batches(unsigned long owner, unsigned long *runner, int cap)
+{
+    vis_py_batch *batch;
+    unsigned long thread;
+    int named = 0;
+    int i;
+
+    pthread_mutex_lock(&vis_py_pool.lock);
+    for (batch = vis_py_pool.batches; batch != NULL; batch = batch->next) {
+        if (batch->owner != owner) {
+            continue;
+        }
+        batch->stopped = 1;
+        batch->interrupted = 1;
+        for (i = 0; i < batch->count; i++) {
+            thread = batch->task[i].runner;
+            if (thread != 0 && thread != owner && named < cap) {
+                runner[named++] = thread;
+            }
+        }
+    }
+    pthread_cond_broadcast(&vis_py_pool.finished);
+    pthread_mutex_unlock(&vis_py_pool.lock);
+    return named;
+}
+
 /* Raise `KeyboardInterrupt` in the thread running guest code, answering "1" when
    a thread state took it and "0" when there was nothing to interrupt.
 
@@ -2903,13 +2980,21 @@ static volatile unsigned long vis_py_running_thread = 0;
    treats "0", and a block that keeps running, as the interpreter it can no
    longer reach.
 
+   A block waiting in `par` is such a thread, and its batch would settle only
+   when the slowest thunk did. So the interrupt also stops every batch that
+   thread waits on - nothing of it starts any more - and raises in each thread
+   running one of its thunks, which unwind the same way.
+
    Called from ANY thread, and never from the one it interrupts: it takes the GIL
    the running block keeps dropping at its switch interval. */
 VIS_PY_EXPORT int vispython_interrupt(char *out, int cap)
 {
     PyGILState_STATE gil;
     unsigned long target;
+    unsigned long runner[VIS_PY_WORKERS_MAX];
+    int runners;
     int landed;
+    int i;
 
     if (!vis_py_started) {
         return VIS_PY_ERR_INIT;
@@ -2920,8 +3005,12 @@ VIS_PY_EXPORT int vispython_interrupt(char *out, int cap)
     }
     gil = PyGILState_Ensure();
     landed = PyThreadState_SetAsyncExc(target, PyExc_KeyboardInterrupt);
+    runners = vis_py_interrupt_batches(target, runner, VIS_PY_WORKERS_MAX);
+    for (i = 0; i < runners; i++) {
+        PyThreadState_SetAsyncExc(runner[i], PyExc_KeyboardInterrupt);
+    }
     PyGILState_Release(gil);
-    vis_py_record(VIS_PY_LOG_WARN, "interrupt", "\"threads\":%d", landed);
+    vis_py_record(VIS_PY_LOG_WARN, "interrupt", "\"threads\":%d,\"thunks\":%d", landed, runners);
     return vis_py_copy_out(landed > 0 ? "1" : "0", out, cap);
 }
 
