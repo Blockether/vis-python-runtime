@@ -17,6 +17,7 @@ and reaches the interpreter as a source root.
 import ast
 import builtins
 import contextlib
+import dataclasses
 import gc
 import importlib
 import importlib.machinery
@@ -232,7 +233,16 @@ def host_call(name, payload):
 
 
 def _tool_arg(value):
-    """One argument JSON cannot carry, as text the host can use.
+    """One argument JSON cannot carry, as data or text the host can use.
+
+    A record crosses as its DATA: a dataclass instance — one a tool answered or
+    one the model built — reaches the host as a dict of its public, set fields,
+    the shape a tool answers a record in, so one tool's result can be handed
+    straight to the next. Its repr crossed before, and the receiving tool got a
+    string where it declared the record (Blockether/vis#289). Field values take
+    the same rule at any depth: JSON encoding asks again for each value it
+    cannot carry. A dataclass CLASS is not a record, and a dataclass that is
+    also path-like stays a path.
 
     A path the model spelled as an OBJECT is still a path: every `os.PathLike`
     crosses as its FILESYSTEM string, not as a repr — `cat(root / "q.clj")` used
@@ -243,6 +253,16 @@ def _tool_arg(value):
     """
     if isinstance(value, (bytes, bytearray)):
         return str(value)
+    if (
+        dataclasses.is_dataclass(value)
+        and not isinstance(value, type)
+        and not hasattr(value, "__fspath__")
+    ):
+        return {
+            f.name: getattr(value, f.name)
+            for f in dataclasses.fields(value)
+            if not f.name.startswith("_") and hasattr(value, f.name)
+        }
     try:
         text = os.fspath(value)
     except Exception:
@@ -255,7 +275,8 @@ def _host_tool(name, session=None):
 
     Arguments travel separately as `{"args": [...], "kwargs": {...}}`; the reply
     is `{"value": ...}` or `{"error": "..."}`. The host owns any options-map
-    adaptation. A value JSON cannot carry reaches the host as its `str`.
+    adaptation. A value JSON cannot carry crosses through `_tool_arg`: a record as
+    its public fields, a path as its filesystem string, anything else as its `str`.
 
     The envelope also carries `session`, because the host binds a tool per
     session — the same name in two sessions is two functions, and the boundary

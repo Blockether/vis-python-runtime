@@ -12,8 +12,10 @@
    as `'list' object has no attribute 'add'`. These cases pin that a container the
    model built keeps its type, its methods, and its IDENTITY across the settle.
 
-   Outbound, an argument JSON cannot carry reaches the host as text, and a path
-   the model spelled as an OBJECT is still a path: every `os.PathLike` crosses as
+   Outbound, an argument JSON cannot carry reaches the host as data or text. A
+   record — a dataclass instance a tool answered or the model built — crosses as
+   its public fields, so one tool's result can be handed to the next. A path the
+   model spelled as an OBJECT is still a path: every `os.PathLike` crosses as
    its FILESYSTEM string, at any depth of the arguments, `pathlib` or duck-typed
    alike. A path-like whose `__fspath__` REFUSES is not a path — it crosses as
    its `str`, and the call it appears in still completes.
@@ -268,3 +270,48 @@
                          "pathlike_probe(VisTestBadPathLike())\n" "print('survived')"))))
       (is (= 1 (count @seen)))
       (is (str/includes? (str (ffirst @seen)) "VisTestBadPathLike")))))
+
+;; Regression Blockether/vis#289: a record crosses back to a tool as its fields, never as its repr.
+(harness/defbuilt-test
+  record-argument-boundary-test
+  (let [seen
+        (atom [])
+
+        session
+        (harness/tool-session {"ci.trigger" (fn [_]
+                                              {"__vis_object__" "TriggerResult"
+                                               "__vis_attrs__" {"http_code" 201
+                                                                "job_path" "a/b"
+                                                                "jobs" [{"__vis_object__" "Job"
+                                                                         "__vis_attrs__" {"number"
+                                                                                          7}}]}})
+                               "record_probe" (fn [args]
+                                                (swap! seen conj args)
+                                                {"ok" true})})
+
+        probe
+        (fn [code]
+          (reset! seen [])
+          (ran session code))
+
+        fields
+        {"http_code" 201 "job_path" "a/b" "jobs" [{"number" 7}]}]
+
+    (testing "a record one tool answered reaches the next tool as its fields"
+      (probe "result = await ci.trigger()\nawait record_probe(result)")
+      (is (= [[fields]] @seen)))
+    (testing "a record keeps its fields inside an options dict and as a keyword argument"
+      (probe "await record_probe({'result': result}, again=result)")
+      (is (= [[{"result" fields} {"again" fields}]] @seen)))
+    (testing "a dataclass the model built crosses as its public, set fields"
+      (probe (str "import dataclasses\n" "@dataclasses.dataclass\n"
+                  "class VisTestJob:\n" "    number: int\n"
+                  "    paths: list\n" "    _cache: dict = dataclasses.field(default_factory=dict)\n"
+                  "    later: int = dataclasses.field(init=False)\n"
+                  "await record_probe(VisTestJob(7, [Path('/tmp/vis/q.clj')]))"))
+      (is (= [[{"number" 7 "paths" ["/tmp/vis/q.clj"]}]] @seen)))
+    (testing "a dataclass class is not a record: it still crosses as its str"
+      (probe "await record_probe(VisTestJob)")
+      (is (= 1 (count @seen)))
+      (is (string? (ffirst @seen)))
+      (is (str/includes? (str (ffirst @seen)) "VisTestJob")))))
