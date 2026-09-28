@@ -159,6 +159,13 @@ def par(thunks):
     subprocess or a host call has released the GIL, which is what a sandbox
     block's concurrency is made of. A gather INSIDE a gather child runs
     sequentially, because the outer children are holding the pool.
+
+    A failing thunk does not stop its siblings: every thunk runs, and only once
+    all of them have settled is the FIRST failure by position raised, so nothing
+    a call started is still running when it raises. An interrupt - a
+    BaseException that is not an Exception - is the exception: thunks that have
+    not started never do, the running ones are waited for, and it is raised
+    ahead of any ordinary failure.
     """
     import _vis_host
 

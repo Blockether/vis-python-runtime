@@ -1119,18 +1119,20 @@ def __vis_pyify__(x):
     return x
 
 
-def __vis_slot_thunk__(index, aw):
+def __vis_slot_thunk__(index, aw, failures):
     # ONE gather slot, wrapped so its failure names the slot it came from.
     # `gather` is all-or-nothing: without this the block sees a bare
     # "ValueError: boom" and no way to tell which of three members raised it.
     # The exception TYPE and traceback are left alone - only the message gains a
     # `[i]` prefix, which is what every transport down to the block's error text
-    # carries.
+    # carries. `failures` collects the text of every slot that failed, so the
+    # one failure the pool raises can name the others.
     def __vis_slot__():
         try:
             return __vis_settle_child__(aw)
         except BaseException as exc:
             __vis_mark_slot__(exc, index)
+            failures.append((index, __vis_failure_text__(exc)))
             raise
 
     return __vis_slot__
@@ -1147,6 +1149,34 @@ def __vis_mark_slot__(exc, index):
         return
     try:
         exc.args = (marker + " " + text,) + tuple(exc.args[1:])
+    except BaseException:
+        pass
+
+
+def __vis_failure_text__(exc):
+    # `Type: message`, the way the last line of a traceback reads.
+    try:
+        text = str(exc)
+    except BaseException:
+        text = "<unprintable " + type(exc).__name__ + ">"
+    return type(exc).__name__ + (": " + text if text else "")
+
+
+def __vis_name_failures__(exc, failures):
+    # The pool raises the FIRST failure by position only once every slot has
+    # settled, so that error can name the rest: a write that failed beside it
+    # must not pass for one that landed. Only its message grows, by one
+    # `also failed:` line per other slot, the way it already carries `[i]`.
+    others = sorted(failures)[1:]
+    if not others:
+        return
+    try:
+        text = str(exc)
+    except BaseException:
+        return
+    lines = [text] + ["also failed: " + other for _, other in others]
+    try:
+        exc.args = ("\n".join(lines),) + tuple(exc.args[1:])
     except BaseException:
         pass
 
@@ -1174,13 +1204,19 @@ def __vis_settle_gather__(v):
                     out.append(__vis_clean_exception__(failure))
                     failure = None
             return out
-        thunks = [__vis_slot_thunk__(i, a) for i, a in enumerate(v.aws)]
-        return __vis_pyify__(__vis_par__(thunks))
+        failures = []
+        thunks = [__vis_slot_thunk__(i, a, failures) for i, a in enumerate(v.aws)]
+        try:
+            return __vis_pyify__(__vis_par__(thunks))
+        except Exception as exc:
+            __vis_name_failures__(exc, failures)
+            raise
     except BaseException:
-        # The host cancels outstanding futures, but user-retained guest Tasks would
-        # otherwise keep coroutine frames after a sibling fails. Dispose every guest
-        # awaitable before dropping gather's own references; this also clears deferred
-        # calls that never started, including their host callable and payload graph.
+        # The pool has settled every slot it started before it raises, but
+        # user-retained guest Tasks would otherwise keep coroutine frames after a
+        # sibling fails. Dispose every guest awaitable before dropping gather's own
+        # references; this also clears deferred calls an interrupt left unstarted,
+        # including their host callable and payload graph.
         for aw in v.aws:
             try:
                 __vis_dispose_awaitable__(aw)

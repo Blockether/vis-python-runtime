@@ -302,9 +302,9 @@ static void vis_py_record(int level, const char *event, const char *fields, ...)
 #define VIS_PY_SESSION_NAME 128
 
 /* A block owns one entry budget, shared with its native gather workers. The
-   GIL protects the counter and references; abandoned batches can outlive the
-   caller, so the budget cannot live on its stack. Host/bootstrap calls outside
-   run_block do not spend a guest block's budget. */
+   GIL protects the counter and references; each gather batch holds one while
+   its workers spend from it. Host/bootstrap calls outside run_block do not
+   spend a guest block's budget. */
 #define VIS_PY_SCAN_ENTRIES 10000
 
 typedef struct {
@@ -332,10 +332,12 @@ static int vis_py_thread_cap = VIS_PY_THREAD_CAP;
 static int vis_py_worker_setting = 0; /* 0 = size from the machine */
 static int vis_py_par_quota = VIS_PY_PAR_QUOTA;
 
-/* One `par` call's work. A failing thunk makes `par` raise AT ONCE, while its
-   siblings are still running - that is what the sandbox's `gather` promises,
-   and what lets it cancel them - so a batch OUTLIVES the call that made it and
-   whoever finishes last frees it. */
+/* One `par` call's work, owned by that call until every thunk in it has
+   settled. A thunk that fails leaves its siblings running and `par` raises only
+   once the whole batch is done: nothing can cancel a thunk mid-call, so raising
+   first let a sibling's write land AFTER the block had seen the error. An
+   interrupt - a BaseException that is not an Exception - STOPS the batch
+   instead, because a block being unwound must not start new work. */
 typedef struct vis_py_batch vis_py_batch;
 
 typedef struct vis_py_task {
@@ -353,13 +355,13 @@ struct vis_py_batch {
     char session[VIS_PY_SESSION_NAME];
     vis_py_scan_budget *scan_budget;
     int count;
-    int done;        /* tasks finished */
+    int done;        /* tasks finished, run or stopped */
     int outstanding; /* tasks queued or running, still touching this batch */
-    int abandoned;   /* `par` has returned; the last one out frees */
+    int stopped;     /* a thunk was interrupted: no other task of it starts */
 };
 
-/* Drop everything a batch still owns. Needs the GIL: what a thunk answered
-   after nobody was left to want it is a Python object like any other. */
+/* Drop everything a batch still owns. Needs the GIL: the values and failures
+   its thunks left behind are Python objects like any other. */
 static void vis_py_batch_free(vis_py_batch *batch)
 {
     int i;
@@ -467,14 +469,57 @@ static int vis_py_thread_refused(void)
     return -1;
 }
 
+/* Whether a thunk's failure STOPS its batch. An interrupt - a BaseException
+   that is not an Exception, such as KeyboardInterrupt or SystemExit - does: the
+   block it landed in is being unwound. An ordinary exception leaves the
+   siblings running. Needs the GIL. */
+static int vis_py_stops_batch(PyObject *error)
+{
+    return error != NULL && !PyErr_GivenExceptionMatches(error, PyExc_Exception);
+}
+
+/* Run one claimed task on THIS thread, which holds the GIL, and record how it
+   ended. A task of a stopped batch is not started at all: the interrupt that
+   stops a batch is recorded holding the GIL too, so a thunk either got the
+   interpreter before it or never runs. */
+static void vis_py_task_run(vis_py_task *task)
+{
+    vis_py_batch *batch = task->batch;
+    vis_py_scan_budget *previous = vis_py_scan_current;
+    PyObject *value = NULL;
+    PyObject *error = NULL;
+    int stopped;
+
+    pthread_mutex_lock(&vis_py_pool.lock);
+    stopped = batch->stopped;
+    pthread_mutex_unlock(&vis_py_pool.lock);
+    if (!stopped) {
+        vis_py_scan_current = batch->scan_budget;
+        vis_py_run_push(batch->session);
+        value = PyObject_CallNoArgs(task->thunk);
+        error = (value == NULL) ? PyErr_GetRaisedException() : NULL;
+        vis_py_run_pop();
+        vis_py_scan_current = previous;
+        stopped = vis_py_stops_batch(error);
+    }
+
+    pthread_mutex_lock(&vis_py_pool.lock);
+    task->value = value;
+    task->error = error;
+    task->finished = 1;
+    if (stopped) {
+        batch->stopped = 1;
+    }
+    batch->done++;
+    batch->outstanding--;
+    pthread_cond_broadcast(&vis_py_pool.finished);
+    pthread_mutex_unlock(&vis_py_pool.lock);
+}
+
 static void *vis_py_worker_main(void *arg)
 {
     vis_py_task *task;
-    vis_py_batch *batch;
-    PyObject *value;
-    PyObject *error;
     PyGILState_STATE gil;
-    int last;
 
     (void)arg;
     pthread_once(&vis_py_worker_once, vis_py_worker_key_make);
@@ -499,29 +544,10 @@ static void *vis_py_worker_main(void *arg)
 
         /* The pool lock is never taken while WAITING for the GIL, only while
            already holding it, so a worker and a `par` cannot hold one and want
-           the other. */
+           the other. Recording the task is the last this worker does with its
+           batch: the `par` that owns it frees it once the GIL comes back. */
         gil = PyGILState_Ensure();
-        batch = task->batch;
-        vis_py_scan_current = batch->scan_budget;
-        vis_py_run_push(batch->session);
-        value = PyObject_CallNoArgs(task->thunk);
-        error = (value == NULL) ? PyErr_GetRaisedException() : NULL;
-        vis_py_run_pop();
-        vis_py_scan_current = NULL;
-
-        pthread_mutex_lock(&vis_py_pool.lock);
-        task->value = value;
-        task->error = error;
-        task->finished = 1;
-        batch->done++;
-        batch->outstanding--;
-        last = batch->abandoned && batch->outstanding == 0;
-        pthread_cond_broadcast(&vis_py_pool.finished);
-        pthread_mutex_unlock(&vis_py_pool.lock);
-
-        if (last) {
-            vis_py_batch_free(batch);
-        }
+        vis_py_task_run(task);
         PyGILState_Release(gil);
     }
 }
@@ -1386,11 +1412,15 @@ static PyObject *vis_py_host_call(PyObject *self, PyObject *args)
 }
 
 /* Call every thunk on THIS thread, in order: the answer when there are fewer
-   than two of them, or when the caller is itself a worker. */
+   than two of them, or when the caller is itself a worker. Failures follow the
+   pool's rule: after an ordinary one the rest still run and the first by
+   position is raised at the end, while an interrupt stops right there. */
 static PyObject *vis_py_par_inline(PyObject *thunks, Py_ssize_t count)
 {
     PyObject *values = PyList_New(count);
+    PyObject *failure = NULL;
     PyObject *value;
+    PyObject *error;
     Py_ssize_t i;
 
     if (values == NULL) {
@@ -1399,10 +1429,25 @@ static PyObject *vis_py_par_inline(PyObject *thunks, Py_ssize_t count)
     for (i = 0; i < count; i++) {
         value = PyObject_CallNoArgs(PySequence_Fast_GET_ITEM(thunks, i));
         if (value == NULL) {
-            Py_DECREF(values);
-            return NULL;
+            error = PyErr_GetRaisedException();
+            if (vis_py_stops_batch(error)) {
+                Py_XDECREF(failure);
+                failure = error;
+                break;
+            }
+            if (failure == NULL) {
+                failure = error;
+            } else {
+                Py_XDECREF(error);
+            }
+            value = Py_NewRef(Py_None);
         }
         PyList_SET_ITEM(values, i, value);
+    }
+    if (failure != NULL) {
+        Py_DECREF(values);
+        PyErr_SetRaisedException(failure);
+        return NULL;
     }
     return values;
 }
@@ -1443,11 +1488,12 @@ static void vis_py_deadline(struct timespec *when, long milliseconds)
     when->tv_nsec %= 1000000000L;
 }
 
-/* `_vis_host.par(thunks)` -> their values IN ORDER, raising the FIRST failure
-   the moment that thunk fails. Waiting for the siblings first would be tidier
-   to write and wrong to use: the runtime's `gather` cancels what is still
-   running when a child fails, and it cannot cancel what it has not been told
-   about yet. The siblings keep running into a batch nobody reads. */
+/* `_vis_host.par(thunks)` -> their values IN ORDER. Every thunk runs even when
+   one fails, and `par` raises only after the whole batch has settled: the FIRST
+   failure by position, or the first interrupt, which also stops the thunks that
+   have not started. Raising at once would be quicker and wrong to use: nothing
+   can cancel a thunk mid-call, so a sibling kept running into a batch nobody
+   read, and its write landed after the block had already seen the error. */
 static PyObject *vis_py_par(PyObject *self, PyObject *args)
 {
     PyObject *sequence = NULL;
@@ -1458,13 +1504,14 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
     PyThreadState *save;
     Py_ssize_t count;
     Py_ssize_t i;
-    PyObject *value;
+    Py_ssize_t chosen = -1;
     PyObject *error;
     const char *session;
     struct timespec deadline;
     int submitted = 0;
     int saturated = 0;
-    int outstanding;
+    int stopped = 0;
+    int settled;
     int claimed;
     int waited;
     int queued;
@@ -1510,7 +1557,8 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
     quota = vis_py_par_quota < 1 ? 1 : vis_py_par_quota;
     for (i = 0; i < count; i++) {
         pthread_mutex_lock(&vis_py_pool.lock);
-        while (submitted < (int)count && submitted - batch->done < quota) {
+        stopped = batch->stopped;
+        while (!stopped && submitted < (int)count && submitted - batch->done < quota) {
             if (vis_py_pool.tail == NULL) {
                 vis_py_pool.head = &batch->task[submitted];
             } else {
@@ -1523,6 +1571,9 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
             pthread_cond_signal(&vis_py_pool.work);
         }
         pthread_mutex_unlock(&vis_py_pool.lock);
+        if (stopped) {
+            break;
+        }
 
         /* The GIL goes back while this call waits, or no worker could run.
            And the wait has a floor: a task nobody has claimed after a moment is
@@ -1541,15 +1592,13 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
            worker means the pool came back, and then the wait is worth it again
            for the overlap. */
         if (saturated && vis_py_pool.idle == 0 && vis_py_unqueue(&batch->task[i])) {
-            batch->outstanding--;
             claimed = 1;
         }
-        while (!claimed && !batch->task[i].finished) {
+        while (!claimed && !batch->task[i].finished && !batch->stopped) {
             vis_py_deadline(&deadline, VIS_PY_CALLER_RUNS_MS);
             if (pthread_cond_timedwait(&vis_py_pool.finished, &vis_py_pool.lock, &deadline) ==
                     ETIMEDOUT &&
                 vis_py_unqueue(&batch->task[i])) {
-                batch->outstanding--;
                 claimed = 1;
                 saturated = 1;
                 waited = 1;
@@ -1563,23 +1612,54 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
             vis_py_record(VIS_PY_LOG_INFO, "caller_runs",
                           "\"task\":%d,\"of\":%d,\"queued\":%d,\"waited_ms\":%d", (int)i,
                           (int)count, queued, waited ? VIS_PY_CALLER_RUNS_MS : 0);
-            value = PyObject_CallNoArgs(batch->task[i].thunk);
-            error = (value == NULL) ? PyErr_GetRaisedException() : NULL;
-            pthread_mutex_lock(&vis_py_pool.lock);
-            batch->task[i].value = value;
-            batch->task[i].error = error;
-            batch->task[i].finished = 1;
-            batch->done++;
-            pthread_mutex_unlock(&vis_py_pool.lock);
-        }
-
-        if (batch->task[i].error != NULL) {
-            failure = batch->task[i].error;
-            batch->task[i].error = NULL;
-            break;
+            vis_py_task_run(&batch->task[i]);
         }
     }
-    if (failure == NULL) {
+
+    /* Only an interrupt ends that loop early. What it left queued goes back
+       unstarted and what is still running is waited for, so no thunk of this
+       batch runs on once `par` answers, and the batch is the call's to free. */
+    pthread_mutex_lock(&vis_py_pool.lock);
+    settled = batch->outstanding == 0;
+    pthread_mutex_unlock(&vis_py_pool.lock);
+    if (!settled) {
+        save = PyEval_SaveThread();
+        pthread_mutex_lock(&vis_py_pool.lock);
+        if (batch->stopped) {
+            for (i = 0; i < submitted; i++) {
+                if (!batch->task[i].finished && vis_py_unqueue(&batch->task[i])) {
+                    batch->task[i].finished = 1;
+                    batch->done++;
+                    batch->outstanding--;
+                }
+            }
+        }
+        while (batch->outstanding > 0) {
+            pthread_cond_wait(&vis_py_pool.finished, &vis_py_pool.lock);
+        }
+        pthread_mutex_unlock(&vis_py_pool.lock);
+        PyEval_RestoreThread(save);
+    }
+
+    /* The first interrupt wins outright, because the block it landed in is
+       being unwound; otherwise the first failure by position is raised. */
+    for (i = 0; i < count; i++) {
+        error = batch->task[i].error;
+        if (error == NULL) {
+            continue;
+        }
+        if (vis_py_stops_batch(error)) {
+            chosen = i;
+            break;
+        }
+        if (chosen < 0) {
+            chosen = i;
+        }
+    }
+    if (chosen >= 0) {
+        failure = batch->task[chosen].error;
+        batch->task[chosen].error = NULL; /* raised below, no longer the batch's */
+    } else {
         values = PyList_New(count);
         if (values != NULL) {
             for (i = 0; i < count; i++) {
@@ -1588,13 +1668,7 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
             }
         }
     }
-    pthread_mutex_lock(&vis_py_pool.lock);
-    batch->abandoned = 1;
-    outstanding = batch->outstanding;
-    pthread_mutex_unlock(&vis_py_pool.lock);
-    if (outstanding == 0) {
-        vis_py_batch_free(batch);
-    }
+    vis_py_batch_free(batch);
     if (failure != NULL) {
         PyErr_SetRaisedException(failure);
         return NULL;

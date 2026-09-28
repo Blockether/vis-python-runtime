@@ -303,7 +303,7 @@ async def boom():
 
 async def check():
     global held
-    held = asyncio.create_task(asyncio.sleep(10))
+    held = asyncio.create_task(asyncio.sleep(0.05))
     try:
         await asyncio.gather(asyncio.create_task(boom()), held)
     except Exception:
@@ -323,7 +323,7 @@ async def check():
         await bad
     except ValueError:
         pass
-    return (held.done(), held.cancelled(), held.get_coro() is None,
+    return (held.done(), not held.cancelled(), held.get_coro() is None,
             call.fn is None, call.a == (), call.k == {},
             failed.ran, failed.failed, failed.fn is None, failed.a == (), failed.k == {},
             pending.ran, pending.failed, pending.fn is None, pending.a == (), pending.k == {},
@@ -598,6 +598,28 @@ try:
 except ValueError as exc:
     print(type(exc).__name__, str(exc))")
 
+(def ^:private settled-src
+  "import time
+
+settled = []
+
+
+async def ok(n):
+    time.sleep(0.2)
+    settled.append(n)
+    return n
+
+
+async def boom(message):
+    raise ValueError(message)
+
+
+try:
+    await gather(boom('FIRST'), ok(1), boom('SECOND'))
+except ValueError as exc:
+    print(str(exc))
+    print(settled)")
+
 (harness/defbuilt-test
   asyncio-shim-test
   (testing "asyncio.run(main()) drives a coroutine that awaits tools"
@@ -621,7 +643,13 @@ except ValueError as exc:
                        ;; way to tell [0] from [2], and the block's error text is the only thing the
                        ;; caller ever sees.
                        (testing "a failing member keeps its own type and message and names its slot"
-                         (is (= "ValueError [1] DISTINCT_BOOM_42" (ran slot-src)))))
+                         (is (= "ValueError [1] DISTINCT_BOOM_42" (ran slot-src))))
+                       ;; The error is raised only after every member settled, so it can name the
+                       ;; others that failed: a write failing beside it must not pass for one
+                       ;; that landed.
+                       (testing "every member settles first, and the others that failed are named"
+                         (is (= "[0] FIRST\nalso failed: ValueError: [2] SECOND\n[1]"
+                                (ran settled-src)))))
 
 (harness/defbuilt-test asyncio-sleep-test
                        (testing "asyncio.sleep really sleeps and returns its result"
@@ -660,6 +688,8 @@ except ValueError as exc:
 
 (harness/defbuilt-test
   asyncio-frame-release-test
+  ;; A failed gather raises only once every member settled, so `held` finishes rather
+  ;; than being cancelled; its coroutine frame has to be released all the same.
   (testing "failed and cancelled work releases siblings, call payloads and exception frames"
     (is (= (str "(True, True, True, True, True, True, True, True, True, "
                 "True, True, True, True, True, True, True, True, True)")

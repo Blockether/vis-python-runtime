@@ -67,37 +67,63 @@
                                            "    return run\n"
                                            "vis_runtime.par([slow(1), slow(2), slow(3)])")))))))
 
+(def ^:private failing-thunks
+  "The thunks the failure cases combine. `rec(n)` records that it RAN, which is what
+   tells a sibling that settled before the error from one that never started or was
+   still running when the caller moved on."
+  (str "import time, vis_runtime\n" "ran = []\n"
+       "def rec(n, delay=0):\n" "    def run():\n"
+       "        time.sleep(delay)\n" "        ran.append(n)\n"
+       "        return n\n" "    return run\n"
+       "def fail():\n" "    raise ValueError('thunk refused')\n"
+       "def interrupt():\n" "    raise KeyboardInterrupt('stopped')\n"))
+
+(defn- par-printed
+  "What `code`, run after `failing-thunks` in a fresh session, printed."
+  [code]
+  (str/trim (str (:stdout (block (harness/block-session) (str failing-thunks code))))))
+
 (harness/defbuilt-test
   par-failure-test
-  (testing "a failure surfaces at once, while a slow sibling is still running"
-    (let [session
-          (harness/block-session)
-
-          answer
-          (block session
-                 (str "import time, vis_runtime\n" "def slow():\n"
-                      "    time.sleep(0.5)\n" "def fail():\n"
-                      "    raise ValueError('thunk refused')\n" "start = time.monotonic()\n"
-                      "try:\n" "    vis_runtime.par([fail, slow])\n"
-                      "except ValueError as e:\n"
-                      "    print(str(e), time.monotonic() - start < 0.4)"))]
-
-      ;; `gather` cancels the siblings of a failed child, so it has to hear about
-      ;; the failure while they are still running.
-      (is (= "thunk refused True" (str/trim (str (:stdout answer)))))))
+  ;; A sibling still writing after the caller has moved on is how parallel writes
+  ;; end up interleaved with the code that handles their error.
+  (testing "an ordinary failure is raised only after its running siblings finished"
+    (is (= "thunk refused [1]"
+           (par-printed (str "try:\n" "    vis_runtime.par([fail, rec(1, 0.3)])\n"
+                             "except ValueError as e:\n" "    print(str(e), ran)")))))
+  (testing "every thunk still runs, including those past the quota window"
+    (runtime/threads! 0 0 1)
+    (is (= "thunk refused [1, 2]"
+           (par-printed (str "try:\n" "    vis_runtime.par([fail, rec(1), rec(2)])\n"
+                             "except ValueError as e:\n" "    print(str(e), ran)"))))
+    (runtime/threads! 0 0 8))
   (testing "when two fail it is the FIRST of them, by position, that is raised"
-    (let [session
-          (harness/block-session)
-
-          answer
-          (block session
-                 (str "import time, vis_runtime\n" "def boom(delay, message):\n"
-                      "    def run():\n" "        time.sleep(delay)\n"
-                      "        raise ValueError(message)\n" "    return run\n"
-                      "try:\n" "    vis_runtime.par([boom(0.2, 'first'), boom(0.0, 'second')])\n"
-                      "except ValueError as e:\n" "    print(str(e))"))]
-
-      (is (= "first" (str/trim (str (:stdout answer))))))))
+    (is (= "first"
+           (par-printed (str "def boom(delay, message):\n"
+                             "    def run():\n" "        time.sleep(delay)\n"
+                             "        raise ValueError(message)\n" "    return run\n"
+                             "try:\n"
+                             "    vis_runtime.par([boom(0.2, 'first'), boom(0.0, 'second')])\n"
+                             "except ValueError as e:\n" "    print(str(e))")))))
+  (testing "an interrupt stops the batch and wins over an earlier failure"
+    ;; A quota of one starts each thunk only after the one before it settled, so
+    ;; `fail` had raised and `rec(1)` had not started when the interrupt came.
+    (runtime/threads! 0 0 1)
+    (is (= "KeyboardInterrupt('stopped') []"
+           (par-printed (str "try:\n" "    vis_runtime.par([fail, interrupt, rec(1)])\n"
+                             "except BaseException as e:\n" "    print(repr(e), ran)"))))
+    (runtime/threads! 0 0 8))
+  (testing "a par nested in a par child follows the same rule"
+    (is (= "thunk refused [1, 2, 3]"
+           (par-printed (str "def inner():\n" "    return vis_runtime.par([fail, rec(1), rec(2)])\n"
+                             "try:\n" "    vis_runtime.par([inner, rec(3)])\n"
+                             "except ValueError as e:\n" "    print(str(e), sorted(ran))"))))
+    (runtime/threads! 0 0 1)
+    (is (= "KeyboardInterrupt('stopped') []"
+           (par-printed (str "def inner():\n" "    return vis_runtime.par([interrupt, rec(1)])\n"
+                             "try:\n" "    vis_runtime.par([inner, rec(2)])\n"
+                             "except BaseException as e:\n" "    print(repr(e), ran)"))))
+    (runtime/threads! 0 0 8)))
 
 (harness/defbuilt-test nested-par-test
                        (testing "a par inside a par child runs inline instead of deadlocking"
