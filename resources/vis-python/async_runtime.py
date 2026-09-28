@@ -3603,6 +3603,74 @@ def __vis_normalize_module__(tree, flags):
             continue
         else:
             __vis_node__.value = __vis_wrap__(__vis_v__, "__vis_settle_stmt__")
+
+    # The ONE expression position that settles is an ELEMENT a call consumes. A
+    # comprehension or a literal list / tuple / set / dict written straight into a
+    # call's arguments hands that call its elements, and a C consumer such as
+    # `str.join` or `json.dumps` type-checks them without touching one dunder, so a
+    # thunk there could never settle itself: `'\n'.join(cat(p, a, b) for a, b in
+    # spans)` died with "expected str instance, __vis_Call__ found". An element
+    # that holds a call now settles where it is written, at every depth of such a
+    # literal. The calls that BATCH or only STORE their elements keep the thunks,
+    # as `hs = [shell(c) for c in cmds]` does, so `gather(*(shell(c) for c in
+    # cmds))`, `hs.extend(...)` and `jobs.append((k, shell(c)))` still batch.
+    # Settling early anywhere else costs concurrency at most: `gather` hands a
+    # plain value straight back.
+    __vis_keep__ = {
+        "gather",
+        "wait",
+        "as_completed",
+        "list",
+        "tuple",
+        "set",
+        "frozenset",
+        "dict",
+        "append",
+        "extend",
+        "insert",
+        "add",
+        "update",
+    }
+    __vis_lits__ = (
+        __vis_ast__.List,
+        __vis_ast__.Tuple,
+        __vis_ast__.Set,
+        __vis_ast__.Dict,
+        __vis_ast__.ListComp,
+        __vis_ast__.SetComp,
+        __vis_ast__.GeneratorExp,
+        __vis_ast__.DictComp,
+    )
+
+    def __vis_consume__(v):
+        if isinstance(v, __vis_ast__.Starred):
+            v.value = __vis_consume__(v.value)
+        elif isinstance(v, (__vis_ast__.List, __vis_ast__.Tuple, __vis_ast__.Set)):
+            v.elts = [__vis_consume__(e) for e in v.elts]
+        elif isinstance(v, __vis_ast__.Dict):
+            v.keys = [k if k is None else __vis_consume__(k) for k in v.keys]
+            v.values = [__vis_consume__(e) for e in v.values]
+        elif isinstance(v, __vis_ast__.DictComp):
+            v.key = __vis_consume__(v.key)
+            v.value = __vis_consume__(v.value)
+        elif isinstance(v, __vis_lits__):  # the list / set / generator comprehensions
+            v.elt = __vis_consume__(v.elt)
+        elif any(isinstance(n, __vis_ast__.Call) for n in __vis_ast__.walk(v)):
+            return __vis_wrap__(v, "__vis_settle_stmt__")
+        return v
+
+    for __vis_node__ in __vis_nodes__:
+        if not isinstance(__vis_node__, __vis_ast__.Call):
+            continue
+        __vis_f__ = __vis_node__.func
+        __vis_name__ = getattr(__vis_f__, "id", None) or getattr(__vis_f__, "attr", "")
+        if __vis_name__ in __vis_keep__ or __vis_name__.startswith("__vis_"):
+            continue
+        for __vis_a__ in __vis_node__.args + [k.value for k in __vis_node__.keywords]:
+            if isinstance(__vis_a__, __vis_ast__.Starred):
+                __vis_a__ = __vis_a__.value
+            if isinstance(__vis_a__, __vis_lits__):
+                __vis_consume__(__vis_a__)
     # Every wrap above is a NEW node with no position: `compile()` refuses an AST
     # whose expr is missing `lineno` (the whole snapshot replay silently restored
     # nothing), so locations are filled in once the tree is final.

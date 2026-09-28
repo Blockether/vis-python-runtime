@@ -20,6 +20,11 @@
      back a result. A call in EXPRESSION position still defers — that is the seam
      `gather` batches through — and so does a statement inside an `async def`,
      where holding an awaitable is the idiom.
+   - CONSUMED ELEMENTS. A comprehension or literal written straight into a call's
+     arguments hands that call its elements, and `str.join` or `json.dumps`
+     type-checks them in C, so an element holding a call settles where it is
+     written. `gather` and the calls that only STORE elements (`list(...)`,
+     `.append`, `.extend`) keep their thunks, so a batch still batches.
    - SCOPE. Auto-settle drives OUR thunks and nothing else: a generator binding
      is not exhausted, and an object whose `__getattr__` answers every name is
      not mistaken for a coroutine.
@@ -109,12 +114,14 @@
                        "    except AttributeError:\n" "        miss = 'safe'\n"
                        "    return [got, len(ran), miss]\n" "print(_t())")))))))
 
-(harness/defbuilt-test
-  deferred-call-inline-concat-test
+(defn- text-session
+  "A session with `cat` (answers \"body\") and `grep` (answers \"hits\"), plus the
+   atom both record their calls into."
+  []
   (let [calls
         (atom [])
 
-        s
+        session
         (harness/tool-session {"cat" (fn [args]
                                        (swap! calls conj [:cat args])
                                        "body")
@@ -122,10 +129,47 @@
                                         (swap! calls conj [:grep args])
                                         "hits")})]
 
+    [session calls]))
+
+(harness/defbuilt-test
+  deferred-call-inline-concat-test
+  (let [[s calls] (text-session)]
     (testing "inline text concatenation settles one call in either operand position"
       (is (= "['prefixbody', 'hitssuffix']"
              (ran s "print(['prefix' + cat('doc'), grep('needle') + 'suffix'])")))
       (is (= [[:cat ["doc"]] [:grep ["needle"]]] @calls)))))
+
+(harness/defbuilt-test
+  consumed-element-settle-test
+  ;; Regression: `'\n'.join(cat(p, a, b) for a, b in spans)` built one thunk per
+  ;; span and `str.join` refused the first with "expected str instance,
+  ;; __vis_Call__ found": a C consumer type-checks its elements without touching
+  ;; a dunder, so no inline settle could fire.
+  (testing "a generator handed to `str.join` settles each element where it is written"
+    (let [[s calls] (text-session)]
+      (is (= "body|body" (ran s "print('|'.join(cat(ce_p) for ce_p in ('a', 'b')))")))
+      (is (= [[:cat ["a"]] [:cat ["b"]]] @calls))))
+  (testing "literals and comprehensions handed to `json.dumps` settle at every depth"
+    (let [[s calls] (text-session)]
+      (is (= "[\"body\", \"hits\"] {\"k\": [\"body\"]} [[\"a\", \"hits\"]]"
+             (ran s
+                  (str "import json\n" "print(json.dumps([cat('x'), grep('y')]),"
+                       " json.dumps({'k': [cat('z')]}),"
+                       " json.dumps([(ce_q, grep(ce_q)) for ce_q in ('a',)]))"))))
+      (is (= 4 (count @calls)))))
+  (testing "a batch keeps its thunks: a holder stores them and `gather` runs them"
+    (let [[s calls] (text-session)]
+      (is (= "['__vis_Call__']"
+             (ran s
+                  (str "ce_hs = list(cat(ce_p) for ce_p in ('a', 'b'))\n"
+                       "ce_hs.extend(cat(ce_p) for ce_p in ('c',))\n"
+                       "ce_jobs = []\n" "ce_jobs.append(('k', grep('d')))\n"
+                       "ce_all = ce_hs + [ce_jobs[0][1]]\n"
+                       "print(sorted({type(ce_x).__name__ for ce_x in ce_all}))"))))
+      (is (empty? @calls))
+      (is (= "['body', 'body', 'body', 'hits']"
+             (ran s "print(await gather(*ce_hs, ce_jobs[0][1]))")))
+      (is (= 4 (count @calls))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Statement-depth settle. A stub HOST tool stands in for a vis tool: the
