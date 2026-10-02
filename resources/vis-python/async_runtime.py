@@ -4114,28 +4114,35 @@ def __vis_def_details__(name, fn):
 
 
 def defs(name=None, *, pattern=None, limit=20, offset=0, details=False):
-    """Find and refine the helpers this session defined.
+    """Find and refine the helpers and variables this session defined.
 
-    `defs()` lists up to 20 helpers, sorted by name. `pattern` is a case-sensitive
-    regex over names and their first docstring line (the 72-character gist).
-    `limit` is an integer from 1 to 100; `offset` is a nonnegative integer into
-    the matches. Counts and a continuation hint make omitted rows explicit.
+    `defs()` lists up to 20 entries: helpers sorted by name, then variables.
+    `pattern` is a case-sensitive regex over names, a helper's first docstring
+    line (the 72-character gist) and a variable's type. `limit` is an integer
+    from 1 to 100; `offset` is a nonnegative integer into the matches. Counts
+    and a continuation hint make omitted rows explicit.
     Call hints are capped at 120 characters, omit annotations and show only
     default types (`=<str>`), never values. They are hints, not executable code.
+    A variable row shows its type and size, never its value, and whether it is
+    saved for a sandbox restart; a row that is not saved says why.
 
-    `defs("name")` returns exact source. `defs("name", details=True)` instead
-    returns origin, source SHA-256 and up to 20 source-derived dependency names
-    with types and presence, including captured names. No state values appear.
+    `defs("name")` returns a helper's exact source, or a variable's row.
+    `defs("name", details=True)` instead returns a helper's origin, source
+    SHA-256 and up to 20 source-derived dependency names with types and
+    presence, including captured names. No state values appear.
     This advisory view cannot prove dynamic dependencies or handle liveness;
     default/decorator expressions are not analyzed. The fingerprint identifies
     source, not the current global, default or captured state.
     Named lookups cannot be combined with listing controls.
 
     Read source before refining a stable name. At phase boundaries review your
-    helpers and explicitly `del` obsolete names after checking callers, aliases
-    and captured defaults. Nothing is automatically deleted or promoted.
-    Helpers persist across turns and are re-created after a restart, marked
-    `(restored)`; external resources and live state may need reinitializing.
+    helpers and variables and explicitly `del` obsolete names after checking
+    callers, aliases and captured defaults; `del` also frees the value.
+    Nothing is automatically deleted or promoted.
+    Helpers, imports and saved variables persist across turns and are
+    re-created after a sandbox restart, marked `(restored)`. A value over 1 MiB
+    (4 MiB for all values) or one that cannot be pickled — an open file, a
+    handle, a generator — is not saved; external resources need reinitializing.
     """
     import inspect
     import re
@@ -4156,12 +4163,16 @@ def defs(name=None, *, pattern=None, limit=20, offset=0, details=False):
         matcher = re.compile(pattern) if pattern is not None else None
     except re.error as exc:
         raise ValueError("defs: invalid regex pattern") from exc
+    g = globals()
     live = __vis_user_defs__()
     if name is not None:
         fn = dict(live).get(name)
         if fn is None:
+            entry = __vis_snapshot__()[1].get(name)
+            if entry and entry[0] in ("variable", "class") and name in g:
+                return __vis_var_row__(name, g[name], entry[1])
             raise NameError(
-                "defs: this session defined no function named "
+                "defs: this session defined no function or variable named "
                 + repr(name[:80])
                 + ' — search with defs(pattern="...").'
             )
@@ -4172,33 +4183,82 @@ def defs(name=None, *, pattern=None, limit=20, offset=0, details=False):
         except Exception:
             return "# source unavailable for " + __vis_def_gist__(name, 80)
     docs = __vis_def_docs__()
+    entries = __vis_snapshot__()[1]
+    variables = [
+        (n, g[n], status)
+        for n, (kind, status) in sorted(entries.items())
+        if kind in ("variable", "class") and not n.startswith("_") and n in g
+    ]
     matches = []
     for n, fn in live:
         gist = __vis_def_gist__(docs.get(n))
         if matcher is None or matcher.search(n) or matcher.search(gist):
-            matches.append((n, fn, gist))
+            matches.append((n, fn, gist, None))
+    for n, value, status in variables:
+        if (
+            matcher is None
+            or matcher.search(n)
+            or matcher.search(__vis_var_kind__(value))
+        ):
+            matches.append((n, value, "", status))
     page = matches[offset : offset + limit]
     rows = [
-        f"{len(live)} definition{'s' if len(live) != 1 else ''} in this sandbox"
+        f"{len(live)} function{'s' if len(live) != 1 else ''} and"
+        f" {len(variables)} variable{'s' if len(variables) != 1 else ''} in this sandbox"
         f" | {len(matches)} matches | {len(page)} shown (offset={offset})"
     ]
-    if not live:
+    if not live and not variables:
         rows.append(
-            "no functions defined by this session yet — define a helper to reuse it."
+            "nothing defined by this session yet — define a helper or keep a result"
+            " in a variable to reuse it."
         )
-    for n, fn, gist in page:
-        row = "  " + __vis_def_call__(n, fn) + " | " + __vis_def_origin__(fn)
+    for n, value, gist, status in page:
+        if status is not None:
+            rows.append("  " + __vis_var_row__(n, value, status))
+            continue
+        row = "  " + __vis_def_call__(n, value) + " | " + __vis_def_origin__(value)
+        saved = entries.get(n, ("function", "saved"))[1]
+        if saved != "saved":
+            row += " | not saved: " + saved
         rows.append(row + (" | " + gist if gist else ""))
     tail = 'defs("name") returns source; defs("name", details=True) shows dependencies.'
-    bare = sum(1 for _, _, gist in page if not gist)
+    bare = sum(1 for _, _, gist, status in page if status is None and not gist)
     if bare:
         tail += f" {bare} {'has' if bare == 1 else 'have'} no docstring in this page."
+    if any(status is not None for _, _, _, status in page):
+        tail += " Saved variables come back after a sandbox restart."
     rows.append(tail)
     if offset + len(page) < len(matches):
         rows.append(
             f"More: repeat this search with offset={offset + len(page)}, limit={limit}."
         )
     return "\n".join(rows)
+
+
+def __vis_var_kind__(value):
+    # A variable's TYPE and size, never its value: a listing must not print
+    # state, and `len` runs only on the builtin types whose length is free.
+    t = type(value)
+    if isinstance(value, type):
+        return "class"
+    kind = __vis_def_type__(value)
+    if t in (str, bytes, bytearray):
+        return kind + ", " + str(len(value)) + (" chars" if t is str else " bytes")
+    if t in (list, tuple, dict, set, frozenset):
+        return (
+            kind + ", " + str(len(value)) + (" item" if len(value) == 1 else " items")
+        )
+    return kind
+
+
+def __vis_var_row__(name, value, status):
+    return (
+        __vis_def_gist__(name, 80)
+        + ": "
+        + __vis_var_kind__(value)
+        + " | "
+        + ("saved" if status == "saved" else "not saved: " + status)
+    )
 
 
 def __vis_bound_name__(src):
@@ -4299,17 +4359,122 @@ def __vis_block_order__(filename, code):
         return (0, 0)
 
 
-def __vis_defs_snapshot__():
-    # Source text that RE-CREATES this session's helpers in a FRESH process.
-    # The sandbox dies with the process, so a gateway restart used to lose every
-    # helper the session had refined while its TRANSCRIPT still showed them —
-    # the next call was a NameError. The host writes this snapshot beside the
-    # session and feeds it back through `__vis_restore_defs__`.
+# A session VARIABLE survives a restart as a pickle inside the snapshot. One
+# value may take `__vis_value_limit__` bytes and all of them together
+# `__vis_values_budget__`; a value past either is reported as NOT SAVED with its
+# reason, never cut short. The snapshot is the session's own file, written by
+# the host beside it, and it already holds source the restore executes: a pickle
+# in it adds no new trust boundary.
+__vis_value_limit__ = 1 << 20
+__vis_values_budget__ = 4 << 20
+
+
+class __vis_ValueTooLarge__(Exception):
+    pass
+
+
+class __vis_CappedSink__:
+    # The pickle's output stream, refusing to grow past `limit` bytes. Protocol 5
+    # flushes frame by frame and hands a large buffer over in ONE write, so a
+    # value far too large to save costs about one limit's worth of work.
+    def __init__(self, limit):
+        self.limit = limit
+        self.size = 0
+        self.parts = []
+
+    def write(self, data):
+        size = memoryview(data).nbytes
+        self.size += size
+        if self.size > self.limit:
+            raise __vis_ValueTooLarge__()
+        self.parts.append(bytes(data))
+        return size
+
+
+def __vis_rough_size__(value, limit):
+    # A LOWER bound on a value's size: `sys.getsizeof` summed over plain builtin
+    # containers, stopping once it passes `limit`. Pickling or `repr`-ing a
+    # multi-megabyte string only to learn it is too large copies it whole, and
+    # the snapshot runs after EVERY block.
+    import sys
+
+    total = 0
+    stack = [value]
+    seen = set()
+    steps = 0
+    while stack and steps < 100000:
+        v = stack.pop()
+        steps += 1
+        key = __vis_builtins__.id(v)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            total += sys.getsizeof(v)
+        except Exception:
+            pass
+        if total > limit:
+            break
+        t = type(v)
+        if t is dict:
+            stack.extend(v.keys())
+            stack.extend(v.values())
+        elif t in (list, tuple, set, frozenset):
+            stack.extend(v)
+    return total
+
+
+def __vis_pickle_value__(value, refs, limit):
+    # A session helper, class or import INSIDE a value travels by NAME: the
+    # restore re-creates it from source first and the value points at that one.
+    # Without this an instance of a session class could never be saved.
+    import pickle
+
+    class Pickler(pickle.Pickler):
+        def persistent_id(self, obj):
+            return refs.get(__vis_builtins__.id(obj))
+
+    sink = __vis_CappedSink__(limit)
+    Pickler(sink, protocol=5).dump(value)
+    return b"".join(sink.parts)
+
+
+def __vis_unpickle_value__(blob):
+    import io
+    import pickle
+
+    g = globals()
+
+    class Unpickler(pickle.Unpickler):
+        def persistent_load(self, pid):
+            if not isinstance(pid, str) or pid not in g:
+                raise pickle.UnpicklingError(
+                    "needs " + repr(pid) + ", which is not defined"
+                )
+            return g[pid]
+
+    return Unpickler(io.BytesIO(blob)).load()
+
+
+def __vis_snapshot__():
+    # Source text that RE-CREATES this session's helpers, imports and variables
+    # in a FRESH process, and for every session name it considered `(kind,
+    # status)`: kind is import/function/class/variable, status is "saved" or why
+    # it is not. `defs()` reads the same answer, so the listing never claims more
+    # than the file holds.
+    #
+    # The sandbox dies with its process — an idle timeout, a settings change, a
+    # gateway restart — while the TRANSCRIPT still shows every helper and every
+    # variable the session built; the next call was a NameError. The host writes
+    # this snapshot beside the session after each block and feeds it back
+    # through `__vis_restore_defs__`.
     #
     # Only names the SESSION created are considered: `__vis_boot_names__` is the
     # global namespace as the host handed it over, so auto-imported shims and
-    # bound tools are never re-emitted. Every chunk is validated on its own, so a
-    # helper that cannot be re-created costs ONLY itself.
+    # bound tools are never re-emitted. Every source chunk is validated on its
+    # own and every value pickled on its own, so a name that cannot be re-created
+    # costs ONLY itself — and is named in the file, so the restore can say so.
+    import base64
     import inspect
     import sys
 
@@ -4324,81 +4489,144 @@ def __vis_defs_snapshot__():
     aliases = []
     seen = {}
     bound_names = set()
+    refs = {}
+    pending = []
+    entries = {}
     for n, v in sorted(g.items()):
         if n.startswith("__") or n in prot or n in boot:
             continue
-        if isinstance(v, module_type):
-            mod = getattr(v, "__name__", "")
-            if mod:
-                imports.append(
-                    "import " + mod if mod == n else "import " + mod + " as " + n
-                )
-            continue
-        code = __vis_def_code__(v)
-        f = getattr(code, "co_filename", "") if code is not None else ""
-        if isinstance(f, str) and f.startswith("<prog:"):
-            key = __vis_builtins__.id(code)
-            if key in seen:
-                # Two names, ONE function: emit the source once. A name the chunk
-                # already binds needs no alias line at all.
-                if n not in bound_names:
-                    aliases.append(n + " = " + seen[key] + "\n")
+        # One name's failure — a metaclass hook that raises, a `__module__` that
+        # is not a string — costs that name alone, named with its reason.
+        try:
+            if isinstance(v, module_type):
+                mod = getattr(v, "__name__", "")
+                if mod:
+                    imports.append(
+                        "import " + mod if mod == n else "import " + mod + " as " + n
+                    )
+                    refs.setdefault(__vis_builtins__.id(v), n)
+                    entries[n] = ("import", "saved")
+                    continue
+            code = __vis_def_code__(v)
+            f = getattr(code, "co_filename", "") if code is not None else ""
+            if isinstance(f, str) and f.startswith("<prog:"):
+                key = __vis_builtins__.id(code)
+                if key in seen:
+                    # Two names, ONE function: emit the source once. A name the chunk
+                    # already binds needs no alias line at all.
+                    if n not in bound_names:
+                        aliases.append(n + " = " + seen[key] + "\n")
+                    refs.setdefault(__vis_builtins__.id(v), n)
+                    entries[n] = ("function", "saved")
+                    continue
+                try:
+                    raw = inspect.getsource(v)
+                except Exception:
+                    raw = None
+                chunk = __vis_chunk__(raw, n) if raw else None
+                if chunk:
+                    seen[key] = n
+                    bound_names.add(chunk[1])
+                    funcs.append((__vis_block_order__(f, code), chunk[0]))
+                    refs.setdefault(__vis_builtins__.id(v), n)
+                    entries[n] = ("function", "saved")
+                else:
+                    entries[n] = ("function", "its source cannot be read back")
                 continue
-            try:
-                raw = inspect.getsource(v)
-            except Exception:
-                continue
-            chunk = __vis_chunk__(raw, n)
-            if chunk:
-                seen[key] = n
-                bound_names.add(chunk[1])
-                funcs.append((__vis_block_order__(f, code), chunk[0]))
-            continue
-        if isinstance(v, type):
-            body = __vis_class_source__(v)
-            chunk = __vis_chunk__(body, n) if body else None
-            if chunk:
-                classes.append(chunk[0])
-                bound_names.add(chunk[1])
-                continue
-        if callable(v):
-            # A callable this session IMPORTED from a real module — `from pathlib
-            # import Path`. The helper that calls it needs the NAME at call time.
-            mod = getattr(v, "__module__", "") or ""
-            qual = getattr(v, "__qualname__", "") or ""
-            owner = sys.modules.get(mod)
+            if isinstance(v, type):
+                body = __vis_class_source__(v)
+                chunk = __vis_chunk__(body, n) if body else None
+                if chunk:
+                    classes.append(chunk[0])
+                    bound_names.add(chunk[1])
+                    refs.setdefault(__vis_builtins__.id(v), n)
+                    entries[n] = ("class", "saved")
+                    continue
+            if callable(v):
+                # A callable this session IMPORTED from a real module — `from pathlib
+                # import Path`. The helper that calls it needs the NAME at call time.
+                mod = getattr(v, "__module__", "") or ""
+                qual = getattr(v, "__qualname__", "") or ""
+                owner = sys.modules.get(mod)
+                if (
+                    owner is not None
+                    and qual
+                    and "." not in qual
+                    and getattr(owner, "__file__", None)
+                    and getattr(owner, qual, None) is v
+                ):
+                    imports.append(
+                        "from " + mod + " import " + qual
+                        if qual == n
+                        else "from " + mod + " import " + qual + " as " + n
+                    )
+                    refs.setdefault(__vis_builtins__.id(v), n)
+                    entries[n] = ("import", "saved")
+                    continue
+            # A small plain constant stays readable source — `root` as a string is the
+            # usual closed-over path, and a small dict the usual config a helper takes
+            # as a DEFAULT ARGUMENT (`def run(p, cfg=CFG)`), which resolves at def
+            # time. SIZE FIRST: `repr` of a multi-megabyte blob costs more than the
+            # whole snapshot. Only a repr that reads back as a LITERAL is kept; every
+            # other value is pickled below.
             if (
-                owner is not None
-                and qual
-                and "." not in qual
-                and getattr(owner, "__file__", None)
-                and getattr(owner, qual, None) is v
-            ):
-                imports.append(
-                    "from " + mod + " import " + qual
-                    if qual == n
-                    else "from " + mod + " import " + qual + " as " + n
+                v is None
+                or isinstance(v, (int, float, bool))
+                or (isinstance(v, str) and len(v) <= 500)
+                or (
+                    isinstance(v, (dict, list, tuple, set, frozenset))
+                    and len(v) <= 100
+                    and __vis_rough_size__(v, 16384) <= 16384
                 )
+            ):
+                rep = repr(v)
+                if len(rep) <= 500 and __vis_literal_ok__(rep):
+                    consts.append(n + " = " + rep)
+                    entries[n] = ("variable", "saved")
+                    continue
+            pending.append((n, v))
+        except Exception as exc:
+            entries[n] = (
+                "variable",
+                "cannot be saved ("
+                + __vis_def_gist__(__vis_failure_text__(exc), 120)
+                + ")",
+            )
+    values = {}
+    budget = __vis_values_budget__
+    for n, v in pending:
+        kind = "class" if isinstance(v, type) else "variable"
+        what = __vis_def_type__(v)
+        limit = min(__vis_value_limit__, budget)
+        try:
+            if __vis_rough_size__(v, limit) > limit:
+                raise __vis_ValueTooLarge__()
+            blob = __vis_pickle_value__(v, refs, limit)
+        except __vis_ValueTooLarge__:
+            entries[n] = (
+                kind,
+                what + " is over the 1 MiB limit for one saved value"
+                if limit == __vis_value_limit__
+                else what + " does not fit: saved values reached their 4 MiB budget",
+            )
             continue
-        # A plain constant — `root` as a string is the usual closed-over path, and
-        # a small dict is the usual config a helper takes as a DEFAULT ARGUMENT
-        # (`def run(p, cfg=CFG)`), which resolves at def time: without `CFG` that
-        # helper does not come back at all. SIZE FIRST: `repr` of a multi-megabyte
-        # blob costs more than the whole snapshot, every block, only to be thrown
-        # away by the cap. Only a repr that reads back as a LITERAL is kept.
-        if (
-            v is None
-            or isinstance(v, (int, float, bool))
-            or (isinstance(v, str) and len(v) <= 500)
-            or (isinstance(v, (dict, list, tuple, set, frozenset)) and len(v) <= 100)
-        ):
-            rep = repr(v)
-            if len(rep) <= 500 and __vis_literal_ok__(rep):
-                consts.append(n + " = " + rep)
-    if not classes and not funcs:
-        return ""
+        except Exception as exc:
+            entries[n] = (
+                kind,
+                what
+                + " cannot be pickled ("
+                + __vis_def_gist__(__vis_failure_text__(exc), 120)
+                + ")",
+            )
+            continue
+        budget -= len(blob)
+        values[n] = base64.b64encode(blob).decode("ascii")
+        entries[n] = (kind, "saved")
+    unsaved = {n: status for n, (_kind, status) in entries.items() if status != "saved"}
+    if not (imports or consts or classes or funcs or aliases or values or unsaved):
+        return ("", entries)
     parts = [
-        "# Session helper definitions, re-created automatically in a fresh sandbox.\n"
+        "# Session helpers and variables, re-created automatically in a fresh sandbox.\n"
     ]
     if imports:
         parts.append("\n".join(sorted(set(imports))) + "\n")
@@ -4414,15 +4642,89 @@ def __vis_defs_snapshot__():
     strays = sorted(b for b in bound_names if b and b not in g)
     if strays:
         parts.append("\n".join("del " + s for s in strays) + "\n")
-    return "\n".join(parts)
+    if values or unsaved:
+        # LAST, and read back with `literal_eval`, never executed.
+        parts.append(
+            "# Saved variables (base64 pickles) and the names that could not be saved.\n"
+            + "__vis_values__ = "
+            + repr(values)
+            + "\n__vis_unsaved__ = "
+            + repr(unsaved)
+            + "\n"
+        )
+    return ("\n".join(parts), entries)
+
+
+def __vis_defs_snapshot__():
+    # The snapshot text the host writes after every block ("" = nothing to keep,
+    # so the host drops a stale file). A name that disappeared since the last
+    # snapshot was `del`eted: CPython frees it at once unless a reference cycle
+    # holds it, so collect those too — a dropped variable stops costing memory
+    # now, not at some later collection.
+    import gc
+
+    text, entries = __vis_snapshot__()
+    g = globals()
+    names = frozenset(entries)
+    last = g.get("__vis_snapshot_names__")
+    g["__vis_snapshot_names__"] = names
+    if last is not None and not last <= names:
+        gc.collect()
+    return text
+
+
+def __vis_split_snapshot__(src):
+    # (saved values, unsaved reasons, source part) of a snapshot. The two metadata
+    # assignments close the file; they are read with `literal_eval`, never run,
+    # and only the text above them becomes the restored block — megabytes of
+    # base64 have no place in `defs("name")` or a traceback.
+    values = {}
+    unsaved = {}
+    try:
+        tree = __vis_ast__.parse(src)
+    except Exception:
+        return (values, unsaved, src)
+    cut = None
+    for stmt in tree.body:
+        if (
+            isinstance(stmt, __vis_ast__.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], __vis_ast__.Name)
+            and stmt.targets[0].id in ("__vis_values__", "__vis_unsaved__")
+        ):
+            if cut is None:
+                cut = stmt.lineno
+            try:
+                data = __vis_ast__.literal_eval(stmt.value)
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                into = values if stmt.targets[0].id == "__vis_values__" else unsaved
+                into.update(
+                    (k, v)
+                    for k, v in data.items()
+                    if isinstance(k, str) and isinstance(v, str)
+                )
+    if cut is None:
+        return (values, unsaved, src)
+    return (values, unsaved, "".join(src.splitlines(True)[: cut - 1]))
 
 
 def __vis_restore_defs__(src):
-    # Re-create a previous process's helpers. Registering the source FIRST gives
-    # them a real `<prog:N>` entry, so `defs("name")` and `inspect.getsource`
-    # read a restored helper back exactly like one defined in this process.
-    name = __vis_register_source__(src)
-    globals()["__vis_restored_block__"] = name
+    # Re-create a previous process's helpers, imports and variables. Registering
+    # the source FIRST gives the helpers a real `<prog:N>` entry, so
+    # `defs("name")` and `inspect.getsource` read a restored helper back exactly
+    # like one defined in this process. Answers how many helpers are live; what
+    # came back and what did not is left in `__vis_restore_report__`, which the
+    # host turns into the restart notice the next block prints.
+    import base64
+    import inspect
+
+    g = globals()
+    before = set(g)
+    values, unsaved, head = __vis_split_snapshot__(src)
+    name = __vis_register_source__(head)
+    g["__vis_restored_block__"] = name
     # A name that is a BOUND TOOL *now* is never restored, whatever it was when the
     # snapshot was written. `def patch(...)` was an ordinary session helper before
     # the tool existed; exec'ing that file into a process that HAS the tool wrote
@@ -4430,17 +4732,17 @@ def __vis_restore_defs__(src):
     # because it skips protected names. Statements are dropped by the names they
     # BIND, so an alias line or a constant goes the same way, and the next snapshot
     # no longer carries them — the file heals itself.
-    prot = set(globals().get("__vis_protected_names__") or [])
+    prot = set(g.get("__vis_protected_names__") or [])
     try:
         # The SAME rewrite a locally-defined helper gets (`__vis_normalize_module__`):
         # a restored helper is the one the session wrote, not a raw re-exec of its text.
-        tree = __vis_ast__.parse(src)
+        tree = __vis_ast__.parse(head)
         body = __vis_normalize_module__(tree, __vis_future_flags__(tree)).body
     except Exception:
-        # A file that will not PARSE cannot be replayed at all — never let that
-        # escape as a failure of the whole restore.
-        return len(__vis_user_defs__())
-    dropped = []
+        # A source part that will not PARSE cannot be replayed at all — never let
+        # that escape as a failure of the whole restore.
+        body = []
+    dropped = [n for n in values if n in prot]
     kept = []
     for stmt in body:
         clash = [n for n in __vis_assigned_names__([stmt]) if n in prot]
@@ -4448,27 +4750,103 @@ def __vis_restore_defs__(src):
             dropped.extend(clash)
         else:
             kept.append(stmt)
-    globals()["__vis_restore_dropped__"] = sorted(set(dropped))
-    try:
-        exec(
-            compile(__vis_ast__.Module(body=kept, type_ignores=[]), name, "exec"),
-            globals(),
-        )
-    except Exception:
-        # One bad statement must not cost the whole toolbox — a shim this build
-        # no longer ships, a helper whose default argument no longer resolves.
-        # Replay statement by statement and keep every definition that still
-        # loads; each keeps its own line numbers, so its source reads back.
-        for stmt in kept:
+    g["__vis_restore_dropped__"] = sorted(set(dropped))
+    blobs = {n: b for n, b in values.items() if n not in prot}
+    errors = {}
+
+    def run(stmts):
+        exec(compile(__vis_ast__.Module(body=stmts, type_ignores=[]), name, "exec"), g)
+
+    def load_values():
+        loaded = False
+        for n in sorted(blobs):
             try:
-                exec(
-                    compile(
-                        __vis_ast__.Module(body=[stmt], type_ignores=[]), name, "exec"
-                    ),
-                    globals(),
-                )
-            except Exception:
-                pass
+                g[n] = __vis_unpickle_value__(base64.b64decode(blobs[n]))
+            except Exception as exc:
+                errors[n] = __vis_failure_text__(exc)
+                continue
+            del blobs[n]
+            loaded = True
+        return loaded
+
+    # Values first: a helper's DEFAULT argument resolves at def time. A value
+    # that holds a session class or helper waits for the definitions below.
+    load_values()
+    pending = []
+    try:
+        run(kept)
+    except Exception:
+        pending = list(kept)
+    # One bad statement must not cost the whole toolbox — a shim this build no
+    # longer ships, a helper whose default argument no longer resolves. Replay
+    # statement by statement, and values with them, until nothing more loads;
+    # each statement keeps its own line numbers, so its source reads back.
+    while pending or blobs:
+        progress = False
+        for stmt in list(pending):
+            try:
+                run([stmt])
+            except Exception as exc:
+                for n in __vis_assigned_names__([stmt]):
+                    errors[n] = __vis_failure_text__(exc)
+                continue
+            pending.remove(stmt)
+            progress = True
+        if load_values():
+            progress = True
+        if not progress:
+            break
+    deleted = {
+        t.id
+        for stmt in kept
+        if isinstance(stmt, __vis_ast__.Delete)
+        for t in stmt.targets
+        if isinstance(t, __vis_ast__.Name)
+    }
+    lost = {}
+    for n, why in sorted(unsaved.items()):
+        if n not in g and n not in prot:
+            lost[n] = "not saved before the restart: " + why
+    for n in sorted(blobs):
+        lost[n] = "could not be restored: " + errors.get(n, "unknown error")
+    for stmt in pending:
+        for n in __vis_assigned_names__([stmt]):
+            if n not in g and n not in prot and n not in deleted:
+                lost[n] = "could not be re-created: " + errors.get(n, "unknown error")
+    module_type = type(inspect)
+    class_names = {s.name for s in kept if isinstance(s, __vis_ast__.ClassDef)}
+    import_names = set(
+        __vis_assigned_names__(
+            [
+                s
+                for s in kept
+                if isinstance(s, (__vis_ast__.Import, __vis_ast__.ImportFrom))
+            ]
+        )
+    )
+    report = {
+        "functions": [],
+        "classes": [],
+        "variables": [],
+        "imports": [],
+        "lost": lost,
+        "dropped": g["__vis_restore_dropped__"],
+    }
+    for n in sorted(set(g) - before):
+        if n.startswith("__"):
+            continue
+        v = g[n]
+        code = __vis_def_code__(v)
+        f = getattr(code, "co_filename", "") if code is not None else ""
+        if isinstance(v, module_type) or n in import_names:
+            report["imports"].append(n)
+        elif isinstance(f, str) and f.startswith("<prog:"):
+            report["functions"].append(n)
+        elif n in class_names:
+            report["classes"].append(n)
+        else:
+            report["variables"].append(n)
+    g["__vis_restore_report__"] = report
     return len(__vis_user_defs__())
 
 

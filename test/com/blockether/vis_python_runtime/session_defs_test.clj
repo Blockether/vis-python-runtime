@@ -1,5 +1,5 @@
 (ns com.blockether.vis-python-runtime.session-defs-test
-  "The helpers a session defines, across a PROCESS: `__vis_defs_snapshot__`,
+  "The helpers and variables a session defines, across a PROCESS: `__vis_defs_snapshot__`,
    `__vis_restore_defs__` and the `defs()` verb a block reads them back with.
 
    A sandbox dies with its process. Without these three, a host restart lost
@@ -174,17 +174,26 @@
       (is (= 3 restored))
       (is (= "Point(x=1, y=2) 7 3" stdout)))))
 
-(harness/defbuilt-test session-defs-skips-a-value-too-big-to-store-test
-                       ;; The snapshot used to `repr` every global BEFORE checking its size, so one
-                       ;; multi-megabyte string cost ~130ms per block to render text the cap then
-                       ;; threw away.
-                       (let [{:keys [snapshot stdout]}
-                             (across-processes (str "blob = \"x\" * 400000\n"
-                                                    "def small(x):\n    return x\n")
-                                               "print(\"blob\" in globals(), small(1))\n")]
-                         (testing "an oversized constant is never carried, and the helper still is"
-                           (is (> 2000 (count snapshot)))
-                           (is (= "False 1" stdout)))))
+(harness/defbuilt-test
+  session-defs-skips-a-value-too-big-to-store-test
+  ;; The snapshot used to `repr` every global BEFORE checking its size, so one
+  ;; multi-megabyte string cost ~130ms per block to render text the cap then threw
+  ;; away. A value it cannot carry is NAMED with its reason, so the restart notice
+  ;; says what is gone instead of leaving a NameError to find it (Blockether/vis#305).
+  (let [{:keys [snapshot stdout]}
+        (across-processes (str "blob = \"x\" * 2000000\n"
+                               "gen = (i for i in range(3))\n"
+                               "def small(x):\n    return x\n")
+                          (str "print(\"blob\" in globals(), \"gen\" in globals(), small(1))\n"
+                               "lost = __vis_restore_report__[\"lost\"]\n" "print(sorted(lost))\n"
+                               "print(lost[\"blob\"])\n" "print(lost[\"gen\"])\n"))]
+    (testing "an oversized value is never carried, and the helper still is"
+      (is (> 2000 (count snapshot)))
+      (is (str/starts-with? stdout "False False 1")))
+    (testing "each name left behind is reported with its reason"
+      (is (str/includes? stdout "['blob', 'gen']"))
+      (is (str/includes? stdout "over the 1 MiB limit for one saved value"))
+      (is (str/includes? stdout "generator cannot be pickled")))))
 
 (harness/defbuilt-test session-defs-keeps-a-decorated-helper-test
                        ;; `functools.lru_cache` answers a wrapper with no `__code__` of its own, so a
@@ -214,13 +223,130 @@
       (is (= 2 restored))
       (is (= "41\n42" stdout)))))
 
-(harness/defbuilt-test session-defs-snapshot-is-empty-without-definitions-test
+(harness/defbuilt-test session-defs-snapshot-is-empty-without-session-names-test
                        (let [session (harness/block-session)]
-                         (block session "x = 1")
-                         (testing "a session that defined nothing snapshots to nothing"
+                         (block session "print(1)")
+                         (testing "a session that bound nothing snapshots to nothing"
                            ;; Empty text is what tells the host to write no file and drop a stale one:
-                           ;; a session with no helpers must not restore yesterday's.
+                           ;; a session with nothing to keep must not restore yesterday's.
+                           (is (= "" (snapshot session))))
+                         (block session "x = 1")
+                         (testing "one plain variable is enough to keep a snapshot"
+                           (is (str/includes? (snapshot session) "x = 1")))
+                         (block session "del x")
+                         (testing "and deleting it empties the snapshot again"
                            (is (= "" (snapshot session))))))
+
+(harness/defbuilt-test
+  session-defs-carry-variables-test
+  ;; Blockether/vis#305: a sandbox restart kept the helpers but dropped every
+  ;; variable, so `vis_src` and `ext` — two Paths the transcript still showed —
+  ;; raised NameError on the next turn. A value now travels as a pickle, and a
+  ;; session class or helper inside it travels by name.
+  (let [{:keys [restored stdout]}
+        (across-processes (str "from pathlib import Path\n" "from dataclasses import dataclass\n"
+                               "vis_src = Path(\"/tmp/vis/src\")\n" "ext = vis_src / \"ext\"\n"
+                               "@dataclass\nclass Point:\n    x: int = 0\n    y: int = 0\n\n"
+                               "pts = [Point(1, 2)]\n"
+                               "def scale(p, k=2):\n    return Point(p.x * k, p.y * k)\n\n"
+                               "handlers = {\"scale\": scale}\n"
+                               "ROOT = Path(\"/tmp/root\")\n"
+                               "def under(rel, base=ROOT):\n    return base / rel\n")
+                          (str "print(vis_src, ext)\n" "print(handlers[\"scale\"](pts[0]))\n"
+                               "print(under(\"a\"))\n" "report = __vis_restore_report__\n"
+                               "print(report[\"variables\"], report[\"classes\"], "
+                               "report[\"functions\"], report[\"lost\"])\n"))]
+    (testing "Paths, a session-class instance and a dict holding a helper come back"
+      (is (str/starts-with? stdout "/tmp/vis/src /tmp/vis/src/ext\nPoint(x=2, y=4)\n")))
+    (testing "a helper whose default is a pickled value is re-created after that value"
+      (is (= 2 restored))
+      (is (str/includes? stdout "/tmp/root/a")))
+    (testing "the restore report names what came back, and nothing is lost"
+      (is (str/ends-with? stdout
+                          (str "['ROOT', 'ext', 'handlers', 'pts', 'vis_src'] ['Point'] "
+                               "['scale', 'under'] {}"))))))
+
+(harness/defbuilt-test
+  session-defs-values-share-one-budget-test
+  ;; The snapshot is rewritten after every block, so all values together are
+  ;; capped too, and the value that no longer fits is named, not dropped quietly.
+  (let [session
+        (harness/block-session)
+
+        _
+        (block session
+               (str/join "\n"
+                         (for [i (range 5)]
+                           (format "part_%d = \"%d\" * 900000" i i))))
+
+        text
+        (snapshot session)
+
+        listing
+        (ran session "print(defs())")]
+
+    (testing "values are saved until the budget is full, then reported as not saved"
+      (is (< (count text) (* 6 1024 1024)))
+      (is (str/includes? listing "part_3: str, 900000 chars | saved"))
+      (is (str/includes? listing "part_4: str, 900000 chars | not saved: str does not fit")))))
+
+(harness/defbuilt-test session-defs-del-drops-and-frees-a-variable-test
+                       ;; `del name` is how a session retires a variable: the next snapshot must not
+                       ;; carry it, and its memory must go now — a reference cycle would otherwise
+                       ;; hold it until some later collection.
+                       (let [session
+                             (harness/block-session)
+
+                             _
+                             (block session
+                                    (str "import weakref\n"
+                                         "class Node:\n    pass\n\n" "node = Node()\n"
+                                         "node.me = node\n" "probe = weakref.ref(node)\n"))
+
+                             before
+                             (snapshot session)
+
+                             _
+                             (block session "del node")
+
+                             after
+                             (snapshot session)
+
+                             alive
+                             (ran session "print(probe() is not None)")]
+
+                         (testing "the deleted variable leaves the snapshot"
+                           (is (str/includes? before "'node'"))
+                           (is (not (str/includes? after "'node'"))))
+                         (testing "and its memory is released at once, reference cycle included"
+                           (is (= "False" alive)))))
+
+(harness/defbuilt-test
+  session-defs-report-a-value-whose-helper-is-gone-test
+  ;; A value that points at a session helper loads only once that helper is
+  ;; back. When the helper cannot be re-created, the value is reported lost with
+  ;; its reason instead of surfacing later as a NameError.
+  (let [written
+        (harness/block-session)
+
+        _
+        (block written "def shout(s):\n    return s.upper()\n\nhandlers = {\"shout\": shout}\n")
+
+        text
+        (str/replace (snapshot written) "def shout(s):\n    return s.upper()\n" "")
+
+        fresh
+        (harness/block-session)
+
+        restored
+        (restore! fresh text)
+
+        lost
+        (ran fresh "print(__vis_restore_report__[\"lost\"])")]
+
+    (is (= 0 restored))
+    (is (str/includes? lost
+                       "'handlers': \"could not be restored: UnpicklingError: needs 'shout'"))))
 
 (harness/defbuilt-test
   defs-verb-test
@@ -248,7 +374,7 @@
                   "except NameError as exc:\n" "    print(\"refused:\", exc)\n"))]
 
     (testing "an empty session says what would fill the list"
-      (is (str/includes? empty "no functions defined by this session yet")))
+      (is (str/includes? empty "nothing defined by this session yet")))
     (testing "the listing carries the signature, and only definitions this session wrote"
       (is (str/includes? listed "widen(a, b=<int>)"))
       ;; An IMPORTED function is not this session's definition: a `def` is
@@ -329,7 +455,7 @@
          "\n"
          ["listing = defs()" "assert len(listing) < 6500, len(listing)"
           "assert len([line for line in listing.splitlines() if line.startswith('  ')]) == 20"
-          "assert '241 definitions' in listing and '241 matches' in listing"
+          "assert '241 functions and 3 variables' in listing and '244 matches' in listing"
           "assert 'offset=20' in listing" "assert 'PRIVATE_DEFAULT_SENTINEL' not in listing"
           "assert 'helper_000(x=<str>)' in listing" "assert 'helper_020(' not in listing"
           "filtered = defs(pattern='^helper_02', limit=3, offset=2)"
