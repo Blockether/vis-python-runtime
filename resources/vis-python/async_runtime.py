@@ -2669,6 +2669,26 @@ def __vis_annotation_object__(text, vocab):
         return text
 
 
+class __vis_SignatureSource__(str):
+    """Inert annotation text for inspection, without extra quotes."""
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return str.__str__(self)
+
+
+def __vis_annotation_has_forward_ref__(annotation, vocab):
+    if isinstance(annotation, vocab["typing.ForwardRef"]):
+        return True
+    args = (
+        annotation
+        if isinstance(annotation, (list, tuple))
+        else vocab["typing.get_args"](annotation)
+    )
+    return any(__vis_annotation_has_forward_ref__(arg, vocab) for arg in args)
+
+
 def __vis_tool_proto__(nm, sig):
     # A signature-only stub lets inspection show the host's declared signature —
     # parameters, annotations and return — while the real callable remains
@@ -2692,9 +2712,26 @@ def __vis_tool_proto__(nm, sig):
     proto.__name__ = nm
     proto.__qualname__ = nm
     vocab = __vis_annotation_vocabulary__()
+    annotation_text = proto.__annotations__
     proto.__annotations__ = {
-        k: __vis_annotation_object__(v, vocab) for k, v in proto.__annotations__.items()
+        k: __vis_annotation_object__(v, vocab) for k, v in annotation_text.items()
     }
+    # Keep the declared names in inspection. Keep real forward references in
+    # __annotations__ so get_type_hints can still resolve them.
+    display = {
+        name: __vis_SignatureSource__(text)
+        for name, text in annotation_text.items()
+        if __vis_annotation_has_forward_ref__(proto.__annotations__[name], vocab)
+    }
+    if display:
+        signature = __import__("inspect").signature(proto)
+        proto.__signature__ = signature.replace(
+            parameters=[
+                p.replace(annotation=display.get(p.name, p.annotation))
+                for p in signature.parameters.values()
+            ],
+            return_annotation=display.get("return", signature.return_annotation),
+        )
     return proto
 
 

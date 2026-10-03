@@ -74,6 +74,28 @@
                          "print(json.dumps({'unresolved': unresolved,"
                          " 'resolved': hints['return'] is Results}))")))))))
 
+;; Regression: nullable record names printed ForwardRef(...) instead of the declared signature.
+(harness/defbuilt-test
+  nullable-record-signature-test
+  (let [s (harness/block-session)]
+    (seed! s "maybe" "(value: 'Rec' | None = None) -> 'Rec' | None")
+    (seed! s "nested" "(items: list['Rec' | None]) -> tuple['Rec' | None, ...]")
+    (is (= {"maybe" "(value: 'Rec' | None = None) -> 'Rec' | None"
+            "nested" "(items: list['Rec' | None]) -> tuple['Rec' | None, ...]"
+            "maybe_hints" true
+            "nested_hints" true}
+           (facts s
+                  (str
+                    "import inspect, json, typing\n" "class Rec: pass\n"
+                    "localns = {'Rec': Rec}\n"
+                    "maybe_hints = typing.get_type_hints(maybe, localns=localns)\n"
+                    "nested_hints = typing.get_type_hints(nested, localns=localns)\n"
+                    "print(json.dumps({'maybe': str(inspect.signature(maybe)),"
+                    " 'nested': str(inspect.signature(nested)),"
+                    " 'maybe_hints': maybe_hints['value'] == maybe_hints['return'] == (Rec | None),"
+                    " 'nested_hints': nested_hints['items'] == list[Rec | None]"
+                    " and nested_hints['return'] == tuple[Rec | None, ...]}))"))))))
+
 (harness/defbuilt-test
   annotation-vocabulary-test
   (let [s (harness/block-session)]
@@ -112,17 +134,15 @@
     (runtime/exec! s "probe_calls = []\ndef probe(x):\n    probe_calls.append(x)\n    return int")
     (seed! s "guarded" "(a: probe(1), b: Unknown, c: Weird.Thing, d: 'Rec' | None) -> Nope")
     (testing "a call, an unknown name and an unknown attribute stay text; nothing was evaluated"
-      (is
-        (= {"sig"
-            "(a: 'probe(1)', b: 'Unknown', c: 'Weird.Thing', d: ForwardRef('Rec') | None) -> 'Nope'"
-            "strings" ["probe(1)" "Unknown" "Weird.Thing" "Nope"]
-            "probe_calls" []}
-           (facts s
-                  (str "import inspect, json\n"
-                       "a = guarded.__annotations__\n"
-                       "print(json.dumps({'sig': str(inspect.signature(guarded)),"
-                       " 'strings': [a['a'], a['b'], a['c'], a['return']],"
-                       " 'probe_calls': probe_calls}))")))))))
+      (is (= {"sig" "(a: 'probe(1)', b: 'Unknown', c: 'Weird.Thing', d: 'Rec' | None) -> 'Nope'"
+              "strings" ["probe(1)" "Unknown" "Weird.Thing" "Nope"]
+              "probe_calls" []}
+             (facts s
+                    (str "import inspect, json\n"
+                         "a = guarded.__annotations__\n"
+                         "print(json.dumps({'sig': str(inspect.signature(guarded)),"
+                         " 'strings': [a['a'], a['b'], a['c'], a['return']],"
+                         " 'probe_calls': probe_calls}))")))))))
 
 (harness/defbuilt-test
   restamp-after-signature-change-test
