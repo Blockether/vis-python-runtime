@@ -1608,27 +1608,83 @@ def __vis_is_user_file__(name):
     return name == "<prog>" or (name[:6] == "<prog:" and name[-1:] == ">")
 
 
-def __vis_error_pos__(e):
-    # Deepest user-code traceback frame as 0-based (line, col, end_col).
+__vis_helper_frames_kept__ = 8
+
+
+def __vis_frame_columns__(code, lasti):
+    # 0-based byte columns `(col, end_col)` of instruction `lasti`, or Nones.
+    try:
+        p = list(code.co_positions())[lasti // 2]
+        if p[2] is not None:
+            return p[2], p[3]
+    except Exception:
+        pass
+    return None, None
+
+
+def __vis_helper_frame__(code, line, lasti, repeats):
+    # One helper frame for the host to render. `line` counts from the `def`
+    # line, the way `defs(name)` shows the helper: the block that defined it
+    # is not on screen.
+    col, end_col = __vis_frame_columns__(code, lasti)
+    return {
+        "name": code.co_qualname,
+        "line": line - code.co_firstlineno + 1,
+        "col": col,
+        "end_col": end_col,
+        "text": __vis_linecache__.getline(code.co_filename, line).rstrip("\r\n"),
+        "repeats": repeats,
+    }
+
+
+def __vis_helper_frames__(frames):
+    # The helper frames under the failing block's own, outermost first. A
+    # recursion collapses into one frame with its `repeats`. A longer chain
+    # keeps its two outermost and its innermost frames around one
+    # `{"omitted": n}`, so a deep stack stays a short error.
+    runs = []
+    for code, line, lasti in frames:
+        if runs and runs[-1][0] is code and runs[-1][1:3] == [line, lasti]:
+            runs[-1][3] += 1
+        else:
+            runs.append([code, line, lasti, 1])
+    keep = __vis_helper_frames_kept__
+    head, tail, omitted = runs, [], 0
+    if len(runs) > keep:
+        head, tail = runs[:2], runs[2 - keep :]
+        omitted = sum(run[3] for run in runs[2 : len(runs) - keep + 2])
+    out = [__vis_helper_frame__(*run) for run in head]
+    if omitted:
+        out.append({"omitted": omitted})
+    out.extend(__vis_helper_frame__(*run) for run in tail)
+    return out
+
+
+def __vis_error_pos__(e, block=None):
+    # Where `e` failed, as `(line, col, end_col, helpers)`, or None without a
+    # user-code frame. The position is the deepest frame of `block`, the
+    # `<prog:N>` that raised, because the host renders it against THAT
+    # block's source. A helper that an earlier block defined numbers another
+    # source, so its frames under that position come back as `helpers`.
+    # Without `block`, the outermost user frame names the block.
+    frames = []
     tb = getattr(e, "__traceback__", None)
-    line = None
-    col = None
-    end_col = None
     while tb is not None:
         f = tb.tb_frame
         if __vis_is_user_file__(f.f_code.co_filename):
-            line = tb.tb_lineno
-            col = None
-            end_col = None
-            try:
-                p = list(f.f_code.co_positions())[f.f_lasti // 2]
-                if p[2] is not None:
-                    col = p[2]
-                    end_col = p[3]
-            except Exception:
-                pass
+            frames.append((f.f_code, tb.tb_lineno, f.f_lasti))
         tb = tb.tb_next
-    return None if line is None else (line, col, end_col)
+    if not frames:
+        return None
+    if block is None:
+        block = frames[0][0].co_filename
+    own = [i for i, frame in enumerate(frames) if frame[0].co_filename == block]
+    line = col = end_col = None
+    if own:
+        code, line, lasti = frames[own[-1]]
+        col, end_col = __vis_frame_columns__(code, lasti)
+    helpers = __vis_helper_frames__(frames[own[-1] + 1 :] if own else frames)
+    return (line, col, end_col, helpers)
 
 
 def __vis_err_pos_now__():
@@ -1638,7 +1694,7 @@ def __vis_err_pos_now__():
     g["__vis_err_obj__"] = None
     if e is None:
         return g.get("__vis_err_pos__")
-    pos = __vis_error_pos__(e)
+    pos = __vis_error_pos__(e, g.get("__vis_err_block__"))
     g["__vis_err_pos__"] = pos
     return pos
 
@@ -4973,8 +5029,10 @@ def __vis_run_async__(src):
     try:
         __vis_drive__(g["__vis_main__"]())
     except BaseException as __vis_err__:
-        # Keep the original failure for the host's separate position lookup.
+        # Keep the original failure, and the block it failed in, for the host's
+        # separate position lookup.
         g["__vis_err_obj__"] = __vis_err__
+        g["__vis_err_block__"] = __vis_file__
         raise
     finally:
         # The block is over: everything it wrote through a handle it still holds

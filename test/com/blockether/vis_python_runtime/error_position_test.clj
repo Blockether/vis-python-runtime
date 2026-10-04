@@ -15,8 +15,9 @@
    never the message.
 
    So this file decides four things: a failing block reports its own exception;
-   the walk names the deepest BLOCK frame and the columns of the failing
-   expression; the walk RELEASES the exception it walked (a traceback pins
+   the walk names the deepest frame of the block that failed, the columns of the
+   failing expression and the helper frames under it; the walk RELEASES the
+   exception it walked (a traceback pins
    frames, and a stash that is never dropped keeps a whole failed block alive);
    and every way the position can go missing — a compile error with no block
    frame, an exception that never propagated, a walk that raises — costs the
@@ -88,7 +89,7 @@
       (let [source "x = 1\nprint('running')\ny = x + None\n"]
         (is (= "TypeError: unsupported operand type(s) for +: 'int' and 'NoneType'"
                (err session source)))
-        (is (= [3 4 12] (position session)))
+        (is (= [3 4 12 []] (position session)))
         (is (= "x + None" (caret source (position session))))))
     (testing "library frames are skipped: the position is the deepest BLOCK frame"
       ;; The failure happens several frames inside `json`, and none of those is
@@ -100,15 +101,79 @@
       (let [source "def boom(n):\n    return n / 0\n\nboom(3)"]
         (is (= "ZeroDivisionError: division by zero" (err session source)))
         (is (= "n / 0" (caret source (position session))))))
-    (testing "a helper's frame is a block frame even from the block that defined it"
-      ;; Every block source is registered under its own `<prog:N>` name, so a
-      ;; helper a PREVIOUS block defined still positions into that block's text
-      ;; — the model can read it back, and the line number is that source's.
-      (let [defining "def helper():\n    raise RuntimeError('deep')"]
+    (testing "a helper from an earlier block keeps the position in the failing block"
+      ;; Every block source is registered under its own `<prog:N>` name, and the
+      ;; host renders the position against the block that FAILED. A helper's line
+      ;; numbers another source, so the helper comes back as its own frame, its
+      ;; line counted from the `def` the way `defs(name)` shows it.
+      (let [defining "def helper():\n    raise RuntimeError('deep')"
+            calling "print('x')\nhelper()"]
+
         (is (nil? (err session defining)))
-        (is (= "RuntimeError: deep" (err session "print('x')\nhelper()")))
-        (is (= [2 4 30] (position session)))
-        (is (= "raise RuntimeError('deep')" (caret defining (position session))))))))
+        (is (= "RuntimeError: deep" (err session calling)))
+        (let [[line col end-col helpers :as pos] (position session)]
+          (is (= [2 0 8] [line col end-col]))
+          (is (= "helper()" (caret calling pos)))
+          (is (= [{"name" "helper"
+                   "line" 2
+                   "col" 4
+                   "end_col" 30
+                   "text" "    raise RuntimeError('deep')"
+                   "repeats" 1}]
+                 helpers)))))))
+
+(defn- helper-caret
+  "The source text one helper frame points at: its line, sliced by its columns."
+  [{:strs [text col end_col]}]
+  (subs text col end_col))
+
+(harness/defbuilt-test
+  helper-frames-test
+  (let [session (harness/block-session)]
+    (testing "a helper chain three blocks deep keeps each helper's own frame"
+      ;; `inner`, `middle` and `outer` come from three earlier blocks, each with its
+      ;; own line numbers, and the failing block calls only `outer`.
+      (is (nil? (err session "def inner():\n    raise ValueError('deep')")))
+      (is (nil? (err session "def middle():\n    checked = True\n    return inner()")))
+      (is (nil? (err session "def outer():\n    return middle()")))
+      (let [calling "print('go')\nresult = outer()"]
+        (is (= "ValueError: deep" (err session calling)))
+        (let [[line _ _ helpers :as pos] (position session)]
+          (is (= 2 line))
+          (is (= "outer()" (caret calling pos)))
+          (is (= [["outer" 2 "middle()"] ["middle" 3 "inner()"]
+                  ["inner" 2 "raise ValueError('deep')"]]
+                 (mapv (fn [h]
+                         [(get h "name") (get h "line") (helper-caret h)])
+                       helpers))))))
+    (testing "a recursion collapses into one frame with its count"
+      (is (nil? (err session
+                     "def down(n):\n    if n:\n        return down(n - 1)\n    return 1 / 0")))
+      (is (= "ZeroDivisionError: division by zero" (err session "down(50)")))
+      (is (= [["down" 3 50 "down(n - 1)"] ["down" 4 1 "1 / 0"]]
+             (mapv (fn [h]
+                     [(get h "name") (get h "line") (get h "repeats") (helper-caret h)])
+                   (nth (position session) 3)))))
+    (testing "a long chain keeps its ends around the count of the frames between"
+      (is
+        (nil?
+          (err
+            session
+            "def ping(n):\n    return pong(n - 1) if n else 1 / 0\n\ndef pong(n):\n    return ping(n - 1)")))
+      (is (= "ZeroDivisionError: division by zero" (err session "ping(20)")))
+      (let [helpers (nth (position session) 3)]
+        (is (= 9 (count helpers)))
+        (is (= ["ping" "pong"] (mapv #(get % "name") (take 2 helpers))))
+        (is (= {"omitted" 13} (nth helpers 2)))
+        (is (= "1 / 0" (helper-caret (peek helpers))))))
+    (testing "a callback into the failing block positions in the callback"
+      ;; The deepest frame of the failing block is the callback's, so no helper
+      ;; frame is under it: `apply` is above that position.
+      (is (nil? (err session "def apply(fn):\n    return fn()")))
+      (let [calling "def callback():\n    return 1 / 0\n\napply(callback)"]
+        (is (= "ZeroDivisionError: division by zero" (err session calling)))
+        (is (= "1 / 0" (caret calling (position session))))
+        (is (= [] (nth (position session) 3)))))))
 
 (harness/defbuilt-test error-position-lifecycle-test
                        (let [session (harness/block-session)]
@@ -118,12 +183,12 @@
                            ;; it. The host's read is what drops it.
                            (is (= "ValueError: pinned" (err session "raise ValueError('pinned')")))
                            (is (false? (harness/ev session "__vis_err_obj__ is None")))
-                           (is (= [1 0 26] (position session)))
+                           (is (= [1 0 26 []] (position session)))
                            (is (true? (harness/ev session "__vis_err_obj__ is None"))))
                          (testing "asking a second time answers the same position, not nothing"
                            ;; The host may read it more than once (rendering, then logging); the
                            ;; computed position outlives the exception it came from.
-                           (is (= [1 0 26] (position session))))
+                           (is (= [1 0 26 []] (position session))))
                          (testing "a block that did not fail has no position"
                            (is (nil? (err session "print('fine')")))
                            (is (nil? (position session))))))
@@ -156,7 +221,7 @@
                                  "builtins.__vis_err_pos_now__ = __vis_saved_pos_now__"))))
       (testing "and the next failure positions normally again"
         (is (= "ValueError: after" (err session "raise ValueError('after')")))
-        (is (= [1 0 25] (position session))))))
+        (is (= [1 0 25 []] (position session))))))
   (testing "a compile error has no block frame, so it costs the caret alone"
     ;; The SyntaxError is raised by the runtime's own compile step; no block
     ;; frame exists to walk, and the message is still the model's.
@@ -187,13 +252,13 @@
     (testing "the data the host attached to the failure is readable beside the position"
       (is (= {"kind" "not-found" "path" "/nope"} (harness/ev session "__vis_err_host_data__()"))))
     (testing "the position points at the failing tool call in the block"
-      (is (= [2 7 25] (position session))))
+      (is (= [2 7 25 []] (position session))))
     (testing "the host data must be read BEFORE the position, which releases the failure"
       ;; NOT order-free, whatever `__vis_err_host_data__`'s comment says: the
       ;; position read drops the stashed exception, and the data lives on that
       ;; exception. A host that renders the caret first loses the tool's data.
       (is (= "VisToolError: tool refused: no such path" (err session "await cat('/nope')")))
-      (is (= [1 0 18] (position session)))
+      (is (= [1 0 18 []] (position session)))
       (is (nil? (harness/ev session "__vis_err_host_data__()"))))
     (testing "a block that died of its own Python has no host data"
       (is (= "ValueError: mine" (err session "raise ValueError('mine')")))
