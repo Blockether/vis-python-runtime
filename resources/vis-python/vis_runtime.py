@@ -18,6 +18,7 @@ import ast
 import builtins
 import contextlib
 import dataclasses
+import functools
 import gc
 import importlib
 import importlib.machinery
@@ -174,6 +175,45 @@ def par(thunks):
     return _vis_host.par(list(thunks))
 
 
+#: Prefix of the User-Agent that urllib sends when a request sets none.
+_STOCK_USER_AGENT = "Python-urllib/"
+
+
+def _default_user_agent(version):
+    """Send `vis-python/<version>` where urllib would send `Python-urllib/3.x`.
+
+    Cloudflare's browser integrity check refuses the stock urllib signature with
+    403 (error 1010), so a block that read a public page without its own header
+    failed where a browser succeeds. A request that sets `User-Agent` keeps it:
+    urllib adds an opener header only when the request has none. The change is
+    process-wide, like urllib, and a second install only refreshes it.
+    """
+    import urllib.request
+
+    agent = "vis-python/" + version if version else "vis-python"
+
+    def replace(headers):
+        return [
+            (name, agent)
+            if name.lower() == "user-agent" and str(value).startswith(_STOCK_USER_AGENT)
+            else (name, value)
+            for name, value in headers
+        ]
+
+    director = urllib.request.OpenerDirector
+    init = getattr(director.__init__, "__wrapped__", director.__init__)
+
+    @functools.wraps(init)
+    def __init__(self):
+        init(self)
+        self.addheaders = replace(self.addheaders)
+
+    director.__init__ = __init__
+    opener = getattr(urllib.request, "_opener", None)
+    if opener is not None:
+        opener.addheaders = replace(opener.addheaders)
+
+
 def install(namespace, session=None):
     """Equip `namespace` with the sandbox runtime, IN its own globals.
 
@@ -186,7 +226,8 @@ def install(namespace, session=None):
     instead of quietly resetting them.
 
     Also imports the auto-imports module, because a block writes
-    `json.dumps(...)` without importing json.
+    `json.dumps(...)` without importing json, and names this runtime in
+    urllib's default User-Agent (`_default_user_agent`).
     Two names the runtime READS but does not define arrive here, and only when
     the host has not bound its own: `__vis_par__`, the pool `gather` dispatches
     on, and `__vis_protected_names__`, the surface a block may not silently
@@ -202,6 +243,7 @@ def install(namespace, session=None):
     is equipped instead of guessing.
     """
     importlib.import_module(AUTO_IMPORTS_MODULE)
+    _default_user_agent(namespace.get("VIS_PYTHON_RUNTIME_VERSION"))
     exec(sandbox_code(), namespace)
     namespace["__vis_session__"] = session
     namespace.setdefault("__vis_par__", par)
