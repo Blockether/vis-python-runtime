@@ -4600,6 +4600,23 @@ def __vis_unpickle_value__(blob):
     return Unpickler(io.BytesIO(blob)).load()
 
 
+def __vis_note_dotted_imports__(tree):
+    # `import a.b.c` binds only `a`. The snapshot wrote `import a` back, so a
+    # fresh process did not load `a.b.c`, and `a.b.c.f()` failed there with an
+    # AttributeError. Keep each dotted path that a block or a restore imports;
+    # `__vis_snapshot__` writes it back with its root. The set is created on
+    # first use, so a runtime reinstall between blocks does not reset it.
+    g = globals()
+    paths = g.get("__vis_dotted_imports__")
+    if not isinstance(paths, set):
+        paths = g["__vis_dotted_imports__"] = set()
+    for node in __vis_ast__.walk(tree):
+        if isinstance(node, __vis_ast__.Import):
+            for al in node.names:
+                if al.asname is None and "." in al.name:
+                    paths.add(al.name)
+
+
 def __vis_snapshot__():
     # Source text that RE-CREATES this session's helpers, imports and variables
     # in a FRESH process, and for every session name it considered `(kind,
@@ -4638,6 +4655,10 @@ def __vis_snapshot__():
     refs = {}
     pending = []
     entries = {}
+    dotted = {}
+    noted = g.get("__vis_dotted_imports__")
+    for path in sorted(noted) if isinstance(noted, set) else ():
+        dotted.setdefault(path.partition(".")[0], []).append(path)
     for n, v in sorted(g.items()):
         if n.startswith("__") or n in prot or n in boot:
             # A runtime class or function INSIDE a value travels by NAME too. Pickle
@@ -4658,6 +4679,13 @@ def __vis_snapshot__():
                     imports.append(
                         "import " + mod if mod == n else "import " + mod + " as " + n
                     )
+                    # `import a.b.c` bound `a`: load `a.b.c` again with it.
+                    if mod == n:
+                        imports.extend(
+                            "import " + path
+                            for path in dotted.get(n, ())
+                            if isinstance(sys.modules.get(path), module_type)
+                        )
                     refs.setdefault(__vis_builtins__.id(v), n)
                     entries[n] = ("import", "saved")
                     continue
@@ -4891,6 +4919,7 @@ def __vis_restore_defs__(src):
         # The SAME rewrite a locally-defined helper gets (`__vis_normalize_module__`):
         # a restored helper is the one the session wrote, not a raw re-exec of its text.
         tree = __vis_ast__.parse(head)
+        __vis_note_dotted_imports__(tree)
         body = __vis_normalize_module__(tree, __vis_future_flags__(tree)).body
     except Exception:
         # A source part that will not PARSE cannot be replayed at all — never let
@@ -5018,6 +5047,7 @@ def __vis_run_async__(src):
     __vis_flags__ = __vis_future_flags__(tree)
     __vis_check_module_scope__(tree, src)
     __vis_check_tool_shadow__(tree, src)
+    __vis_note_dotted_imports__(tree)
     tree = __vis_normalize_module__(tree, __vis_flags__)
     assigned = __vis_assigned_names__(tree.body)
     # SHADOWING a bound tool / sandbox name is ALLOWED — but only for THIS block.

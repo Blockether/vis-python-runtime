@@ -88,6 +88,30 @@
       ;; restore registered, not through a file that never existed.
       (is (str/includes? stdout "def shout(s):")))))
 
+;; `import xml.dom.minidom` binds only `xml`, and a snapshot that wrote `import xml`
+;; back left the submodule unloaded in a fresh PROCESS: `xml.dom.minidom` was an
+;; AttributeError there. These sessions share one interpreter, so the probe passes
+;; either way; the snapshot text pins the fix.
+(harness/defbuilt-test
+  session-defs-dotted-import-test
+  (let [{text :snapshot out :stdout}
+        (across-processes "import xml.dom.minidom\nimport json.tool as jt\n"
+                          "print(xml.dom.minidom.parseString('<a/>').documentElement.tagName)\n")
+
+        again
+        (harness/block-session)
+
+        _
+        (restore! again text)]
+
+    (testing "the snapshot imports the dotted path with its root"
+      (is (= "a" out))
+      (is (str/includes? text "import xml\n"))
+      (is (str/includes? text "import xml.dom.minidom\n"))
+      (is (str/includes? text "import json.tool as jt\n")))
+    (testing "a restored session keeps the dotted path for its next snapshot"
+      (is (str/includes? (snapshot again) "import xml.dom.minidom\n")))))
+
 (harness/defbuilt-test session-defs-listed-as-restored-test
                        (let [written
                              (harness/block-session)
