@@ -4465,6 +4465,35 @@ def __vis_literal_ok__(rep):
         return False
 
 
+__vis_plain_leaves__ = frozenset((type(None), bool, int, float, complex, str, bytes))
+__vis_plain_boxes__ = frozenset((dict, list, tuple, set, frozenset))
+
+
+def __vis_plain__(v, seen=None):
+    # Does the literal of `v` restore the SAME value? Only for exact builtin types:
+    # a subclass reprs as its base, so a small `__VisDict__`, `__VisResultList__`
+    # or `__VisResultStr__` came back plain and lost its `.field` reads. A mutable
+    # container met twice is shared, which a literal cannot say: a list that holds
+    # itself reprs as `[[...]]`, and that reads back as `[[Ellipsis]]`.
+    t = type(v)
+    if t in __vis_plain_leaves__:
+        return True
+    if t not in __vis_plain_boxes__:
+        return False
+    if seen is None:
+        seen = set()
+    if t is dict or t is list or t is set:
+        key = __vis_builtins__.id(v)
+        if key in seen:
+            return False
+        seen.add(key)
+    if t is dict:
+        return all(
+            __vis_plain__(k, seen) and __vis_plain__(x, seen) for k, x in v.items()
+        )
+    return all(__vis_plain__(x, seen) for x in v)
+
+
 def __vis_block_order__(filename, code):
     # Definition order: block number, then line. A decorator that is itself a
     # session helper has to be defined before the helper it decorates.
@@ -4692,8 +4721,8 @@ def __vis_snapshot__():
             # usual closed-over path, and a small dict the usual config a helper takes
             # as a DEFAULT ARGUMENT (`def run(p, cfg=CFG)`), which resolves at def
             # time. SIZE FIRST: `repr` of a multi-megabyte blob costs more than the
-            # whole snapshot. Only a repr that reads back as a LITERAL is kept; every
-            # other value is pickled below.
+            # whole snapshot. Only a repr that reads back as a LITERAL of the same
+            # value (`__vis_plain__`) is kept; every other value is pickled below.
             if (
                 v is None
                 or isinstance(v, (int, float, bool))
@@ -4705,7 +4734,7 @@ def __vis_snapshot__():
                 )
             ):
                 rep = repr(v)
-                if len(rep) <= 500 and __vis_literal_ok__(rep):
+                if len(rep) <= 500 and __vis_literal_ok__(rep) and __vis_plain__(v):
                     consts.append(n + " = " + rep)
                     entries[n] = ("variable", "saved")
                     continue

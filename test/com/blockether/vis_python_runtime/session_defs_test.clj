@@ -332,6 +332,59 @@
              stdout)))))
 
 (harness/defbuilt-test
+  session-defs-keep-small-result-types-test
+  ;; Follow-up to Blockether/vis#317: a small value was saved as a literal, and a
+  ;; literal names only its base type. A small tool result came back as a plain
+  ;; dict, list or str, so its first `.field` read failed. A list that holds itself
+  ;; came back as `[[Ellipsis]]`. These values go to pickle; a plain constant stays
+  ;; readable source.
+  (let [written
+        (harness/tool-session {"tracker.meta" (fn [_]
+                                                {"state" "open" "count" 2})
+                               "tracker.rows" (fn [_]
+                                                [{"number" 317}])
+                               "tracker.title" (fn [_]
+                                                 "Snapshot types")})
+
+        local
+        (ran written
+             (str "meta = await tracker.meta()\n" "rows = await tracker.rows()\n"
+                  "title = await tracker.title()\n" "pair = {'meta': meta}\n"
+                  "loop = []\n" "loop.append(loop)\n"
+                  "CFG = {'a': [1, 2]}\n"
+                  "print(type(meta).__name__, type(rows).__name__, type(title).__name__)\n"))
+
+        text
+        (snapshot written)
+
+        _
+        (runtime/close-session! written)
+
+        fresh
+        (harness/block-session)
+
+        _
+        (restore! fresh text)
+
+        stdout
+        (ran fresh
+             (str "print(__vis_restore_report__['lost'])\n"
+                  "print(type(meta).__name__, meta.state, meta.count)\n"
+                  "print(type(rows).__name__, rows[0].number, rows.get('op'))\n"
+                  "print(type(title).__name__, title.get('op'), title)\n"
+                  "print(type(pair['meta']).__name__, pair['meta'].state)\n"
+                  "print(loop[0] is loop, CFG)\n"))]
+
+    (testing "the tools answer the runtime result types"
+      (is (= "__VisDict__ __VisResultList__ __VisResultStr__" local)))
+    (testing "a plain constant stays readable source"
+      (is (str/includes? text "CFG = {'a': [1, 2]}")))
+    (testing "small results and a list that holds itself keep their type after a restart"
+      (is (= (str "{}\n__VisDict__ open 2\n__VisResultList__ 317 None\n"
+                  "__VisResultStr__ None Snapshot types\n__VisDict__ open\nTrue {'a': [1, 2]}")
+             stdout)))))
+
+(harness/defbuilt-test
   session-defs-values-share-one-budget-test
   ;; The snapshot is rewritten after every block, so all values together are
   ;; capped too, and the value that no longer fits is named, not dropped quietly.
