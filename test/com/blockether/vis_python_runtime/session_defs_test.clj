@@ -267,6 +267,71 @@
                                "['scale', 'under'] {}"))))))
 
 (harness/defbuilt-test
+  session-defs-carry-tool-results-test
+  ;; Regression Blockether/vis#317: a tool result never reached the snapshot. Its
+  ;; record class is built for each result and bound to no module name, so pickle
+  ;; could not find it. A runtime class inside a value named the old session module,
+  ;; and a restarted sandbox has a new one. The writer closes first, as in a restart.
+  (let [issue
+        {"__vis_object__" "Issue"
+         "__vis_attrs__" {"number" 317 "labels" ["bug"] "meta" {"state" "open"}}}
+
+        written
+        (harness/tool-session {"tracker.find" (fn [_]
+                                                {"__vis_object__" "IssueSearch"
+                                                 "__vis_sequence_field__" "results"
+                                                 "__vis_attrs__"
+                                                 {"query" "pickle" "results" [issue] "total" 1}})
+                               "tracker.rows" (fn [_]
+                                                [{"number" 317}])})
+
+        local
+        (ran written
+             (str "import copy, pickle\n"
+                  "res = await tracker.find('pickle')\n" "rows = await tracker.rows()\n"
+                  "kept = {'res': res, 'all': [res], 'rows': rows}\n"
+                  "back = pickle.loads(pickle.dumps(res))\n"
+                  "deep = copy.deepcopy(res)\n"
+                  "print(type(back).__name__, back.results[0].meta['state'], deep.total)\n"))
+
+        listing
+        (ran written "print(defs())")
+
+        text
+        (snapshot written)
+
+        _
+        (runtime/close-session! written)
+
+        fresh
+        (harness/block-session)
+
+        _
+        (restore! fresh text)
+
+        stdout
+        (ran fresh
+             (str
+               "print(__vis_restore_report__['lost'])\n"
+               "import dataclasses\n" "issue = res.results[0]\n"
+               "print(type(res).__name__, res.total, [i.number for i in res], res['query'])\n"
+               "print(type(issue).__name__, issue.labels, issue.meta['state'])\n"
+               "print(type(issue.meta) is __VisDict__, type(kept['rows']) is __VisResultList__)\n"
+               "print(kept['all'][0] is kept['res'], kept['rows'][0]['number'])\n"
+               "try:\n    res.total = 2\n"
+               "except dataclasses.FrozenInstanceError:\n    print('frozen')\n"))]
+
+    (testing "a record pickles and copies by value inside its session"
+      (is (= "IssueSearch open 1" local)))
+    (testing "the snapshot saves a record and a container that holds one"
+      (is (str/includes? listing "res: IssueSearch | saved"))
+      (is (not (str/includes? listing "not saved"))))
+    (testing "records and runtime results come back under a new session module"
+      (is (= (str "{}\nIssueSearch 1 [317] pickle\nIssue ['bug'] open\nTrue True\nTrue 317\n"
+                  "frozen")
+             stdout)))))
+
+(harness/defbuilt-test
   session-defs-values-share-one-budget-test
   ;; The snapshot is rewritten after every block, so all values together are
   ;; capped too, and the value that no longer fits is named, not dropped quietly.

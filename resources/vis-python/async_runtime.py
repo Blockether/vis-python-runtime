@@ -984,13 +984,10 @@ def __vis_typed_result__(__vis_d__):
     if isinstance(__vis_d__.get("__vis_object__"), str) and isinstance(
         __vis_d__.get("__vis_attrs__"), dict
     ):
-        import dataclasses as __vis_dataclasses__
-
         __vis_attrs__ = {
             __k__: __vis_typed_value__(__v__)
             for __k__, __v__ in __vis_d__["__vis_attrs__"].items()
         }
-        __vis_fields__ = tuple(__vis_attrs__)
         __vis_sequence_field__ = None
         if "__vis_sequence_field__" in __vis_d__:
             __vis_sequence_field__ = __vis_d__["__vis_sequence_field__"]
@@ -1004,50 +1001,9 @@ def __vis_typed_result__(__vis_d__):
             if type(__vis_attrs__[__vis_sequence_field__]) not in (list, tuple):
                 raise TypeError("sequence field must contain a list or tuple")
 
-        def __vis_missing_field__(self, name):
-            return (
-                f"{type(self).__name__} has no field {name!r}; "
-                f"available fields: {', '.join(__vis_fields__) or '(none)'}"
-            )
-
-        def __vis_getitem__(self, key):
-            if not isinstance(key, str):
-                if __vis_sequence_field__ is not None:
-                    return getattr(self, __vis_sequence_field__)[key]
-                raise TypeError(f"{type(self).__name__} field name must be a string")
-            if key not in __vis_fields__:
-                raise KeyError(__vis_missing_field__(self, key))
-            return getattr(self, key)
-
-        def __vis_getattr__(self, name):
-            # Reached only after normal lookup fails: name the real fields, as
-            # `__getitem__` does, so a guessed attribute corrects itself.
-            raise AttributeError(__vis_missing_field__(self, name))
-
-        # Explicitly disable Python's integer-subscription iteration fallback.
-        __vis_namespace__ = {
-            "__getitem__": __vis_getitem__,
-            "__getattr__": __vis_getattr__,
-            "__iter__": None,
-        }
-        if __vis_sequence_field__ is not None:
-
-            def __vis_iter__(self):
-                return iter(getattr(self, __vis_sequence_field__))
-
-            def __vis_len__(self):
-                return len(getattr(self, __vis_sequence_field__))
-
-            __vis_namespace__.update(__iter__=__vis_iter__, __len__=__vis_len__)
-
-        __vis_cls__ = __vis_dataclasses__.make_dataclass(
-            __vis_d__["__vis_object__"],
-            [(name, object) for name in __vis_attrs__],
-            namespace=__vis_namespace__,
-            frozen=True,
-            slots=True,
+        return __vis_record__(
+            __vis_d__["__vis_object__"], __vis_attrs__, __vis_sequence_field__
         )
-        return __vis_cls__(**__vis_attrs__)
     __vis_t__ = {
         __k__: __vis_typed_value__(__v__) for __k__, __v__ in __vis_d__.items()
     }
@@ -1063,6 +1019,72 @@ def __vis_typed_result__(__vis_d__):
             return __VisShell__(__vis_t__)
         return __VisResult__(__vis_t__)
     return __VisDict__(__vis_t__)
+
+
+def __vis_record__(__vis_name__, __vis_attrs__, __vis_sequence_field__):
+    # ONE record: a frozen dataclass with the typed public fields of one result.
+    # Its class is built for that result and is bound to no module name, so
+    # `pickle` cannot find the class again. A record pickles and copies BY VALUE,
+    # as a call to this function (Blockether/vis#317).
+    import dataclasses as __vis_dataclasses__
+
+    __vis_fields__ = tuple(__vis_attrs__)
+
+    def __vis_missing_field__(self, name):
+        return (
+            f"{type(self).__name__} has no field {name!r}; "
+            f"available fields: {', '.join(__vis_fields__) or '(none)'}"
+        )
+
+    def __vis_getitem__(self, key):
+        if not isinstance(key, str):
+            if __vis_sequence_field__ is not None:
+                return getattr(self, __vis_sequence_field__)[key]
+            raise TypeError(f"{type(self).__name__} field name must be a string")
+        if key not in __vis_fields__:
+            raise KeyError(__vis_missing_field__(self, key))
+        return getattr(self, key)
+
+    def __vis_getattr__(self, name):
+        # Reached only after normal lookup fails: name the real fields, as
+        # `__getitem__` does, so a guessed attribute corrects itself.
+        raise AttributeError(__vis_missing_field__(self, name))
+
+    def __vis_reduce__(self):
+        return (
+            __vis_record__,
+            (
+                __vis_name__,
+                {__k__: getattr(self, __k__) for __k__ in __vis_fields__},
+                __vis_sequence_field__,
+            ),
+        )
+
+    # Explicitly disable Python's integer-subscription iteration fallback.
+    __vis_namespace__ = {
+        "__getitem__": __vis_getitem__,
+        "__getattr__": __vis_getattr__,
+        "__iter__": None,
+        "__reduce__": __vis_reduce__,
+    }
+    if __vis_sequence_field__ is not None:
+
+        def __vis_iter__(self):
+            return iter(getattr(self, __vis_sequence_field__))
+
+        def __vis_len__(self):
+            return len(getattr(self, __vis_sequence_field__))
+
+        __vis_namespace__.update(__iter__=__vis_iter__, __len__=__vis_len__)
+
+    __vis_cls__ = __vis_dataclasses__.make_dataclass(
+        __vis_name__,
+        [(name, object) for name in __vis_attrs__],
+        namespace=__vis_namespace__,
+        frozen=True,
+        slots=True,
+    )
+    return __vis_cls__(**__vis_attrs__)
 
 
 def __vis_typed_value__(__vis_v__):
@@ -4575,6 +4597,8 @@ def __vis_snapshot__():
     prot = set(g.get("__vis_protected_names__") or [])
     boot = set(g.get("__vis_boot_names__") or [])
     module_type = type(inspect)
+    function_type = type(__vis_snapshot__)
+    module_name = g.get("__name__")
     imports = []
     consts = []
     classes = []
@@ -4587,6 +4611,14 @@ def __vis_snapshot__():
     entries = {}
     for n, v in sorted(g.items()):
         if n.startswith("__") or n in prot or n in boot:
+            # A runtime class or function INSIDE a value travels by NAME too. Pickle
+            # would name this session's module, and a restored sandbox runs under
+            # another name, so the value could never load (Blockether/vis#317).
+            try:
+                if isinstance(v, (type, function_type)) and v.__module__ == module_name:
+                    refs.setdefault(__vis_builtins__.id(v), n)
+            except Exception:
+                pass
             continue
         # One name's failure — a metaclass hook that raises, a `__module__` that
         # is not a string — costs that name alone, named with its reason.
