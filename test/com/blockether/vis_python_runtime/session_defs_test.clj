@@ -219,6 +219,21 @@
       (is (str/includes? stdout "over the 1 MiB limit for one saved value"))
       (is (str/includes? stdout "generator cannot be pickled")))))
 
+(harness/defbuilt-test
+  session-defs-carries-a-regex-match-test
+  ;; `re.Match` has no pickle support, so `m = re.search(...)` came back from a
+  ;; restart as a NameError. The snapshot now saves the pattern call that answers
+  ;; the same groups, also for a later `finditer` hit.
+  (let [{:keys [stdout]} (across-processes
+                           (str "import re\n"
+                                "m = re.search(r\"(\\d+)-(?P<w>\\w+)\", \"ab 12-xy z\")\n"
+                                "hits = list(re.finditer(r\"a|ab\", \"ab ab\"))\n")
+                           (str "print(m.group(0), m.group(\"w\"), m.span(), m.pos, m.endpos)\n"
+                                "print([h.span() for h in hits])\n"
+                                "print(sorted(__vis_restore_report__[\"lost\"]))\n"))]
+    (testing "a match and a list of matches come back with the same groups and spans"
+      (is (= (str "12-xy xy (3, 8) 0 10\n" "[(0, 1), (3, 4)]\n" "[]") stdout)))))
+
 (harness/defbuilt-test session-defs-keeps-a-decorated-helper-test
                        ;; `functools.lru_cache` answers a wrapper with no `__code__` of its own, so a
                        ;; helper vanished from `defs()` and from the snapshot the moment it was

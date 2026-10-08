@@ -4568,15 +4568,43 @@ def __vis_rough_size__(value, limit):
     return total
 
 
+def __vis_match_reduce__(m):
+    # The pickle reduction of a `re.Match`: a bound method of its pattern and the
+    # arguments that answer the same match. A Match cannot be built directly, but
+    # the same call on the same string is deterministic. `search` from `pos` keeps
+    # `pos` too; `match`/`fullmatch` from the start cover a later `finditer` hit.
+    pat, s = m.re, m.string
+    for method, start in (
+        ("search", m.pos),
+        ("match", m.pos),
+        ("fullmatch", m.pos),
+        ("match", m.start()),
+        ("fullmatch", m.start()),
+    ):
+        again = getattr(pat, method)(s, start, m.endpos)
+        if again is not None and again.regs == m.regs:
+            return (getattr(pat, method), (s, start, m.endpos))
+    raise TypeError("cannot pickle 're.Match' object: no call answers the same groups")
+
+
 def __vis_pickle_value__(value, refs, limit):
     # A session helper, class or import INSIDE a value travels by NAME: the
     # restore re-creates it from source first and the value points at that one.
     # Without this an instance of a session class could never be saved.
     import pickle
+    import re
 
     class Pickler(pickle.Pickler):
         def persistent_id(self, obj):
             return refs.get(__vis_builtins__.id(obj))
+
+        def reducer_override(self, obj):
+            # `re.Match` has no pickle support, so `m = re.search(...)` was lost at
+            # every restart. Save the bound call that answers the same groups again:
+            # the pattern, the string and the bounds are plain picklable values.
+            if type(obj) is not re.Match:
+                return NotImplemented
+            return __vis_match_reduce__(obj)
 
     sink = __vis_CappedSink__(limit)
     Pickler(sink, protocol=5).dump(value)
