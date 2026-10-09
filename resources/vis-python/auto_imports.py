@@ -49,6 +49,10 @@ def __vis_auto_imports__():
         ("math", "math", None),
         ("socket", "socket", None),
         ("datetime", "datetime", None),
+        # Extension results are frozen dataclass records, and `inspect.signature`
+        # is how a block discovers arguments; both are read without an import.
+        ("dataclasses", "dataclasses", None),
+        ("inspect", "inspect", None),
     ):
         setattr(_b, bind, _LazyStd(bind, mod, attr))
 

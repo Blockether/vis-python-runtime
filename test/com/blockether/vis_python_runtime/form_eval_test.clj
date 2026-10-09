@@ -66,7 +66,15 @@
       (is (= "aGk=" (ran s "print(base64.b64encode(b'hi').decode())")))
       (is (= "4.555806" (ran s "print(round(math.sqrt(2) + math.pi, 6))")))
       (is (= "True" (ran s "print(hasattr(glob, 'glob') and callable(glob.glob))")))
-      (is (= "True" (ran s "print(hasattr(builtins, 'len') and builtins.len([1, 2]) == 2)"))))))
+      (is (= "True" (ran s "print(hasattr(builtins, 'len') and builtins.len([1, 2]) == 2)")))
+      (is (= "{'a': 1}"
+             (ran
+               s
+               (str
+                 "import dataclasses as real\n"
+                 "R = real.make_dataclass('R', ['a'], frozen=True)\n"
+                 "print(dataclasses.asdict(R(1)) if dataclasses.is_dataclass(R(1)) else None)"))))
+      (is (= "(a, b=2)" (ran s "def f(a, b=2): pass\nprint(inspect.signature(f))"))))))
 
 (harness/defbuilt-test
   sandbox-auto-import-class-identity-test
