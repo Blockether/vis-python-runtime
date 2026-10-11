@@ -1001,8 +1001,13 @@ def __vis_typed_result__(__vis_d__):
             if type(__vis_attrs__[__vis_sequence_field__]) not in (list, tuple):
                 raise TypeError("sequence field must contain a list or tuple")
 
+        # A model's own `__str__` text, sent by the extension, is the record's `str`.
+        __vis_text__ = __vis_d__.get("__vis_text__")
         return __vis_record__(
-            __vis_d__["__vis_object__"], __vis_attrs__, __vis_sequence_field__
+            __vis_d__["__vis_object__"],
+            __vis_attrs__,
+            __vis_sequence_field__,
+            __vis_text__ if isinstance(__vis_text__, str) else None,
         )
     __vis_t__ = {
         __k__: __vis_typed_value__(__v__) for __k__, __v__ in __vis_d__.items()
@@ -1021,11 +1026,15 @@ def __vis_typed_result__(__vis_d__):
     return __VisDict__(__vis_t__)
 
 
-def __vis_record__(__vis_name__, __vis_attrs__, __vis_sequence_field__):
+def __vis_record__(
+    __vis_name__, __vis_attrs__, __vis_sequence_field__, __vis_text__=None
+):
     # ONE record: a frozen dataclass with the typed public fields of one result.
     # Its class is built for that result and is bound to no module name, so
     # `pickle` cannot find the class again. A record pickles and copies BY VALUE,
-    # as a call to this function (Blockether/vis#317).
+    # as a call to this function (Blockether/vis#317). `__vis_text__` is the
+    # `str` of the extension's model when its class defines its own `__str__`
+    # (Blockether/vis#367); methods never cross.
     import dataclasses as __vis_dataclasses__
 
     __vis_fields__ = tuple(__vis_attrs__)
@@ -1057,6 +1066,7 @@ def __vis_record__(__vis_name__, __vis_attrs__, __vis_sequence_field__):
                 __vis_name__,
                 {__k__: getattr(self, __k__) for __k__ in __vis_fields__},
                 __vis_sequence_field__,
+                __vis_text__,
             ),
         )
 
@@ -1076,6 +1086,12 @@ def __vis_record__(__vis_name__, __vis_attrs__, __vis_sequence_field__):
             return len(getattr(self, __vis_sequence_field__))
 
         __vis_namespace__.update(__iter__=__vis_iter__, __len__=__vis_len__)
+    if __vis_text__ is not None:
+
+        def __vis_str__(self):
+            return __vis_text__
+
+        __vis_namespace__["__str__"] = __vis_str__
 
     __vis_cls__ = __vis_dataclasses__.make_dataclass(
         __vis_name__,

@@ -198,6 +198,34 @@
                   "    else:\n        raise AssertionError('invalid sequence metadata accepted')\n"
                   "print('invalid declarations refused')"))))))
 
+;; Regression Blockether/vis#367: a model's own `str` text is the record's `str`;
+;; its repr, fields and copies stay as before.
+(harness/defbuilt-test
+  generated-record-text-test
+  (let [session (harness/tool-session
+                  {"ledger.status" (fn [[text]]
+                                     {"__vis_object__" "Status"
+                                      "__vis_text__" text
+                                      "__vis_attrs__" {"env" "DEV04"
+                                                       "phase" {"__vis_object__" "Phase"
+                                                                "__vis_attrs__" {"number" 2}}}})})]
+    (is
+      (=
+        "record text verified"
+        (ran
+          session
+          (str
+            "import copy, dataclasses, pickle\n"
+            "r = await ledger.status('STATUS: DEV04')\n"
+            "assert str(r) == f'{r}' == 'STATUS: DEV04', str(r)\n"
+            "assert repr(r) == \"Status(env='DEV04', phase=Phase(number=2))\", repr(r)\n"
+            "assert str(r.phase) == repr(r.phase)\n"
+            "assert [f.name for f in dataclasses.fields(r)] == ['env', 'phase']\n"
+            "assert str(copy.deepcopy(r)) == str(pickle.loads(pickle.dumps(r))) == 'STATUS: DEV04'\n"
+            "for text in (None, 7):\n" "    plain = await ledger.status(text)\n"
+            "    assert str(plain) == repr(plain), str(plain)\n"
+            "print('record text verified')"))))))
+
 (harness/defbuilt-test
   pyify-container-preservation-test
   (let [session (harness/block-session)]
