@@ -1050,6 +1050,46 @@ static vis_py_fastcall vis_py_scandir_original;
 static vis_py_fastcall vis_py_listdir_original;
 static PyMethodDef vis_py_listdir_guard_def;
 
+/* The budget stops runaway searches before the watchdog. Bulk file operations
+   are not searches (Vis #362): entries that shutil (rmtree, copytree, move)
+   or pytest enumerate do not spend it, at any depth of the current stack. */
+static int vis_py_scan_exempt_module(PyObject *name)
+{
+    const char *text;
+
+    if (!PyUnicode_Check(name)) return 0;
+    text = PyUnicode_AsUTF8(name);
+    if (text == NULL) {
+        PyErr_Clear();
+        return 0;
+    }
+    return strcmp(text, "shutil") == 0 || strcmp(text, "pytest") == 0 ||
+           strcmp(text, "_pytest") == 0 || strncmp(text, "_pytest.", 8) == 0;
+}
+
+static int vis_py_scan_exempt(void)
+{
+    PyFrameObject *frame = PyThreadState_GetFrame(PyThreadState_Get());
+    int exempt = 0;
+
+    while (frame != NULL && !exempt) {
+        PyObject *globals = PyFrame_GetGlobals(frame), *name = NULL;
+        PyFrameObject *back;
+
+        if (globals != NULL && PyDict_Check(globals)) {
+            if (PyDict_GetItemStringRef(globals, "__name__", &name) < 0) PyErr_Clear();
+            if (name != NULL) exempt = vis_py_scan_exempt_module(name);
+        }
+        Py_XDECREF(name);
+        Py_XDECREF(globals);
+        back = PyFrame_GetBack(frame);
+        Py_DECREF(frame);
+        frame = back;
+    }
+    Py_XDECREF(frame);
+    return exempt;
+}
+
 static PyObject *vis_py_scandir_next(PyObject *iterator)
 {
     PyObject *entry = vis_py_scandir_original_next(iterator);
@@ -1057,7 +1097,7 @@ static PyObject *vis_py_scandir_next(PyObject *iterator)
 
     /* Fetch once past the budget to distinguish exhaustion from an exactly
        full scan. Never return that entry or count matches instead of visits. */
-    if (entry == NULL || vis_py_scan_current == NULL) return entry;
+    if (entry == NULL || vis_py_scan_current == NULL || vis_py_scan_exempt()) return entry;
     if (vis_py_scan_current->remaining > 0) {
         vis_py_scan_current->remaining--;
         return entry;
@@ -1071,7 +1111,8 @@ static PyObject *vis_py_scandir_next(PyObject *iterator)
     PyErr_Format(PyExc_RuntimeError,
                  "directory traversal exceeded %d entries in this Python block "
                  "while scanning the directory containing %R; "
-                 "narrow the path or use grep/ls for workspace searches",
+                 "narrow the path or use grep/ls for workspace searches; "
+                 "shutil.rmtree, shutil.copytree and pytest are not capped",
                  VIS_PY_SCAN_ENTRIES, path);
     Py_DECREF(path);
     return NULL;

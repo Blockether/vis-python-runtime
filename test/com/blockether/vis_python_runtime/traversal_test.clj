@@ -115,6 +115,43 @@
     (is (= {:stdout "6000\n" :error nil} (harness/block session "print(scan_part())")))))
 
 (harness/defbuilt-test
+  bulk-file-operations-do-not-spend-budget-test
+  ;; Vis #362: rmtree, copytree and pytest are not searches; reads stay capped.
+  (let [session
+        (harness/block-session)
+
+        copy
+        (str (io/file (harness/temp-dir "vis-bulk") "copy"))]
+
+    (setup session)
+    (is (= {:stdout "False 9000\n" :error nil}
+           (harness/block session
+                          (str "import shutil\nfrom itertools import islice\n"
+                               "shutil.copytree(root, "
+                               (pr-str copy)
+                               ")\n"
+                               "shutil.rmtree("
+                               (pr-str copy)
+                               ")\n"
+                               "with os.scandir(root) as scan:\n"
+                               "    kept = len(list(islice(scan, 9000)))\n"
+                               "print(os.path.exists("
+                               (pr-str copy)
+                               "), kept)"))))
+    (doseq [[module expected] [["_pytest.pathlib" "10001\n"] ["pytest" "10001\n"] ["shutilx" nil]]]
+      (testing module
+        (let [answer (harness/block
+                       session
+                       (str "probe = {'__name__': "
+                            (pr-str module)
+                            ", 'os': os}\n"
+                            "exec('def visit(p):\\n    return len(os.listdir(p))', probe)\n"
+                            "print(probe['visit'](root))"))]
+          (if expected
+            (is (= {:stdout expected :error nil} answer))
+            (is (str/includes? (str (:error answer)) "shutil.rmtree") (pr-str answer))))))))
+
+(harness/defbuilt-test
   small-scans-and-exact-limit-test
   (let [session
         (harness/block-session)
