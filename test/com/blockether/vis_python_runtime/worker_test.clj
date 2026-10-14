@@ -510,6 +510,37 @@ assert custom.verify_flags & ssl.VERIFY_CRL_CHECK_LEAF
                        "eval"
                        "session" "tls"
                        "code" "str(all(isinstance(c, ssl.SSLContext) for c in contexts))")))
+        ;; Vis #383: an in-process host applies its configuration after startup.
+        (value!
+          worker
+          "exec"
+          "session" "tls"
+          "code"
+          (str
+            "import tls_policy
+"
+            "def strict():
+"
+            "    return bool(ssl.create_default_context().verify_flags & ssl.VERIFY_X509_STRICT)
+"
+            "seen = []
+"
+            "for value in [True, False, False, True]:
+"
+            "    tls_policy.configure(value)
+"
+            "    seen.append(strict())
+"
+            "try:
+"
+            "    tls_policy.configure('false')
+"
+            "except TypeError:
+"
+            "    seen.append('TypeError')
+"))
+        (is (= "[True, False, False, True, 'TypeError', True]"
+               (value! worker "eval" "session" "tls" "code" "str(seen + [strict()])")))
         (finally (.close ^SocketChannel (:channel worker))
                  (when-not (.waitFor ^Process (:process worker) 5 TimeUnit/SECONDS)
                    (.destroyForcibly ^Process (:process worker)))
