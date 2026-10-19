@@ -4,8 +4,11 @@ import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -142,13 +145,67 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
   Resolved resolve() {
     List<String> rw = new ArrayList<>(readWrite);
     rw.addAll(tempDirs());
+    List<String> granted = new ArrayList<>(rw);
+    granted.addAll(readOnly);
     return new Resolved(realPaths(rw), realPaths(readOnly), denyPaths(denyRead),
-        denyPaths(denyWrite), denyPaths(denyExec));
+        denyPaths(denyWrite), denyPaths(denyExec), links(granted));
   }
 
-  /** Real paths only; a deny target that does not exist keeps its expanded spelling. */
+  /**
+   * Real paths only; a deny target that does not exist keeps its expanded spelling.
+   * {@code links} maps each symbolic link on the way to a granted path to its target.
+   */
   record Resolved(List<String> readWrite, List<String> readOnly, List<String> denyRead,
-      List<String> denyWrite, List<String> denyExec) {}
+      List<String> denyWrite, List<String> denyExec, Map<String, String> links) {}
+
+  /** More links than this on one path is a loop; the kernel gives up near the same depth. */
+  private static final int MAX_LINKS = 40;
+
+  /**
+   * Every symbolic link that a lookup of a granted path walks through, as the link's own
+   * path (under its real parent) mapped to its stored target. A grant resolves to a real
+   * path, so without these a child that runs {@code java/current/bin/java} is refused at
+   * the link {@code current}, although the directory behind it is granted.
+   */
+  static Map<String, String> links(List<String> paths) {
+    Map<String, String> links = new LinkedHashMap<>();
+    for (String path : paths) {
+      try {
+        follow(Path.of(expandHome(path)).toAbsolutePath(), links, new int[] {0});
+      } catch (java.io.IOException | InvalidPathException | SecurityException e) {
+        // A path that does not resolve is not granted either: it has no links to keep.
+      }
+    }
+    return Collections.unmodifiableMap(links);
+  }
+
+  private static Path follow(Path path, Map<String, String> links, int[] hops)
+      throws java.io.IOException {
+    Path current = path.getRoot();
+    for (Path name : path) {
+      String part = name.toString();
+      if (part.equals(".")) {
+        continue;
+      }
+      if (part.equals("..")) {
+        Path parent = current.getParent();
+        current = parent == null ? current : parent;
+        continue;
+      }
+      Path next = current.resolve(part);
+      if (!Files.isSymbolicLink(next)) {
+        current = next;
+        continue;
+      }
+      if (++hops[0] > MAX_LINKS) {
+        throw new java.io.IOException("Too many symbolic links: " + path);
+      }
+      Path target = Files.readSymbolicLink(next);
+      links.putIfAbsent(next.toString(), target.toString());
+      current = follow(current.resolve(target), links, hops);
+    }
+    return current;
+  }
 
   /** True when a deny entry is a PATTERN rather than one path. */
   static boolean isPattern(String value) {

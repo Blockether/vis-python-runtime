@@ -136,6 +136,11 @@ public final class Seatbelt {
     for (String root : readOnly) {
       ancestors(root, metadata);
     }
+    // A lookup through a symbolic link reads the link itself, which a real-path grant omits.
+    for (String link : resolved.links().keySet()) {
+      metadata.add(link);
+      ancestors(link, metadata);
+    }
     Set<String> metadataSubpaths = new LinkedHashSet<>(SYSTEM_READ_ROOTS);
     metadataSubpaths.addAll(resolved.readWrite());
     metadataSubpaths.addAll(readOnly);

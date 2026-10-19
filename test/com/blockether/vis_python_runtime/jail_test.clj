@@ -48,6 +48,32 @@
   (doseq [file (reverse (file-seq (.toFile root)))]
     (io/delete-file file true)))
 
+(defn- linked-install
+  "A tool behind a version link, like SDKMAN's `java/current`, outside the temp
+   directories that every child may use. Returns `[install link tool]`."
+  []
+  (let [install
+        (.toRealPath (Files/createDirectories (.toPath (io/file (System/getProperty "user.home")
+                                                                (str ".visjail-link-"
+                                                                     (System/nanoTime))))
+                                              (make-array FileAttribute 0))
+                     (make-array java.nio.file.LinkOption 0))
+
+        bin
+        (Files/createDirectories (.resolve install "1.0/bin") (make-array FileAttribute 0))
+
+        tool
+        (.resolve bin "tool")
+
+        link
+        (Files/createSymbolicLink (.resolve install "current")
+                                  (Path/of "1.0" (make-array String 0))
+                                  (make-array FileAttribute 0))]
+
+    (spit (str tool) "#!/bin/sh\necho linked\n")
+    (.setExecutable (.toFile tool) true)
+    [install link (str link "/bin/tool")]))
+
 (deftest policy-value-test
   (testing "lists are distinct, blank-free and never nil"
     (let [^JailPolicy p (runtime/jail-policy {:read-write ["/a" "" "/a" nil]
@@ -162,6 +188,14 @@
              (is (str/includes? p "(allow mach-lookup(global-name \"com.apple.SecurityServer\")"))
              (is (str/includes? p "com.apple.trustd.agent")))
            (is (not (str/includes? (compile {}) "mach-lookup"))))
+         (testing "a link on the way to a granted path is a metadata literal"
+           ;; Vis #394: SDKMAN runs `java/current/bin/java`; the real path alone left the
+           ;; link `current` unreadable, so the exec failed.
+           (let [[install link] (linked-install)]
+             (try (let [p (compile {:read-only [(str link)]})]
+                    (is (str/includes? p (str "(subpath \"" install "/1.0\")")))
+                    (is (str/includes? p (str "(literal \"" link "\")"))))
+                  (finally (delete-tree install)))))
          (finally (delete-tree root)))))
 
 (deftest bubblewrap-compiler-test
@@ -202,6 +236,18 @@
          (testing "a glob deny rule has no mount point, so bubblewrap skips it"
            (let [args (compile {:deny-read [(str root "/**/.env")]})]
              (is (not (some #(str/includes? % "**") args)))))
+         (testing "a link on the way to a granted path is made again in the child"
+           (let [[install link] (linked-install)]
+             (try (let [args (compile {:read-only [(str link)]})]
+                    (is (some #{["--ro-bind-try" (str install "/1.0") (str install "/1.0")]}
+                              (partition 3 1 args)))
+                    (is (some #{["--symlink" "1.0" (str link)]} (partition 3 1 args))))
+                  (finally (delete-tree install)))))
+         (testing "a link inside a bound tree is already there"
+           (let [[install link] (linked-install)]
+             (try (is (not-any? #{["--symlink" "1.0" (str link)]}
+                                (partition 3 1 (compile {:read-only [(str install) (str link)]}))))
+                  (finally (delete-tree install)))))
          (finally (delete-tree root)))))
 
 (deftest native-bridge-does-not-interpret-policy-arguments-test
@@ -281,6 +327,25 @@
              (is (not= 0 (:exit result)))
              (is (not (str/includes? (:out result) "hidden-token"))))
            (finally (delete-tree root))))))
+
+(deftest a-granted-tool-runs-through-its-version-link-test
+  ;; Vis #394: a toolchain on PATH as `java/current/bin/java` must run when its link is granted.
+  (when (macos?)
+    (let [root
+          (temp-dir)
+
+          [install _ tool]
+          (linked-install)]
+
+      (try (let [result (run-process [tool]
+                                     (options root
+                                              {:policy {:read-write [(str root)]
+                                                        :read-only [(str install "/current")]}}))]
+             (is (= 0 (:exit result)) (:err result))
+             (is (= "linked\n" (:out result))))
+           (testing "without the grant the jail still refuses the tool"
+             (is (not= 0 (:exit (run-process [tool] (options root))))))
+           (finally (delete-tree install) (delete-tree root))))))
 
 (deftest filtered-egress-crosses-only-the-native-loopback-bridge-test
   (let [root

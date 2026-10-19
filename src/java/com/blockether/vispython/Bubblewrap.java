@@ -5,6 +5,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -74,6 +75,17 @@ public final class Bubblewrap {
     for (String path : resolved.readWrite()) {
       bind(args, "--bind-try", path, path);
     }
+    // Only bound paths exist in the child, so a link on the way to a grant must be made
+    // again; one inside a bound tree is already there.
+    Set<String> bound = new LinkedHashSet<>(readOnly);
+    bound.addAll(resolved.readWrite());
+    for (Map.Entry<String, String> link : resolved.links().entrySet()) {
+      if (!inside(link.getKey(), bound)) {
+        args.add("--symlink");
+        args.add(link.getValue());
+        args.add(link.getKey());
+      }
+    }
     for (String path : bindable(resolved.denyWrite())) {
       bind(args, "--ro-bind-try", path, path);
     }
@@ -115,5 +127,14 @@ public final class Bubblewrap {
     args.add(flag);
     args.add(source);
     args.add(target);
+  }
+
+  private static boolean inside(String path, Set<String> roots) {
+    for (String root : roots) {
+      if (path.equals(root) || path.startsWith(root.endsWith("/") ? root : root + "/")) {
+        return true;
+      }
+    }
+    return false;
   }
 }
