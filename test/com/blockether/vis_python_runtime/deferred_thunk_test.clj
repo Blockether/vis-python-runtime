@@ -6,8 +6,8 @@
    call settles, `print` settles. This file pins the awkward half, which is where
    the papercuts live:
 
-   - INLINE SETTLE. `shell(...)['out']`, `len(r)`, `'k' in r` and `r.get(...)` on
-     a still-deferred call are single-expression uses of ONE result, so they
+   - INLINE SETTLE. `shell(...)['out']`, `len(r)`, `'k' in r`, `str(r)`, `f'{r}'` and
+     `r.get(...)` on a still-deferred call are single-expression uses of ONE result, so they
      settle in place instead of raising `'__vis_Call__' object is not
      subscriptable`. The names internal plumbing probes with `hasattr`
      (`send`/`throw`/`close`/`keys`) stay ABSENT, so a probe can never silently
@@ -101,6 +101,15 @@
         (is (str/includes? out "faketool"))
         ;; the trailing empty list is the proof the repr did not settle
         (is (str/ends-with? out ", []]"))))
+    (testing "`str(...)` and an f-string settle the call ONCE and show its result"
+      ;; Regression: `view = str(cat(p))` gave the repr hint as text, so a block that
+      ;; parsed the view failed far from the missing `await`.
+      (is (= "['hi', 'hi!', 1]"
+             (ran s
+                  (str "def _t():\n" "    ran = []\n"
+                       "    box = [__vis_deferred__("
+                       "lambda: ran.append(1) or 'hi', 'faketool')()]\n"
+                       "    return [str(box[0]), f'{box[0]}!', len(ran)]\n" "print(_t())")))))
     (testing "an attribute use settles ONCE and reads the field the result carries"
       ;; `faketool(...)['stdout']` and `faketool(...).stdout` are the same
       ;; single-expression use of ONE call: the settled map answers both, the

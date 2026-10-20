@@ -242,6 +242,15 @@ class __vis_Call__:
     def __repr__(self):
         return "<unawaited async tool call: write `await " + self.nm + "(...)`>"
 
+    # TEXT auto-settle. `str(cat(p))` and `f"{cat(p)}"` use ONE result as text, like
+    # `print` does, so they settle here. Without this, the block parsed the repr hint
+    # (`view = str(cat(p))`) and failed far from the missing `await`. `repr` stays loud.
+    def __str__(self):
+        return str(__vis_settle__(self))
+
+    def __format__(self, spec):
+        return format(__vis_settle__(self), spec)
+
     # INLINE-USE auto-settle. Subscripting / `len(...)` / `in` a deferred call is
     # ALWAYS a single-expression use of that ONE call's result — there is no
     # concurrency to forfeit (unlike a batchable set of calls), so we settle it
