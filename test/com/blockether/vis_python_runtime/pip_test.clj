@@ -146,6 +146,32 @@
       (runtime/exec! session "sys.modules.pop('vis_injected_sdk', None)"))))
 
 (harness/defbuilt-test
+  editable-reload-keeps-nested-import-locations-test
+  ;; Blockether/vis#405: an editable root can hold the interpreter, runtime sources or site.
+  (with-editable-site
+    (fn [session packages source]
+      (let [root (.getParentFile ^java.io.File source)]
+        (spit (io/file packages "fixture.pth") (str root "\n"))
+        (spit (io/file packages "vis_site_fixture.py") "VALUE = 'site'\n")
+        (spit (io/file root "vis_root_fixture.py") "VALUE = 'root'\n")
+        (runtime/install-runtime! session)
+        (runtime/exec! session
+                       (str "import sys, package_paths\n"
+                            "package_paths.refresh("
+                            (pr-str (str packages))
+                            ")\n"
+                            "import vis_site_fixture, vis_root_fixture\n"
+                            "site_module = vis_site_fixture\n"
+                            "package_paths.refresh("
+                            (pr-str (str packages))
+                            ", reload=True)\n"))
+        (is (= "True"
+               (runtime/eval-str session
+                                 "str(sys.modules.get('vis_site_fixture') is site_module)")))
+        (is (= "False" (runtime/eval-str session "str('vis_root_fixture' in sys.modules)")))
+        (runtime/exec! session "sys.modules.pop('vis_site_fixture', None)")))))
+
+(harness/defbuilt-test
   editable-pth-is-importable-test
   ;; Blockether/vis#175: a site path alone does not activate an editable install.
   (with-editable-site

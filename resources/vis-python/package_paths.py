@@ -20,6 +20,28 @@ def _under(path, roots):
     return any(path.is_relative_to(root) for root in roots)
 
 
+def _editable(path, roots):
+    """Tell if `path` is editable code: under a root, not under a nested import location."""
+    if not path:
+        return False
+    path = Path(os.path.realpath(path))
+    owners = [root for root in roots if path.is_relative_to(root)]
+    if not owners:
+        return False
+    # The interpreter, the runtime sources and the package site can live inside a root.
+    for entry in sys.path:
+        if not isinstance(entry, str) or not entry:
+            continue
+        entry = Path(os.path.realpath(entry))
+        if (
+            entry not in roots
+            and path.is_relative_to(entry)
+            and any(entry != root and entry.is_relative_to(root) for root in owners)
+        ):
+            return False
+    return True
+
+
 class _SourceLoader(importlib.machinery.SourceFileLoader):
     def get_code(self, fullname):
         # Editable code must not reuse timestamp/size pyc after a rapid source edit.
@@ -118,7 +140,7 @@ def refresh(packages, *, reload=False):
                 spec.origin if spec.has_location else None,
                 *getattr(module, "__path__", ()),
             ]
-            if any(_under(path, old_roots | _roots) for path in paths):
+            if any(_editable(path, old_roots | _roots) for path in paths):
                 sys.modules.pop(name, None)
                 parent, _, child = name.rpartition(".")
                 owner = sys.modules.get(parent)
