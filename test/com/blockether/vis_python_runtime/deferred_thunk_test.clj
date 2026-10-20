@@ -24,7 +24,9 @@
      arguments hands that call its elements, and `str.join` or `json.dumps`
      type-checks them in C, so an element holding a call settles where it is
      written. `gather` and the calls that only STORE elements (`list(...)`,
-     `.append`, `.extend`) keep their thunks, so a batch still batches.
+      `.append`, `.extend`) keep their thunks, so a batch still batches.
+    - EAGER TOOLS. A tool that the host marks True in `__vis_eager__` runs where it
+      is called, so a holder that only stores it cannot drop the call.
    - SCOPE. Auto-settle drives OUR thunks and nothing else: a generator binding
      is not exhausted, and an object whose `__getattr__` answers every name is
      not mistaken for a coroutine.
@@ -278,6 +280,42 @@
                        "ns_b = ns_box3()\n"
                        "print([isinstance(ns_b['hits'][0], dict), ns_b['hits'][0]['op']])"))))
       (is (= 1 (count @calls))))))
+
+(harness/defbuilt-test
+  eager-tool-test
+  ;; Regression: `results.append(patch(...))` only stored a thunk, so 141 patches of an
+  ;; edit eval never ran while the block reported them as done.
+  (let [[s calls]
+        (nested-session)
+
+        eager
+        #(harness/ev s "globals().__setitem__('__vis_eager__', {'nested_ok': True})")]
+
+    (testing "an eager tool runs where it is called, also when a holder only stores it"
+      (eager)
+      (is
+        (=
+          "[True, True]"
+          (ran
+            s
+            (str
+              "eg_rs = []\n" "for eg_i in (1, 2):\n"
+              "    eg_rs.append(nested_ok(eg_i))\n"
+              "print([all(isinstance(eg_r, dict) for eg_r in eg_rs), 'unawaited' not in repr(eg_rs)])"))))
+      (is (= [[1] [2]] @calls)))
+    (testing "`await` and `gather` hand an eager result straight back"
+      (is (= "['nested_ok', ['nested_ok', 'nested_ok']]"
+             (ran s
+                  (str "eg_a = await nested_ok(3)\n"
+                       "eg_g = await gather(nested_ok(4), nested_ok(5))\n"
+                       "print([eg_a['op'], [eg_x['op'] for eg_x in eg_g]])"))))
+      (is (= 5 (count @calls))))
+    (testing "a tool that the host marks False still defers in a holder"
+      (is (= "[False]"
+             (ran s
+                  (str "globals()['__vis_eager__'] = {'nested_ok': False}\n" "eg_h = []\n"
+                       "eg_h.append(nested_ok(6))\n" "print([isinstance(eg_h[0], dict)])"))))
+      (is (= 5 (count @calls))))))
 
 ;; ---------------------------------------------------------------------------
 ;; What auto-settle must NOT touch.

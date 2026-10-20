@@ -2993,7 +2993,14 @@ def __vis_publish_tool__(fn, nm):
 
 def __vis_deferred__(realfn, nm="tool"):
     def __vis_tool__(*a, **k):
-        return __vis_Call__(realfn, a, k, nm)
+        c = __vis_Call__(realfn, a, k, nm)
+        # An EAGER tool changes state, so it runs where it is called. Deferred, a call
+        # that a holder only stored (`results.append(patch(p, edits, v))`) ran nothing,
+        # and the block went on as if it had. The host marks these tools True in the
+        # `__vis_eager__` map; `await` and `gather` hand the settled result straight back.
+        if (globals().get("__vis_eager__") or {}).get(nm):
+            return __vis_settle__(c)
+        return c
 
     return __vis_publish_tool__(__vis_tool__, nm)
 
