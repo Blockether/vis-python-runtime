@@ -363,7 +363,7 @@
     (testing "a record pickles and copies by value inside its session"
       (is (= "IssueSearch open 1" local)))
     (testing "the snapshot saves a record and a container that holds one"
-      (is (str/includes? listing "res: IssueSearch | saved"))
+      (is (some #{"  res: IssueSearch"} (str/split-lines listing)))
       (is (not (str/includes? listing "not saved"))))
     (testing "records and runtime results come back under a new session module"
       (is (= (str "{}\nIssueSearch 1 [317] pickle\nIssue ['bug'] open\nTrue True\nTrue 317\n"
@@ -444,7 +444,7 @@
 
     (testing "values are saved until the budget is full, then reported as not saved"
       (is (< (count text) (* 6 1024 1024)))
-      (is (str/includes? listing "part_3: str, 900000 chars | saved"))
+      (is (some #{"  part_3: str, 900000 chars"} (str/split-lines listing)))
       (is (str/includes? listing "part_4: str, 900000 chars | not saved: str does not fit")))))
 
 (harness/defbuilt-test session-defs-del-drops-and-frees-a-variable-test
@@ -569,9 +569,13 @@
         calls
         (harness/printed (block session "print(json.dumps(__vis_def_calls__()))"))]
 
-    (testing "the listing previews the docstring's first line, and counts what is missing"
+    (testing "the listing previews the docstring's first line, and a bare helper is its call only"
       (is (str/includes? listed "Rewrite a kebab-case identifier as snake_case."))
-      (is (str/includes? listed "1 has no docstring")))
+      (is (some #{"  quiet(x)"} (str/split-lines listed))))
+    (testing "rows carry no per-row block origin, line count or default saved state"
+      ;; User report: every row repeated `<prog:N> | N lines | saved`, which every
+      ;; later request paid for. Only exceptions (restored, not saved) are marked.
+      (is (not (re-find #"<prog:|\d+ lines|\| saved|in this sandbox|returns source" listed))))
     (testing "the whole docstring is readable per helper, and an undocumented one carries none"
       ;; The empty document is deliberate: it is what keeps a bare handle out of
       ;; a described search on the host's side.

@@ -4264,14 +4264,15 @@ def defs(name=None, *, pattern=None, limit=20, offset=0, details=False):
     """Find and refine the helpers and variables this session defined.
 
     `defs()` lists up to 20 entries: helpers sorted by name, then variables.
+    A helper row is its call hint and first docstring line; a variable row is
+    its type and size, never its value. Rows mark only exceptions: a restored
+    helper and a value that is not saved, with the reason. Match counts appear
+    only when a pattern or a page hides rows.
     `pattern` is a case-sensitive regex over names, a helper's first docstring
     line (the 72-character gist) and a variable's type. `limit` is an integer
-    from 1 to 100; `offset` is a nonnegative integer into the matches. Counts
-    and a continuation hint make omitted rows explicit.
+    from 1 to 100; `offset` is a nonnegative integer into the matches.
     Call hints are capped at 120 characters, omit annotations and show only
     default types (`=<str>`), never values. They are hints, not executable code.
-    A variable row shows its type and size, never its value, and whether it is
-    saved for a sandbox restart; a row that is not saved says why.
 
     `defs("name")` returns a helper's exact source, or a variable's row.
     `defs("name", details=True)` instead returns a helper's origin, source
@@ -4349,36 +4350,35 @@ def defs(name=None, *, pattern=None, limit=20, offset=0, details=False):
         ):
             matches.append((n, value, "", status))
     page = matches[offset : offset + limit]
-    rows = [
+    head = (
         f"{len(live)} function{'s' if len(live) != 1 else ''} and"
-        f" {len(variables)} variable{'s' if len(variables) != 1 else ''} in this sandbox"
-        f" | {len(matches)} matches | {len(page)} shown (offset={offset})"
-    ]
+        f" {len(variables)} variable{'s' if len(variables) != 1 else ''}"
+    )
+    # Every row costs tokens on each later request, so rows state only the
+    # exceptions (restored, not saved), and counts appear only when hidden.
+    if matcher is not None or offset or len(page) < len(matches):
+        head += f" | {len(matches)} matches | {len(page)} shown (offset={offset})"
+    rows = [head]
     if not live and not variables:
         rows.append(
             "nothing defined by this session yet — define a helper or keep a result"
             " in a variable to reuse it."
         )
+    restored = g.get("__vis_restored_block__")
     for n, value, gist, status in page:
         if status is not None:
-            rows.append("  " + __vis_var_row__(n, value, status))
-            continue
-        row = "  " + __vis_def_call__(n, value) + " | " + __vis_def_origin__(value)
-        saved = entries.get(n, ("function", "saved"))[1]
-        if saved != "saved":
-            row += " | not saved: " + saved
+            row = "  " + __vis_def_gist__(n, 80) + ": " + __vis_var_kind__(value)
+        else:
+            row = "  " + __vis_def_call__(n, value)
+            where = getattr(__vis_def_code__(value), "co_filename", None)
+            if restored is not None and where == restored:
+                row += " (restored)"
+            status = entries.get(n, ("function", "saved"))[1]
+        if status != "saved":
+            row += " | not saved: " + status
         rows.append(row + (" | " + gist if gist else ""))
-    tail = 'defs("name") returns source; defs("name", details=True) shows dependencies.'
-    bare = sum(1 for _, _, gist, status in page if status is None and not gist)
-    if bare:
-        tail += f" {bare} {'has' if bare == 1 else 'have'} no docstring in this page."
-    if any(status is not None for _, _, _, status in page):
-        tail += " Saved variables come back after a sandbox restart."
-    rows.append(tail)
     if offset + len(page) < len(matches):
-        rows.append(
-            f"More: repeat this search with offset={offset + len(page)}, limit={limit}."
-        )
+        rows.append(f"More: offset={offset + len(page)}.")
     return "\n".join(rows)
 
 
