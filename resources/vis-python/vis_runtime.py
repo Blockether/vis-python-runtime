@@ -40,6 +40,194 @@ AUTO_IMPORTS_MODULE = "auto_imports"
 
 _MODULE_CODE = {}
 
+#: Name of the `builtins` module in the sandbox runtime. Its `__vis_` prefix
+#: also makes `__vis_pin_runtime__` keep it in `builtins`.
+_BUILTINS_ALIAS = "__vis_builtins__"
+
+#: Builtins that the compiler treats by name: zero-argument `super()` needs it.
+_COMPILER_NAMES = frozenset({"super"})
+
+_CALLABLE_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_SCOPES = (*_CALLABLE_SCOPES, ast.ClassDef, *_COMPREHENSIONS)
+
+
+def _inner_nodes(node):
+    """The children of scope `node` that run in its own scope."""
+    if isinstance(node, ast.Lambda):
+        return [node.body]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return list(node.body)
+    first, *rest = node.generators
+    tail = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+    return [first.target, *first.ifs, *rest, *tail]
+
+
+def _outer_nodes(node):
+    """The children of scope `node` that run in the enclosing scope."""
+    if isinstance(node, _COMPREHENSIONS):
+        return [node.generators[0].iter]
+    inner = {id(child) for child in _inner_nodes(node)}
+    outer = [c for c in ast.iter_child_nodes(node) if id(c) not in inner]
+    if isinstance(node, _CALLABLE_SCOPES):
+        args = node.args
+        params = [
+            *args.posonlyargs,
+            *args.args,
+            *args.kwonlyargs,
+            args.vararg,
+            args.kwarg,
+        ]
+        outer = [c for c in outer if c is not args]
+        outer += [d for d in (*args.defaults, *args.kw_defaults) if d is not None]
+        outer += [
+            p.annotation for p in params if p is not None and p.annotation is not None
+        ]
+    return outer
+
+
+def _bindings(nodes):
+    """The names that `nodes` bind in their own scope, without nested scopes."""
+    names = set()
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            names.add(node.id)
+        elif isinstance(node, ast.alias):
+            names.add((node.asname or node.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+            names.update([node.name] if node.name else [])
+        elif isinstance(node, ast.MatchMapping):
+            names.update([node.rest] if node.rest else [])
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names.update(node.names)
+        stack.extend(
+            _outer_nodes(node)
+            if isinstance(node, _SCOPES)
+            else ast.iter_child_nodes(node)
+        )
+    return names
+
+
+def _own_bindings(node):
+    """The names that scope `node` binds, its parameters included."""
+    names = _bindings(_inner_nodes(node))
+    if isinstance(node, _CALLABLE_SCOPES):
+        args = node.args
+        params = [
+            *args.posonlyargs,
+            *args.args,
+            *args.kwonlyargs,
+            args.vararg,
+            args.kwarg,
+        ]
+        names.update(p.arg for p in params if p is not None)
+    return names
+
+
+def _pin_builtin_reads(tree):
+    """Make the runtime read each builtin that it never binds from `builtins`.
+
+    The runtime runs INSIDE the session globals. A block global `set = Path(...)`
+    therefore replaced `set` in every runtime function, and each later block and
+    host call failed with "'PosixPath' object is not callable". After this
+    rewrite, a session variable can have any builtin name, and the runtime still
+    gets the real builtin. A name that a visible scope binds keeps its plain read.
+    Answers how many reads the rewrite changed.
+    """
+    real = {
+        name
+        for name, value in vars(builtins).items()
+        if not name.startswith("_")
+        and name not in _COMPILER_NAMES
+        and getattr(value, "__module__", None) == "builtins"
+    }
+    module = _bindings(tree.body)
+    # A `global` statement or a walrus target can bind a module name from anywhere.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Global):
+            module.update(node.names)
+        elif isinstance(node, ast.NamedExpr):
+            module.add(node.target.id)
+    count = 0
+
+    def visit(node, chain):
+        nonlocal count
+        if isinstance(node, ast.Name):
+            if (
+                isinstance(node.ctx, ast.Load)
+                and node.id in real
+                and not any(node.id in names for _, names in chain)
+            ):
+                count += 1
+                alias = ast.Name(id=_BUILTINS_ALIAS, ctx=ast.Load())
+                return ast.copy_location(
+                    ast.Attribute(
+                        value=ast.copy_location(alias, node),
+                        attr=node.id,
+                        ctx=ast.Load(),
+                    ),
+                    node,
+                )
+            return node
+        inner = set()
+        nested = chain
+        if isinstance(node, _SCOPES):
+            inner = {id(child) for child in _inner_nodes(node)}
+            # Class names are visible only to the class body itself.
+            kind = "class" if isinstance(node, ast.ClassDef) else "function"
+            nested = [s for s in chain if s[0] != "class"] + [
+                (kind, _own_bindings(node))
+            ]
+            if isinstance(node, _COMPREHENSIONS):
+                first = node.generators[0]
+                first.iter = visit(first.iter, chain)
+                first.target = visit(first.target, nested)
+                first.ifs = [visit(c, nested) for c in first.ifs]
+                inner.discard(id(first.target))
+                inner -= {id(c) for c in first.ifs}
+        for field, value in ast.iter_fields(node):
+            if isinstance(node, _COMPREHENSIONS) and field == "generators":
+                node.generators[1:] = [visit(c, nested) for c in node.generators[1:]]
+            elif isinstance(value, list):
+                setattr(
+                    node,
+                    field,
+                    [
+                        visit(c, nested if id(c) in inner else chain)
+                        if isinstance(c, ast.AST)
+                        else c
+                        for c in value
+                    ],
+                )
+            elif isinstance(value, ast.AST):
+                setattr(
+                    node, field, visit(value, nested if id(value) in inner else chain)
+                )
+        return node
+
+    tree.body = [visit(statement, [("module", module)]) for statement in tree.body]
+    head = 0
+    if (
+        tree.body
+        and isinstance(tree.body[0], ast.Expr)
+        and isinstance(getattr(tree.body[0], "value", None), ast.Constant)
+    ):
+        head = 1
+    while (
+        head < len(tree.body)
+        and isinstance(tree.body[head], ast.ImportFrom)
+        and tree.body[head].module == "__future__"
+    ):
+        head += 1
+    alias = ast.Import(names=[ast.alias(name="builtins", asname=_BUILTINS_ALIAS)])
+    tree.body.insert(head, alias)
+    ast.fix_missing_locations(tree)
+    return count
+
 
 def _preinit_mimetypes():
     """Give `mimetypes` its built-in table, so nothing goes looking for /etc.
@@ -123,7 +311,10 @@ def module_code(module):
                 f"sandbox module {module!r} not on {sys_path_snapshot()!r}"
             )
         with open(origin, encoding="utf-8") as handle:
-            code = compile(handle.read(), origin, "exec")
+            tree = ast.parse(handle.read(), origin)
+        if module == SANDBOX_MODULE:
+            _pin_builtin_reads(tree)
+        code = compile(tree, origin, "exec")
         _MODULE_CODE[module] = code
     return code
 

@@ -92,6 +92,20 @@
                            (is (= "csv" (ran session "print(format)"))))))
 
 (harness/defbuilt-test
+  builtin-named-globals-keep-the-runtime-working-test
+  ;; A block global `set = Path(...)` replaced `set` in every runtime helper, so
+  ;; each later block and host call failed with "'PosixPath' object is not callable".
+  (let [session (harness/tool-session {"patch" patched})]
+    (testing "a block binds builtin names as ordinary globals"
+      (is (nil? (:error (block session
+                               (str "set = 'app.css'\nsorted = type = 1\n"
+                                    "list = len = isinstance = getattr = str = None"))))))
+    (testing "the next blocks, the host and the tools still run"
+      (is (= "app.css 1 None" (ran session "print(set, sorted, list)")))
+      (is (= "patched:x" (ran session "print(await patch('x'))")))
+      (is (harness/truthy session "set == 'app.css' and len is None")))))
+
+(harness/defbuilt-test
   user-id-loop-keeps-future-blocks-runnable-test
   ;; A loop target is an ordinary persistent variable. The runtime's AST
   ;; transformer must not call that string as if it were builtins.id.
