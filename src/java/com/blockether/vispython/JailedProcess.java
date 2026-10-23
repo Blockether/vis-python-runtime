@@ -127,6 +127,12 @@ public final class JailedProcess extends Process {
     }
   }
 
+  @Override
+  public CompletableFuture<Process> onExit() {
+    // Observe the native reaper without blocking the common pool.
+    return exit.thenApply(code -> this);
+  }
+
   @Override public boolean isAlive() { return !exit.isDone(); }
   @Override public long pid() { return pid; }
   @Override public ProcessHandle toHandle() {

@@ -421,6 +421,64 @@
              (.waitFor p 5 TimeUnit/SECONDS))
            (finally (delete-tree root))))))
 
+(deftest process-on-exit-with-busy-common-pool-test
+  ;; Codex handshakes stalled behind process waiters in the common pool.
+  (let [root
+        (temp-dir)
+
+        pool
+        (java.util.concurrent.ForkJoinPool/commonPool)
+
+        workers
+        (.getParallelism pool)
+
+        ready
+        (java.util.concurrent.CountDownLatch. workers)
+
+        release
+        (java.util.concurrent.CountDownLatch. 1)
+
+        blockers
+        (mapv (fn [_]
+                (.submit pool
+                         ^Runnable
+                         (fn []
+                           (.countDown ready)
+                           (.await release))))
+              (range workers))
+
+        ^Process process
+        (runtime/spawn-process! ["/bin/cat"] (options root {:policy nil :merge-stderr? true}))]
+
+    (try (is (.await ready 5 TimeUnit/SECONDS)
+             "The common pool is busy before observing the process.")
+         (let [cancelled
+               (.onExit process)
+
+               observed
+               (.onExit process)]
+
+           (is (false? (.isDone observed)))
+           (is (.cancel cancelled true))
+           (is (.isAlive process) "Cancelling one observer does not stop the process.")
+           (.destroyForcibly process)
+           (is (.waitFor process 5 TimeUnit/SECONDS))
+           (is (identical? process
+                           (try (.get observed 1 TimeUnit/SECONDS)
+                                (catch java.util.concurrent.TimeoutException _ ::timeout)))
+               "Process exit does not need a common-pool worker.")
+           (is (identical? process (.get (.onExit process) 1 TimeUnit/SECONDS)))
+           (is (.isCancelled cancelled)))
+         (finally (.countDown release)
+                  (doseq [^java.util.concurrent.Future blocker blockers]
+                    (.get blocker 5 TimeUnit/SECONDS))
+                  (.destroyForcibly process)
+                  (.waitFor process 5 TimeUnit/SECONDS)
+                  (.close (.getOutputStream process))
+                  (.close (.getInputStream process))
+                  (.close (.getErrorStream process))
+                  (delete-tree root)))))
+
 (deftest immediate-process-termination-test
   ;; The consumer's PTY teardown hung when destroy raced the child's setsid.
   (let [root (temp-dir)]
