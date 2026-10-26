@@ -1086,6 +1086,14 @@ def __vis_record__(
         "__iter__": None,
         "__reduce__": __vis_reduce__,
     }
+    if "keys" not in __vis_fields__:
+        # `keys()` with `__getitem__` lets `dict(r)` and `{**r}` read the fields.
+        # They prefer `keys()` to `__iter__`, so a sequence record still works.
+        # A field named `keys` wins, so its value stays readable.
+        def __vis_keys__(self):
+            return __vis_fields__
+
+        __vis_namespace__["keys"] = __vis_keys__
     if __vis_sequence_field__ is not None:
 
         def __vis_iter__(self):

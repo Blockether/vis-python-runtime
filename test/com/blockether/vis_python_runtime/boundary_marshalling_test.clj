@@ -68,6 +68,18 @@
                        "assert again['state'] == 'again' and item['state'] == 'ready'\n"
                        "assert dataclasses.is_dataclass(item)\n"
                        "assert not hasattr(item, '__dict__')\n" "print('records readable')")))))
+    ;; dict() and ** read the fields through keys(); a field named keys still wins.
+    (testing "dict and ** unpacking read the record fields"
+      (is (= "records unpack"
+             (ran session
+                  (str "import pickle\n"
+                       "job = item.items[0]\n" "assert job.keys() == ('number',)\n"
+                       "assert dict(job) == {'number': 42} and {**job} == {'number': 42}\n"
+                       "assert dict(await ledger.empty()) == {}\n"
+                       "assert item.keys == 'keys field' and item['keys'] == 'keys field'\n"
+                       "again = pickle.loads(pickle.dumps(job))\n"
+                       "assert dict(again) == {'number': 42} and again.keys() == ('number',)\n"
+                       "print('records unpack')")))))
     (testing "unknown names report available fields, never expose class attributes"
       (is
         (=
@@ -156,6 +168,8 @@
                    "assert r[:] == r.results and r[::-1] == r.results[::-1]\n"
                    "assert r['results'] is r.results and r['total'] == 20\n"
                    "assert next(iter(r))['title'] == 'First'\n"
+                   "assert dict(r) == {'results': r.results, 'total': 20} == {**r}\n"
+                   "assert [p.title for p in list(r)] == ['First', 'First']\n"
                    "assert dataclasses.is_dataclass(r[0])\n"
                    "assert not hasattr(r, '__dict__') and not hasattr(r, 'append')\n"
                    "for key in (2, -3):\n" "    try:\n        r[key]\n"
@@ -178,7 +192,9 @@
     (is (= "plain record stays field-only"
            (ran session
                 (str
-                  "plain = await ledger.plain()\n" "assert plain['results'][0].title == 'First'\n"
+                  "plain = await ledger.plain()\n"
+                  "assert plain['results'][0].title == 'First'\n"
+                  "assert dict(plain) == {'results': plain.results, 'total': 20}\n"
                   "for operation in (lambda: iter(plain), lambda: len(plain), lambda: plain[0]):\n"
                   "    try:\n        operation()\n"
                   "    except TypeError:\n        pass\n"
