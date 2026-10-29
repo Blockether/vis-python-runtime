@@ -28,6 +28,7 @@ import json
 import os
 import sys
 import time
+import types
 
 #: Module that carries the sandbox runtime. Overridable so a port can point at
 #: the module in its new home without a code change.
@@ -478,13 +479,17 @@ def _tool_arg(value):
     """One argument JSON cannot carry, as data or text the host can use.
 
     A record crosses as its DATA: a dataclass instance — one a tool answered or
-    one the model built — reaches the host as a dict of its public, set fields,
-    the shape a tool answers a record in, so one tool's result can be handed
-    straight to the next. Its repr crossed before, and the receiving tool got a
-    string where it declared the record (Blockether/vis#289). Field values take
-    the same rule at any depth: JSON encoding asks again for each value it
-    cannot carry. A dataclass CLASS is not a record, and a dataclass that is
-    also path-like stays a path.
+    one the model built — reaches the host as ``{"__vis_object__": name,
+    "__vis_attrs__": fields}``, the shape a tool answers a record in. Its fields
+    are the public, set ones, and the name is its class name. The host reads the
+    fields as the record and keeps the name as a hint: a receiving extension
+    picks the one of its declared record classes that the name selects
+    (Blockether/vis#427). Its repr crossed before, and the receiving tool got a
+    string where it declared the record (Blockether/vis#289). A
+    ``types.SimpleNamespace`` is a record without a class: it crosses as a plain
+    dict of its public attributes. Field values take the same rule at any depth:
+    JSON encoding asks again for each value it cannot carry. A dataclass CLASS
+    is not a record, and a dataclass that is also path-like stays a path.
 
     A path the model spelled as an OBJECT is still a path: every `os.PathLike`
     crosses as its FILESYSTEM string, not as a repr — `cat(root / "q.clj")` used
@@ -501,9 +506,16 @@ def _tool_arg(value):
         and not hasattr(value, "__fspath__")
     ):
         return {
-            f.name: getattr(value, f.name)
-            for f in dataclasses.fields(value)
-            if not f.name.startswith("_") and hasattr(value, f.name)
+            "__vis_object__": type(value).__name__,
+            "__vis_attrs__": {
+                f.name: getattr(value, f.name)
+                for f in dataclasses.fields(value)
+                if not f.name.startswith("_") and hasattr(value, f.name)
+            },
+        }
+    if isinstance(value, types.SimpleNamespace):
+        return {
+            name: item for name, item in vars(value).items() if not name.startswith("_")
         }
     try:
         text = os.fspath(value)
@@ -518,7 +530,7 @@ def _host_tool(name, session=None):
     Arguments travel separately as `{"args": [...], "kwargs": {...}}`; the reply
     is `{"value": ...}` or `{"error": "..."}`. The host owns any options-map
     adaptation. A value JSON cannot carry crosses through `_tool_arg`: a record as
-    its public fields, a path as its filesystem string, anything else as its `str`.
+    its class name and public fields, a path as its filesystem string, anything else as its `str`.
 
     The envelope also carries `session`, because the host binds a tool per
     session — the same name in two sessions is two functions, and the boundary

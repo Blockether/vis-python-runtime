@@ -316,6 +316,8 @@
       (is (str/includes? (str (ffirst @seen)) "VisTestBadPathLike")))))
 
 ;; Regression Blockether/vis#289: a record crosses back to a tool as its fields, never as its repr.
+;; Regression Blockether/vis#427: a record also names its class, at any depth, and a
+;; SimpleNamespace crosses as its attributes, never as its repr.
 (harness/defbuilt-test
   record-argument-boundary-test
   (let [seen
@@ -338,22 +340,34 @@
           (reset! seen [])
           (ran session code))
 
-        fields
-        {"http_code" 201 "job_path" "a/b" "jobs" [{"number" 7}]}]
+        record
+        {"__vis_object__" "TriggerResult"
+         "__vis_attrs__" {"http_code" 201
+                          "job_path" "a/b"
+                          "jobs" [{"__vis_object__" "Job" "__vis_attrs__" {"number" 7}}]}}]
 
-    (testing "a record one tool answered reaches the next tool as its fields"
+    (testing "a record one tool answered reaches the next tool as its class name and fields"
       (probe "result = await ci.trigger()\nawait record_probe(result)")
-      (is (= [[fields]] @seen)))
+      (is (= [[record]] @seen)))
     (testing "a record keeps its fields inside an options dict and as a keyword argument"
       (probe "await record_probe({'result': result}, again=result)")
-      (is (= [[{"result" fields} {"again" fields}]] @seen)))
+      (is (= [[{"result" record} {"again" record}]] @seen)))
     (testing "a dataclass the model built crosses as its public, set fields"
       (probe (str "import dataclasses\n" "@dataclasses.dataclass\n"
                   "class VisTestJob:\n" "    number: int\n"
                   "    paths: list\n" "    _cache: dict = dataclasses.field(default_factory=dict)\n"
                   "    later: int = dataclasses.field(init=False)\n"
                   "await record_probe(VisTestJob(7, [Path('/tmp/vis/q.clj')]))"))
-      (is (= [[{"number" 7 "paths" ["/tmp/vis/q.clj"]}]] @seen)))
+      (is (= [[{"__vis_object__" "VisTestJob"
+                "__vis_attrs__" {"number" 7 "paths" ["/tmp/vis/q.clj"]}}]]
+             @seen)))
+    (testing "a SimpleNamespace crosses as its public attributes, nested records included"
+      (probe (str
+               "import types\n"
+               "await record_probe([types.SimpleNamespace(id='a', job=VisTestJob(8, []), _x=1)])"))
+      (is (= [[[{"id" "a"
+                 "job" {"__vis_object__" "VisTestJob" "__vis_attrs__" {"number" 8 "paths" []}}}]]]
+             @seen)))
     (testing "a dataclass class is not a record: it still crosses as its str"
       (probe "await record_probe(VisTestJob)")
       (is (= 1 (count @seen)))
