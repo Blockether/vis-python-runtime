@@ -108,8 +108,12 @@
              "module = vis_runtime.SANDBOX_MODULE\n"
              "vis_runtime._MODULE_CODE.clear()\n"
              "first = vis_runtime.module_code(module)\n"
-             "folder = os.path.join(sys.pycache_prefix, 'vis-sandbox')\n"
-             "kept = [n for n in os.listdir(folder) if n.startswith(module + '.')]\n"
+             "origin = vis_runtime.importlib.util.find_spec(module).origin\n"
+             "with open(origin, 'rb') as handle:\n"
+             "    path = vis_runtime._code_cache_path(module, origin, handle.read())\n"
+             "folder, name = os.path.split(path)\n"
+             "stem = name.rsplit('.', 2)[0] + '.'\n"
+             "kept = [n for n in os.listdir(folder) if n.startswith(stem)]\n"
              "vis_runtime._MODULE_CODE.clear()\n"
              "rewrite = vis_runtime._pin_builtin_reads\n"
              "def refuse(tree):\n"
@@ -123,3 +127,25 @@
 
     (testing "a confined process keeps one compiled runtime and a fresh one reads it back"
       (is (= {:stdout "1 True\n" :error nil} (block session probe))))))
+
+
+;; Perf pass 2026-11: the sandbox and the extension worker read the runtime from two
+;; paths, and each write pruned the other path's file, so neither process kept a hit.
+(harness/defbuilt-test
+  compiled-code-of-two-source-paths-coexists-test
+  (let [session
+        (harness/block-session)
+
+        probe
+        (str "import os, vis_runtime\n"
+             "code = compile('VALUE = 1', 'probe', 'exec')\n"
+             "paths = [vis_runtime._code_cache_path('vis_probe', origin, b'VALUE = 1')\n"
+             "         for origin in ('/one/vis_probe.py', '/two/vis_probe.py')]\n"
+             "for path in paths:\n"
+             "    vis_runtime._write_cached_code(path, code)\n"
+             "print([os.path.exists(path) for path in paths])\n"
+             "for path in paths:\n"
+             "    os.remove(path)")]
+
+    (testing "writing the code of one source path keeps the code of the other"
+      (is (= {:stdout "[True, True]\n" :error nil} (block session probe))))))

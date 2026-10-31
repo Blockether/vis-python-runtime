@@ -311,17 +311,18 @@ def _code_cache_path(module, origin, source):
     Each sandbox and extension process is new, so a cache in `_MODULE_CODE` alone
     pays the parse, the rewrite and the compile in every process. The file lives
     under the interpreter's bytecode cache, which confinement keeps writable. Its
-    key covers the source, its path, this module and the interpreter's magic number.
+    key covers the source, this module and the interpreter's magic number. Each
+    source path has its own file, because the sandbox and the extension worker read
+    the runtime from different paths and a write prunes only its own path's files.
     """
     prefix = sys.pycache_prefix
     stamp = _transform_stamp()
     if not prefix or stamp is None:
         return None
-    key = importlib.util.source_hash(
-        source + b"\0" + os.fsencode(origin) + b"\0" + stamp
-    )
+    place = importlib.util.source_hash(os.fsencode(origin)).hex()
+    key = importlib.util.source_hash(source + b"\0" + stamp).hex()
     tag = sys.implementation.cache_tag or "python"
-    return os.path.join(prefix, "vis-sandbox", f"{module}.{tag}.{key.hex()}.bin")
+    return os.path.join(prefix, "vis-sandbox", f"{module}.{tag}.{place}.{key}.bin")
 
 
 def _read_cached_code(path):
