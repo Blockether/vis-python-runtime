@@ -306,6 +306,27 @@
         (runtime/certificates-pem! path)
         (is (= stamp (.lastModified (io/file written))))))))
 
+;; Every process start parsed the whole host bundle, 239 roots and about 230 ms in the
+;; native image, even for a command that never opens TLS.
+(deftest host-trust-loads-at-the-first-trust-decision-test
+  (let [original
+        (javax.net.ssl.SSLContext/getDefault)
+
+        dir
+        (temp-dir "vis-lazy-trust")
+
+        pem
+        (io/file dir "roots.pem")]
+
+    (spit pem "not a certificate\n")
+    (try (testing "installing reads no certificate" (is (nil? (Trust/installPem (str pem)))))
+         (testing "the first trust decision reads the bundle and names its failure"
+           (is (thrown? com.blockether.vispython.VisPythonException (Trust/trustAnchors))))
+         (testing "a bundle that cannot be read still stops installation"
+           (is (thrown? java.io.UncheckedIOException
+                        (Trust/installPem (str (io/file dir "missing.pem"))))))
+         (finally (javax.net.ssl.SSLContext/setDefault original)))))
+
 (deftest package-directory-test (is (= (Locations/packagesDir) (runtime/packages-dir))))
 
 (deftest install-command-test

@@ -3,6 +3,7 @@ package com.blockether.vispython;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -70,6 +71,40 @@ public final class Trust {
     }
   }
 
+  /** Parses the bundle at the first trust decision. A process that never opens TLS, such as
+   * a CLI command or the TUI, never pays for it: 239 roots cost about 230 ms at native startup.
+   */
+  private static final class LazyPemManager implements X509TrustManager {
+    private final String path;
+    private volatile X509TrustManager loaded;
+
+    LazyPemManager(String path) { this.path = path; }
+
+    private X509TrustManager delegate() {
+      X509TrustManager manager = loaded;
+      if (manager == null) {
+        synchronized (this) {
+          manager = loaded;
+          if (manager == null) loaded = manager = managerForPem(path);
+        }
+      }
+      return manager;
+    }
+
+    private X509TrustManager checked() throws CertificateException {
+      try { return delegate(); }
+      catch (RuntimeException e) { throw new CertificateException("could not load host trust", e); }
+    }
+
+    public X509Certificate[] getAcceptedIssuers() { return delegate().getAcceptedIssuers(); }
+    public void checkClientTrusted(X509Certificate[] chain, String type) throws CertificateException {
+      checked().checkClientTrusted(chain, type);
+    }
+    public void checkServerTrusted(X509Certificate[] chain, String type) throws CertificateException {
+      checked().checkServerTrusted(chain, type);
+    }
+  }
+
   private static SSLContext context(X509TrustManager manager) throws GeneralSecurityException {
     SSLContext context = SSLContext.getInstance("TLS");
     context.init(null, new TrustManager[] {manager}, null);
@@ -81,8 +116,12 @@ public final class Trust {
     catch (GeneralSecurityException e) { throw new VisPythonException("could not create host TLS context", Map.of(), e); }
   }
 
+  /** Installs the bundle as an additional trust source. Only its readability is checked here;
+   * its certificates load at the first trust decision.
+   */
   public static synchronized void installPem(String path) {
-    X509TrustManager manager = managerForPem(path);
+    if (!Files.isReadable(Path.of(path))) throw new UncheckedIOException(new AccessDeniedException(path));
+    X509TrustManager manager = new LazyPemManager(path);
     try {
       SSLContext context = context(manager);
       SSLContext.setDefault(context);
