@@ -93,3 +93,33 @@
       ;; The host named no writable root at all; the roots the library adds for
       ;; the interpreter to stay usable are the whole of that count.
       (is (pos? (:write (runtime/confine! [source-dir] [])))))))
+
+
+;; Perf pass 2026-11 (Vis session start): each new sandbox or extension process parsed,
+;; rewrote and compiled the 213 KB runtime again, 100-300 ms before its first block.
+(harness/defbuilt-test
+  compiled-runtime-is-reused-by-a-fresh-process-test
+  (runtime/initialize!)
+  (let [session
+        (confined-session [] [])
+
+        probe
+        (str "import os, sys, vis_runtime\n"
+             "module = vis_runtime.SANDBOX_MODULE\n"
+             "vis_runtime._MODULE_CODE.clear()\n"
+             "first = vis_runtime.module_code(module)\n"
+             "folder = os.path.join(sys.pycache_prefix, 'vis-sandbox')\n"
+             "kept = [n for n in os.listdir(folder) if n.startswith(module + '.')]\n"
+             "vis_runtime._MODULE_CODE.clear()\n"
+             "rewrite = vis_runtime._pin_builtin_reads\n"
+             "def refuse(tree):\n"
+             "    raise AssertionError('the runtime was parsed again')\n"
+             "vis_runtime._pin_builtin_reads = refuse\n"
+             "try:\n"
+             "    second = vis_runtime.module_code(module)\n"
+             "finally:\n"
+             "    vis_runtime._pin_builtin_reads = rewrite\n"
+             "print(len(kept), second.co_filename == first.co_filename)")]
+
+    (testing "a confined process keeps one compiled runtime and a fresh one reads it back"
+      (is (= {:stdout "1 True\n" :error nil} (block session probe))))))

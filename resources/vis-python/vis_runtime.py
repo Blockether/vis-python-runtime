@@ -25,6 +25,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import marshal
 import os
 import sys
 import time
@@ -295,12 +296,69 @@ interruptible_sleep.__vis_native_sleep__ = _native_sleep
 time.sleep = interruptible_sleep
 
 
+def _transform_stamp():
+    """This module's own source: the rewrite lives here, so a change to it makes new keys."""
+    try:
+        with open(__file__, "rb") as handle:
+            return handle.read()
+    except (NameError, OSError):
+        return None
+
+
+def _code_cache_path(module, origin, source):
+    """Where the compiled `module` from `source` at `origin` is kept, or None.
+
+    Each sandbox and extension process is new, so a cache in `_MODULE_CODE` alone
+    pays the parse, the rewrite and the compile in every process. The file lives
+    under the interpreter's bytecode cache, which confinement keeps writable. Its
+    key covers the source, its path, this module and the interpreter's magic number.
+    """
+    prefix = sys.pycache_prefix
+    stamp = _transform_stamp()
+    if not prefix or stamp is None:
+        return None
+    key = importlib.util.source_hash(
+        source + b"\0" + os.fsencode(origin) + b"\0" + stamp
+    )
+    tag = sys.implementation.cache_tag or "python"
+    return os.path.join(prefix, "vis-sandbox", f"{module}.{tag}.{key.hex()}.bin")
+
+
+def _read_cached_code(path):
+    """The code object kept at `path`, or None when it is missing or unreadable."""
+    try:
+        with open(path, "rb") as handle:
+            code = marshal.load(handle)
+    except (OSError, EOFError, ValueError, TypeError):
+        return None
+    return code if isinstance(code, types.CodeType) else None
+
+
+def _write_cached_code(path, code):
+    """Keep `code` at `path` and drop older versions of the same module. Best effort."""
+    folder, name = os.path.split(path)
+    stem = name.rsplit(".", 2)[0] + "."
+    temporary = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(temporary, "wb") as handle:
+            marshal.dump(code, handle)
+        os.replace(temporary, path)
+        for other in os.listdir(folder):
+            if other.startswith(stem) and other != name:
+                with contextlib.suppress(OSError):
+                    os.remove(os.path.join(folder, other))
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(temporary)
+
+
 def module_code(module):
     """The compiled source of one sandbox module, located through the import system.
 
     The host never carries this source as a string: the import machinery finds
     the file on the source roots, and the compiled result is kept because every
-    session pays for it. The module is NOT imported — a sandbox module is meant
+    session pays for it: in this process, and on disk for the next process. The module is NOT imported — a sandbox module is meant
     to be executed INTO a session's globals, not to become a module of its own.
     """
     code = _MODULE_CODE.get(module)
@@ -311,11 +369,17 @@ def module_code(module):
             raise ImportError(
                 f"sandbox module {module!r} not on {sys_path_snapshot()!r}"
             )
-        with open(origin, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read(), origin)
-        if module == SANDBOX_MODULE:
-            _pin_builtin_reads(tree)
-        code = compile(tree, origin, "exec")
+        with open(origin, "rb") as handle:
+            source = handle.read()
+        path = _code_cache_path(module, origin, source)
+        code = None if path is None else _read_cached_code(path)
+        if code is None:
+            tree = ast.parse(source.decode("utf-8"), origin)
+            if module == SANDBOX_MODULE:
+                _pin_builtin_reads(tree)
+            code = compile(tree, origin, "exec")
+            if path is not None:
+                _write_cached_code(path, code)
         _MODULE_CODE[module] = code
     return code
 
