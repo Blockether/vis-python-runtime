@@ -4,6 +4,7 @@ import collections as __vis_collections__
 import errno as __vis_errno__
 import io as __vis_io__
 import linecache as __vis_linecache__
+import _thread as __vis_thread__
 import time as __vis_time__
 import weakref as __vis_weakref__
 
@@ -1183,7 +1184,13 @@ def __vis_slot_thunk__(index, aw, failures):
     # `[i]` prefix, which is what every transport down to the block's error text
     # carries. `failures` collects the text of every slot that failed, so the
     # one failure the pool raises can name the others.
+    # The child runs on a pool thread, inside the `asyncio.timeout` scopes that
+    # were open where the gather was written.
+    scopes = list(getattr(__vis_scopes__, "stack", None) or ())
+
     def __vis_slot__():
+        outer = getattr(__vis_scopes__, "stack", None)
+        __vis_scopes__.stack = list(scopes)
         try:
             return __vis_settle_child__(aw)
         except BaseException as exc:
@@ -1193,6 +1200,8 @@ def __vis_slot_thunk__(index, aw, failures):
                 __vis_mark_slot__(exc, index)
                 failures.append((index, __vis_failure_text__(exc)))
             raise
+        finally:
+            __vis_scopes__.stack = outer
 
     return __vis_slot__
 
@@ -1251,12 +1260,19 @@ def __vis_settle_gather__(v):
             out = []
             for aw in v.aws:
                 failure = None
+                fired = __vis_scopes_fired__()
                 try:
                     out.append(__vis_settle_child__(aw))
                 except (KeyboardInterrupt, SystemExit):
                     # The block's interrupt is no slot's result: it stops the
                     # gather here, as it would stop asyncio's.
                     raise
+                except CancelledError as exc:
+                    # An `asyncio.timeout` deadline cancels the whole gather,
+                    # not one slot, as asyncio cancels the task that awaits it.
+                    if __vis_scopes_fired__() > fired:
+                        raise
+                    failure = exc
                 except BaseException as exc:
                     failure = exc
                 if failure is not None:
@@ -1788,12 +1804,15 @@ class __vis_Sleep__:
         return __vis_Blocking__(self._bounded, timeout)
 
     def __await__(self):
-        __vis_interruptible_sleep__(max(0.0, self.delay))
+        delay, cut = __vis_scope_bound__(max(0.0, self.delay))
+        __vis_interruptible_sleep__(delay)
         result = self.result
         # Like a completed coroutine frame, a retained sleep awaitable must not keep
         # an arbitrary result payload alive after handing it to its caller.
         self.delay = 0.0
         self.result = None
+        if cut is not None:
+            __vis_scope_cancel__(cut)
         if False:
             yield
         return result
@@ -2036,99 +2055,23 @@ def __vis_sliced_sync__():
     # block with an asynchronous KeyboardInterrupt, which CPython raises only
     # between bytecodes. A waiter parked in ONE native acquire runs none, so an
     # `await` on a future that nothing completes could not be stopped, and the
-    # host retired the whole interpreter instead.
+    # host retired the whole interpreter instead. `vis_runtime` slices the
+    # `threading` waits for the whole process, so these are threading's own.
     import threading
     import types
 
-    from vis_runtime import SLEEP_SLICE_SECONDS as slice_s
-
-    monotonic = __vis_time__.monotonic
-
-    def take(lock, held, blocking, wait=-1):
-        # One native acquire whose success lands in `held` inside the same C
-        # call. The interrupt is raised only between bytecodes, so it can land
-        # after the lock is taken, but never before `held` records it.
-        held.extend(filter(None, map(lock.acquire, (blocking,), (wait,))))
-        return bool(held)
-
-    def acquire(lock, timeout=None, held=None):
-        # `lock.acquire(True, timeout)` in slices: True when it got the lock. A
-        # caller that must know whether an interrupt left the lock taken passes
-        # `held`, a list that is not empty once the lock is taken.
-        held = [] if held is None else held
-        if timeout is not None and timeout <= 0:
-            return take(lock, held, False)
-        deadline = None if timeout is None else monotonic() + timeout
-        while True:
-            wait = slice_s if deadline is None else min(slice_s, deadline - monotonic())
-            if wait <= 0:
-                return take(lock, held, False)
-            if take(lock, held, True, wait):
-                return True
-
-    class Condition(threading.Condition):
-        def wait(self, timeout=None):
-            # CPython's own `Condition.wait`, with only the waiter's acquire
-            # sliced: the notify protocol and the cleanup stay exactly its own.
-            if not self._is_owned():
-                raise RuntimeError("cannot wait on un-acquired lock")
-            waiter = threading._allocate_lock()
-            waiter.acquire()
-            self._waiters.append(waiter)
-            saved_state = self._release_save()
-            gotit = False
-            try:
-                if timeout is None:
-                    gotit = acquire(waiter)
-                elif timeout > 0:
-                    gotit = acquire(waiter, timeout)
-                else:
-                    gotit = waiter.acquire(False)
-                return gotit
-            finally:
-                held = []
-                try:
-                    # A sibling can hold the lock for as long as it likes, so
-                    # taking it back is sliced too. An interrupt that lands
-                    # before the lock is taken leaves it NOT held, and the
-                    # exception says so.
-                    acquire(self._lock, None, held)
-                except BaseException as e:
-                    if not held:
-                        e.vis_lock_lost = self._lock
-                    raise
-                finally:
-                    if not gotit:
-                        try:
-                            self._waiters.remove(waiter)
-                        except ValueError:
-                            pass
-
-        def __exit__(self, typ, val, tb):
-            if getattr(val, "vis_lock_lost", None) is self._lock:
-                return None
-            return self._lock.__exit__(typ, val, tb)
-
-    def sliced(base):
-        # Each of these waits on the ONE condition its `__init__` builds.
-        class Sliced(base):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self._cond = Condition(threading.Lock())
-
-        Sliced.__name__ = Sliced.__qualname__ = base.__name__
-        return Sliced
+    from vis_runtime import sliced_acquire
 
     return types.SimpleNamespace(
-        acquire=acquire,
+        acquire=sliced_acquire,
         Lock=threading.Lock,
         get_ident=threading.get_ident,
         BrokenBarrierError=threading.BrokenBarrierError,
-        Condition=Condition,
-        Event=sliced(threading.Event),
-        Semaphore=sliced(threading.Semaphore),
-        BoundedSemaphore=sliced(threading.BoundedSemaphore),
-        Barrier=sliced(threading.Barrier),
+        Condition=threading.Condition,
+        Event=threading.Event,
+        Semaphore=threading.Semaphore,
+        BoundedSemaphore=threading.BoundedSemaphore,
+        Barrier=threading.Barrier,
     )
 
 
@@ -2160,7 +2103,20 @@ class __vis_Blocking__:
         self.fn = None
         if fn is None:
             raise RuntimeError("this wait was already awaited")
-        result = fn(self.timeout)
+        timeout, cut = __vis_scope_bound__(self.timeout)
+        if cut is None:
+            result = fn(timeout)
+        else:
+            expired = False
+            try:
+                result = fn(timeout)
+            except TimeoutError:
+                # Before the deadline, the TimeoutError is the wait's own result.
+                if __vis_time__.monotonic() < cut._when - 0.001:
+                    raise
+                expired = True
+            if expired:
+                __vis_scope_cancel__(cut)
         if False:
             yield
         return result
@@ -2721,32 +2677,87 @@ def __vis_as_completed__(aws, *, timeout=None):
     yield from done
 
 
+__vis_scopes__ = __vis_thread__._local()
+
+
+def __vis_scope_bound__(timeout):
+    # A wait's `timeout` cut to the nearest `asyncio.timeout` deadline of this
+    # thread, and the scope that cuts it, or None when the wait ends first. The
+    # thread that entered a scope sees its deadline once, like asyncio's one
+    # cancel; a gather child sees it on every wait.
+    stack = getattr(__vis_scopes__, "stack", None)
+    if not stack:
+        return timeout, None
+    me = __vis_thread__.get_ident()
+    cut = None
+    for scope in stack:
+        if scope._when is None or (scope._fired and scope._owner == me):
+            continue
+        if cut is None or scope._when < cut._when:
+            cut = scope
+    if cut is None:
+        return timeout, None
+    left = max(0.0, cut._when - __vis_time__.monotonic())
+    if timeout is not None and timeout <= left:
+        return timeout, None
+    return left, cut
+
+
+def __vis_scopes_fired__():
+    # How many `asyncio.timeout` scopes this thread entered have fired.
+    me = __vis_thread__.get_ident()
+    stack = getattr(__vis_scopes__, "stack", None) or ()
+    return sum(1 for scope in stack if scope._fired and scope._owner == me)
+
+
+def __vis_scope_cancel__(scope):
+    # The deadline of `scope` ended a wait: cancel, as asyncio cancels the task.
+    if scope._owner == __vis_thread__.get_ident():
+        scope._fired = True
+    raise CancelledError()
+
+
 class __vis_Timeout__:
-    # `async with asyncio.timeout(s)` on a runtime with no loop: nothing can
-    # interrupt a blocking call from outside, so the deadline is checked on EXIT
-    # - the same cooperative contract `wait_for` already documents. A single
-    # bounded wait is better expressed as `wait_for`, which pushes the deadline
-    # into the wait itself.
-    __slots__ = ("_when", "_expired")
+    # `async with asyncio.timeout(s)` with no event loop to cancel the task. The
+    # deadline goes into every wait of the runtime's own primitives, and a wait
+    # that it ends raises CancelledError, which the exit turns into TimeoutError.
+    # A blocking call that is not one of these waits (a host tool, plain Python)
+    # cannot be stopped from outside, so the deadline is also checked on exit.
+    __slots__ = ("_when", "_expired", "_fired", "_owner")
 
     def __init__(self, when):
         self._when = when
         self._expired = False
+        self._fired = False
+        self._owner = None
 
     def when(self):
         return self._when
 
     def reschedule(self, when):
         self._when = when
+        self._fired = False
 
     def expired(self):
         return self._expired
 
     async def __aenter__(self):
+        self._owner = __vis_thread__.get_ident()
+        stack = getattr(__vis_scopes__, "stack", None)
+        if stack is None:
+            stack = __vis_scopes__.stack = []
+        stack.append(self)
         return self
 
     async def __aexit__(self, typ, val, tb):
-        if self._when is not None and __vis_time__.monotonic() >= self._when:
+        stack = getattr(__vis_scopes__, "stack", None) or []
+        for i in range(len(stack) - 1, -1, -1):
+            if stack[i] is self:
+                del stack[i]
+                break
+        if self._fired or (
+            self._when is not None and __vis_time__.monotonic() >= self._when
+        ):
             self._expired = True
             if typ is None or issubclass(typ, CancelledError):
                 raise TimeoutError()
@@ -3700,6 +3711,26 @@ def __vis_check_tool_shadow__(tree, src):
                 node,
                 src,
             )
+    # `global echo` made the block's own `echo = 1` a session global, and the
+    # tool was gone for every later block. Refuse it where it is written.
+    g = globals()
+    for node in __vis_ast__.walk(tree):
+        if isinstance(node, __vis_ast__.Global):
+            for name in node.names:
+                if name in prot and name in g:
+                    raise __vis_syntax_error__(
+                        "`"
+                        + name
+                        + "` is a protected sandbox name (a tool, a sandbox helper"
+                        + " or a prebound value): `global "
+                        + name
+                        + "` would replace it for every later block. Use your own"
+                        + " name, for example `"
+                        + name
+                        + "_mine`.",
+                        node,
+                        src,
+                    )
 
 
 def __vis_annotate__(name, value):
@@ -5669,6 +5700,7 @@ def __vis_run_async__(src):
             ),
         ) from None
     exec(__vis_code__, g)
+    __vis_kept__ = {n: g[n] for n in __vis_prot__ if n in g}
     try:
         __vis_drive__(g["__vis_main__"]())
     except BaseException as __vis_err__:
@@ -5681,7 +5713,17 @@ def __vis_run_async__(src):
         # The block is over: everything it wrote through a handle it still holds
         # is on disk now, success or failure alike.
         __vis_flush_writes__()
+        __vis_keep_protected__(g, __vis_kept__)
     return assigned
+
+
+def __vis_keep_protected__(g, kept):
+    # Put back each protected name that the block replaced or deleted. A write
+    # by string (`globals()['echo'] = 1`) or a helper's `global echo` changed the
+    # tool for every later block; the block itself saw its own value.
+    for n, v in kept.items():
+        if g.get(n, __vis_unset__) is not v:
+            g[n] = v
 
 
 def __vis_defer_tools__():

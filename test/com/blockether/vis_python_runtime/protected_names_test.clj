@@ -244,3 +244,22 @@
       (is (harness/truthy session "callable(defs)")))
     (testing "the restore says which names it dropped, so the file can heal"
       (is (= ["defs" "patch"] (harness/ev session "__vis_restore_dropped__"))))))
+
+;; Re-audit of Vis session 6d57806d: `global patch` inside a def, or a write
+;; through globals(), replaced the bound tool for every later block.
+(harness/defbuilt-test
+  global-write-over-a-tool-is-refused-test
+  (let [session (harness/tool-session {"patch" patched})]
+    (testing "a `global` naming a tool is refused where it is written"
+      (doseq [code ["global patch\npatch = 1" "def f():\n    global patch\n    patch = 1\nf()"]]
+        (let [refused (block session code)]
+          (is (str/includes? (str (:error refused)) "`global patch`") code)
+          (is (= "patched:x" (ran session "print(await patch('x'))")) code))))
+    (testing "a `global` naming an own variable still persists"
+      (is (= "7" (ran session "def f():\n    global mine\n    mine = 7\nf()\nprint(mine)")))
+      (is (= "7" (ran session "print(mine)"))))
+    (testing "a write or a delete through globals() lasts only for the block"
+      (is (= "1" (ran session "globals()['patch'] = 1\nprint(patch)")))
+      (is (= "patched:a" (ran session "print(await patch('a'))")))
+      (is (nil? (:error (block session "del globals()['patch']"))))
+      (is (= "patched:b" (ran session "print(await patch('b'))"))))))

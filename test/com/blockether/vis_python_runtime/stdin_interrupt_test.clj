@@ -329,3 +329,87 @@
                          ;; — which is why `false` alone is never proof the environment is healthy.
                          (harness/block-session)
                          (is (false? (runtime/interrupt!)))))
+
+;; Re-audit of Vis session 6d57806d: real threading waits (Event, Queue, join,
+;; Condition, futures) ignored the host's interrupt, and the block hung.
+(harness/defbuilt-test
+  interrupt-ends-real-threading-waits-test
+  (doseq [wait
+          ["threading.Event().wait()" "queue.Queue().get()"
+           "t = threading.Thread(target=threading.Event().wait, daemon=True)\nt.start()\nt.join()"
+           "c = threading.Condition(threading.RLock())\nwith c:\n    c.wait()"
+           "threading.Semaphore(0).acquire()" "concurrent.futures.Future().result()"]]
+    (let [waiting (promise)
+          session (harness/tool-session {"ready" (fn [_]
+                                                   (deliver waiting true)
+                                                   "go")})
+          answer (future (block session
+                                (str "import threading, queue, time, concurrent.futures\n"
+                                     "await ready()\n"
+                                     wait)))]
+
+      (is (true? (deref waiting 30000 false)) wait)
+      (Thread/sleep 200)
+      (let [settled (loop [n 0]
+                      (runtime/interrupt!)
+                      (let [r (deref answer 100 ::hung)]
+                        (if (and (= ::hung r) (< n 50)) (recur (inc n)) r)))]
+        (is (not= ::hung settled) wait)
+        (is (str/includes? (str (:error settled)) "KeyboardInterrupt") wait)
+        (is (= "after" (ran session "print('after')")) wait)))))
+
+(harness/defbuilt-test
+  sliced-threading-waits-keep-their-contract-test
+  (let [session (harness/block-session)]
+    (testing "timeouts still elapse and answer what CPython answers"
+      (is (= "False True False True"
+             (ran session
+                  (str "import threading, time\nt0 = time.monotonic()\n"
+                       "e = threading.Event().wait(0.3)\nok = time.monotonic() - t0 >= 0.3\n"
+                       "c = threading.Condition(threading.RLock())\n"
+                       "with c:\n    w = c.wait(0.05)\n"
+                       "print(e, ok, w, c._is_owned() is False)")))))
+    (testing "a notify from another thread wakes the waiter, and join returns"
+      (is (= "woke"
+             (ran
+               session
+               (str
+                 "import threading\nc = threading.Condition()\nbox = []\n"
+                 "def n():\n    with c:\n        box.append(1)\n        c.notify()\n"
+                 "with c:\n    t = threading.Thread(target=n)\n    t.start()\n"
+                 "    c.wait_for(lambda: box, 5)\nt.join()\nprint('woke' if box else 'no')")))))))
+
+;; Audit of Vis session 6d57806d: an interrupt during a contended Condition
+;; enter or re-acquire left the lock taken, or released another thread's lock.
+(harness/defbuilt-test
+  interrupt-keeps-condition-lock-ownership-test
+  (doseq [[label code check]
+          [["a contended enter leaves no lock taken"
+            (str "q = queue.Queue()\nheld = threading.Event()\n"
+                 "def holder():\n    with q.mutex:\n        held.set()\n        time.sleep(1)\n"
+                 "threading.Thread(target=holder, daemon=True).start()\nheld.wait()\n"
+                 "await ready()\nq.get()")
+            ["time.sleep(1.2)\nprint(q.mutex.locked(), q.not_empty.acquire(timeout=1))" "False True"]]
+           ["a contended re-acquire gives the lock back before the interrupt"
+            (str "c = threading.Condition(threading.Lock())\nlog = []\n"
+                 "def holder():\n    try:\n        with c:\n            c.notify()\n"
+                 "            time.sleep(1)\n        log.append('released')\n"
+                 "    except BaseException as e:\n        log.append(repr(e))\n"
+                 "c.acquire()\ntry:\n    threading.Thread(target=holder, daemon=True).start()\n"
+                 "    await ready()\n    c.wait()\nfinally:\n"
+                 "    log.append(c._is_owned())\n    c.release()")
+            ["time.sleep(1.2)\nprint(sorted(map(str, log)), c._lock.locked())" "['True', 'released'] False"]]]]
+    (let [waiting (promise)
+          session (harness/tool-session {"ready" (fn [_]
+                                                   (deliver waiting true)
+                                                   "go")})
+          answer (future (block session (str "import threading, queue, time\n" code)))]
+
+      (is (true? (deref waiting 30000 false)) label)
+      (Thread/sleep 200)
+      (let [settled (loop [n 0]
+                      (runtime/interrupt!)
+                      (let [r (deref answer 100 ::hung)]
+                        (if (and (= ::hung r) (< n 50)) (recur (inc n)) r)))]
+        (is (str/includes? (str (:error settled)) "KeyboardInterrupt") label)
+        (is (= (second check) (ran session (first check))) label)))))

@@ -830,3 +830,53 @@ except ValueError as exc:
         (is (nil? (:error answer)) (pr-str answer))
         (is (= "ran:x" (out answer))))
       (is (= "True" (runtime/eval-str session "str('py' in __vis_protected_names__)"))))))
+
+;; Re-audit of Vis session 6d57806d: asyncio.timeout checked its deadline only
+;; at exit, so `sleep(30)` inside `timeout(0.2)` ran for thirty seconds.
+(harness/defbuilt-test
+  asyncio-timeout-bounds-the-wait-test
+  (testing "the deadline cuts a sleep, an event wait and gather children"
+    (doseq [body ["await asyncio.sleep(30)" "await asyncio.Event().wait()"
+                  "await asyncio.gather(asyncio.sleep(30), asyncio.sleep(30))"]]
+      (is (= "TimeoutError True"
+             (ran (str "import asyncio, time\nt0 = time.monotonic()\n"
+                       "try:\n    async with asyncio.timeout(0.2):\n        "
+                       body
+                       "\n"
+                       "except TimeoutError as e:\n"
+                       "    print(type(e).__name__, time.monotonic() - t0 < 5)")))
+          body)))
+  (testing "an outer deadline cuts an inner scope that has a later one"
+    (is (= "outer"
+           (ran (str "import asyncio\n" "try:\n    async with asyncio.timeout(0.2):\n"
+                     "        try:\n            async with asyncio.timeout(30):\n"
+                     "                await asyncio.sleep(30)\n"
+                     "        except TimeoutError:\n            print('inner')\n"
+                     "except TimeoutError:\n    print('outer')")))))
+  ;; Audit of Vis session 6d57806d: a gather with return_exceptions settled the
+  ;; first slot only, and a TimeoutError result became a scope expiry.
+  (testing "the deadline cancels a return_exceptions gather as a whole"
+    (is
+      (=
+        "TO True"
+        (ran
+          (str
+            "import asyncio, time\nt0 = time.monotonic()\n"
+            "try:\n    async with asyncio.timeout(0.2):\n"
+            "        await asyncio.gather(asyncio.sleep(3), asyncio.sleep(3), return_exceptions=True)\n"
+            "        await asyncio.sleep(3)\n"
+            "except TimeoutError:\n    print('TO', time.monotonic() - t0 < 2)")))))
+  (testing "a TimeoutError that is a wait's result stays that error"
+    (is (= "mine"
+           (ran (str
+                  "import asyncio\nasync with asyncio.timeout(10):\n"
+                  "    f = asyncio.get_event_loop().create_future()\n"
+                  "    f.set_exception(TimeoutError('mine'))\n"
+                  "    try:\n        await f\n    except TimeoutError as e:\n        print(e)")))))
+  (testing "a scope ends with its block and cuts no later wait"
+    (let [session (tools)]
+      (block
+        session
+        "import asyncio\ntry:\n    async with asyncio.timeout(0.1):\n        await asyncio.sleep(30)\nexcept TimeoutError:\n    pass")
+      (is (= "slept"
+             (out (block session "import asyncio\nawait asyncio.sleep(0.3)\nprint('slept')")))))))

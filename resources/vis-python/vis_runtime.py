@@ -28,6 +28,8 @@ import json
 import marshal
 import os
 import sys
+import _thread
+import threading
 import time
 import types
 
@@ -294,6 +296,144 @@ interruptible_sleep.__vis_native_sleep__ = _native_sleep
 # `mimetypes` table above. The host imports this module before any block runs,
 # which makes `from time import sleep` in a block bind this function as well.
 time.sleep = interruptible_sleep
+
+
+def _take(lock, held, blocking, wait=-1):
+    # One native acquire whose success lands in `held` inside the same C call.
+    # The interrupt is raised only between bytecodes, so it can land after the
+    # lock is taken, but never before `held` records it.
+    held.extend(filter(None, map(lock.acquire, (blocking,), (wait,))))
+    return bool(held)
+
+
+def sliced_acquire(lock, timeout=None, held=None):
+    """`lock.acquire(True, timeout)` in slices, so the host's interrupt can land.
+
+    Answers True when the lock was taken. A caller that must know whether an
+    interrupt left the lock taken passes `held`, a list that is not empty once
+    the lock is taken.
+    """
+    held = [] if held is None else held
+    if timeout is not None and timeout <= 0:
+        return _take(lock, held, False)
+    deadline = None if timeout is None else _monotonic() + timeout
+    while True:
+        wait = SLEEP_SLICE_SECONDS
+        if deadline is not None:
+            wait = min(wait, deadline - _monotonic())
+        if wait <= 0:
+            return _take(lock, held, False)
+        if _take(lock, held, True, wait):
+            return True
+
+
+def sliced_condition_wait(self, timeout=None):
+    """`threading.Condition.wait` with its waits sliced.
+
+    CPython's own body with only the waiter's acquire sliced. The lock comes
+    back in one native call that records it in `held`. An interrupt that lands
+    before that call is held back and raised once the lock is held, so the
+    caller always owns the lock after the wait, as CPython promises.
+    """
+    if not self._is_owned():
+        raise RuntimeError("cannot wait on un-acquired lock")
+    waiter = _thread.allocate_lock()
+    waiter.acquire()
+    self._waiters.append(waiter)
+    saved_state = self._release_save()
+    gotit = False
+    try:
+        if timeout is None:
+            gotit = sliced_acquire(waiter)
+        elif timeout > 0:
+            gotit = sliced_acquire(waiter, timeout)
+        else:
+            gotit = waiter.acquire(False)
+        return gotit
+    finally:
+        try:
+            _restore(self, saved_state)
+        finally:
+            if not gotit:
+                try:
+                    self._waiters.remove(waiter)
+                except ValueError:
+                    pass
+
+
+def _restore(cond, saved_state):
+    # Take the condition's lock back. A plain lock is acquired directly, because
+    # Condition's own `_acquire_restore` for it is Python code that an interrupt
+    # can leave with the lock taken but not recorded. `held.extend(map(...))`
+    # takes and records in one C call, with no bytecode boundary between them.
+    # Any other lock is restored once by CPython's own call: its Python code
+    # cannot record the acquire, and a retry could deadlock on it.
+    if type(cond._lock) is _thread.LockType:
+        take, args = cond._lock.acquire, True
+    elif type(cond._lock) is _thread.RLock:
+        take, args = cond._lock._acquire_restore, saved_state
+    else:
+        cond._acquire_restore(saved_state)
+        return
+    held = []
+    pending = None
+    while not held:
+        try:
+            held.extend(map(take, (args,)))
+        except BaseException as e:
+            pending = pending or e
+    if pending is not None:
+        raise pending
+
+
+def sliced_condition_enter(self):
+    """`threading.Condition.__enter__` that never leaves the lock taken on an interrupt.
+
+    An interrupt that is pending while the lock is contended lands right after
+    the native acquire, before `with` registers its exit. The lock is then
+    released again, so the interrupt leaves no lock taken.
+    """
+    lock = self._lock
+    held = []
+    try:
+        held.extend(map(type(lock).__enter__, (lock,)))
+    except BaseException:
+        if held:
+            lock.release()
+        raise
+    return held[0]
+
+
+_native_join = getattr(
+    threading.Thread.join, "__vis_native_join__", threading.Thread.join
+)
+
+
+def sliced_join(self, timeout=None):
+    """`threading.Thread.join` in slices, so the host's interrupt can land."""
+    if timeout is not None:
+        timeout = max(timeout, 0)
+        if timeout <= SLEEP_SLICE_SECONDS:
+            return _native_join(self, timeout)
+    deadline = None if timeout is None else _monotonic() + timeout
+    while True:
+        wait = SLEEP_SLICE_SECONDS
+        if deadline is not None:
+            wait = max(0, min(wait, deadline - _monotonic()))
+        _native_join(self, wait)
+        if not self.is_alive() or (deadline is not None and _monotonic() >= deadline):
+            return None
+
+
+sliced_condition_wait.__doc__ = threading.Condition.wait.__doc__
+sliced_join.__doc__ = _native_join.__doc__
+sliced_join.__vis_native_join__ = _native_join
+# Process state like `time.sleep` above: a block that waits on a real
+# `threading` Event, Queue, Condition, Semaphore, Barrier or Thread could not be
+# stopped, and the host retired the whole interpreter instead.
+threading.Condition.__enter__ = sliced_condition_enter
+threading.Condition.wait = sliced_condition_wait
+threading.Thread.join = sliced_join
 
 
 def _transform_stamp():
