@@ -3530,10 +3530,41 @@ class __vis_AnnFix__(__vis_ast__.NodeTransformer):
 __vis_builtins_mod__ = __import__("builtins")
 __vis_sysmod__ = __import__("sys")
 __vis_real_exec__ = __vis_builtins_mod__.exec
+__vis_real_eval__ = __vis_builtins_mod__.eval
+__vis_real_compile__ = __vis_builtins_mod__.compile
 __vis_real_vars__ = __vis_builtins_mod__.vars
 # Frame-relative when called from a preamble function — whose globals ARE the
 # session globals `g`, so this hands back exactly that dict.
 __vis_globals__ = __vis_builtins_mod__.globals
+# What `f_locals` answers for a function frame (PEP 667). The builtins copy it
+# into a plain dict; a module or class frame answers its own namespace instead.
+__vis_frame_locals_proxy__ = type((lambda: __vis_sysmod__._getframe().f_locals)())
+# `inspect.CO_COROUTINE`: the code awaits at its top level.
+__vis_co_coroutine__ = 0x80
+
+
+def __vis_compute_future_mask__():
+    # CPython's PyCF_MASK: the `__future__` flags that eval and exec inherit from
+    # the code that calls them. `nested_scopes` is an obsolete no-op flag.
+    fut = __import__("__future__")
+    mask = 0
+    for name in fut.all_feature_names:
+        if name != "nested_scopes":
+            mask |= getattr(fut, name).compiler_flag
+    return mask
+
+
+__vis_future_mask__ = __vis_compute_future_mask__()
+# What CPython 3.14 says when it refuses text ONLY because the text awaits
+# outside a coroutine. Other refusals skip the second compile.
+__vis_await_refusals__ = frozenset(
+    (
+        "'await' outside function",
+        "'async for' outside async function",
+        "'async with' outside async function",
+        "asynchronous comprehension outside of an asynchronous function",
+    )
+)
 
 
 def __vis_caller_frame__(depth):
@@ -3548,21 +3579,212 @@ def __vis_is_block_frame__(frame):
     return frame is not None and frame.f_code.co_name == "__vis_main__"
 
 
-def exec(source, globals=None, locals=None, /, **kw):
-    # MODULE-SCOPE `exec`: at real module level `exec('x = 1')` binds x in the
-    # module globals. Every block runs inside `async def __vis_main__`, where the
-    # implicit target is a frame-locals dict that is thrown away — so the name
-    # vanished and the very next line raised NameError. Only the no-namespace
-    # call made DIRECTLY from a block body is redirected; an explicit namespace,
-    # and any call from a function the block defined, keeps real semantics.
-    if (
-        globals is None
-        and locals is None
-        and __vis_is_block_frame__(__vis_caller_frame__(1))
-    ):
-        globals = __vis_globals__()
-        locals = globals
-    return __vis_real_exec__(source, globals, locals, **kw)
+def __vis_namespaces__(name, frame, globals, locals, module_scope):
+    # The namespaces that builtin eval or exec picks when `frame` calls it. A
+    # shim that called the builtin with None ran the code against the SHIM's own
+    # frame: a helper's `exec('print(x)')` could not see the helper's `x`.
+    if globals is not None:
+        return globals, locals
+    if frame is None:
+        raise TypeError(
+            name + " must be given globals and locals when called without a frame"
+        )
+    globals = frame.f_globals
+    if locals is None:
+        if module_scope and __vis_is_block_frame__(frame):
+            # MODULE-SCOPE `exec`: at real module level `exec('x = 1')` binds x
+            # in the module globals. Every block runs inside `async def
+            # __vis_main__`, where the implicit target is a frame-locals dict
+            # that is thrown away, so the name vanished. Only the no-namespace
+            # exec made DIRECTLY from a block body is redirected.
+            locals = globals
+        else:
+            locals = frame.f_locals
+            if type(locals) is __vis_frame_locals_proxy__:
+                locals = dict(locals)
+    return globals, locals
+
+
+def __vis_source_code__(source, mode, frame, probe, g, loc):
+    # Compile eval/exec TEXT the way the builtin does: under the caller's
+    # `__future__` flags, as "<string>". Python refuses top-level `await` in that
+    # text even inside a coroutine, but the block itself runs as one. Only text
+    # that the plain compile refuses FOR its top-level await gets a second
+    # compile that allows it, so text that compiles today gets the same code
+    # object. Any other refusal raises the ORIGINAL error.
+    flags = frame.f_code.co_flags & __vis_future_mask__ if frame is not None else 0
+    try:
+        return __vis_real_compile__(source, "<string>", mode, flags, True)
+    except Exception as e:
+        refused = e
+    code = None
+    if isinstance(refused, SyntaxError) and refused.msg in __vis_await_refusals__:
+        try:
+            code = __vis_real_compile__(
+                source,
+                "<string>",
+                mode,
+                flags | __vis_ast__.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+                True,
+            )
+        except Exception:
+            code = None
+    # The builtin checks its namespaces BEFORE it reads the text: a bad namespace
+    # raises THAT builtin's TypeError first, and a missing `__builtins__` is added
+    # first. Awaiting code runs through eval, so exec text needs exec's check.
+    probe(g, loc)
+    if code is not None and code.co_flags & __vis_co_coroutine__:
+        return code
+    raise refused
+
+
+async def __vis_await_code__(coro):
+    # Await `coro` from a real coroutine frame. A StopIteration that the text
+    # raises then becomes CPython's RuntimeError; a bare send() would read it
+    # as the text's return value.
+    return await coro
+
+
+def __vis_run_awaiting__(code, g, loc):
+    # Run code that awaits at its top level to the end, on the sandbox's own
+    # driver, and answer its value. A driver failure must not leave the coroutine
+    # unawaited (that warning would name an object the caller never saw).
+    coro = __vis_real_eval__(code, g, loc)
+    outer = __vis_await_code__(coro)
+    try:
+        return __vis_drive__(outer)
+    except BaseException:
+        outer.close()
+        coro.close()
+        raise
+
+
+def __vis_eval_probe__(g, loc):
+    __vis_real_eval__("0", g, loc)
+
+
+def __vis_exec_probe__(g, loc):
+    __vis_real_exec__("pass", g, loc)
+
+
+def __vis_call_args__(args, kwargs):
+    # `(source, globals, locals)` for a call shape the builtin accepts, else
+    # None. A rejected shape goes to the builtin, which raises its own TypeError.
+    if not 1 <= len(args) <= 3:
+        return None
+    named = list(args[1:]) + [None] * (3 - len(args))
+    for key, value in kwargs.items():
+        if key == "globals" and len(args) < 2:
+            named[0] = value
+        elif key == "locals" and len(args) < 3:
+            named[1] = value
+        else:
+            return None
+    return args[0], named[0], named[1]
+
+
+def __vis_eval__(_shim, /, *args, **kwargs):
+    # Builtin `eval`, and text with top-level `await` answers the awaited value:
+    # `eval("await cat(p)")` reads the file, like `await cat(p)` in the block.
+    call = __vis_call_args__(args, kwargs)
+    if call is None:
+        return __vis_real_eval__(*args, **kwargs)
+    source, globals, locals = call
+    frame = __vis_caller_frame__(1)
+    g, loc = __vis_namespaces__("eval", frame, globals, locals, False)
+    if isinstance(source, str):
+        source = str.lstrip(source, " \t")
+    elif isinstance(source, (bytes, bytearray)):
+        source = bytes(source).lstrip(b" \t")
+    else:
+        return __vis_real_eval__(source, g, loc)
+    code = __vis_source_code__(source, "eval", frame, __vis_eval_probe__, g, loc)
+    if code.co_flags & __vis_co_coroutine__:
+        return __vis_run_awaiting__(code, g, loc)
+    return __vis_real_eval__(code, g, loc)
+
+
+def __vis_exec__(_shim, /, *args, **kwargs):
+    # Builtin `exec`, with module scope in a block body (see `__vis_namespaces__`),
+    # and text with top-level `await` runs to the end before exec returns.
+    rest = dict(kwargs)
+    closure = rest.pop("closure", None)
+    call = __vis_call_args__(args, rest)
+    if call is None:
+        return __vis_real_exec__(*args, **kwargs)
+    source, globals, locals = call
+    frame = __vis_caller_frame__(1)
+    g, loc = __vis_namespaces__("exec", frame, globals, locals, True)
+    if closure is not None or not isinstance(source, (str, bytes, bytearray)):
+        return __vis_real_exec__(source, g, loc, closure=closure)
+    code = __vis_source_code__(source, "exec", frame, __vis_exec_probe__, g, loc)
+    if code.co_flags & __vis_co_coroutine__:
+        __vis_run_awaiting__(code, g, loc)
+        return None
+    return __vis_real_exec__(code, g, loc)
+
+
+def __vis_builtin_shim__(real, call):
+    # A callable that stands in for the builtin `real` and reads as that builtin
+    # to isinstance, inspect and help(). Like the builtin it is no descriptor,
+    # so `class K: f = eval` keeps `K().f("1")` a plain call, and it has no
+    # `__dict__`. `call` IS its `__call__`, so a call adds one Python frame, as a
+    # function would. It copies as itself and pickles as the builtin, by name.
+    name = real.__name__
+
+    def shim_new(cls, *args, **kwargs):
+        raise TypeError("cannot create 'builtin_function_or_method' instances")
+
+    def shim_getattr(self, attr):
+        # `__qualname__` cannot sit in a class namespace as a plain value.
+        if attr == "__qualname__":
+            return name
+        raise AttributeError(
+            "'builtin_function_or_method' object has no attribute '" + attr + "'"
+        )
+
+    def shim_repr(self):
+        return "<built-in function " + name + ">"
+
+    def shim_reduce(self):
+        return (__vis_real_eval__, ("__import__('builtins')." + name,))
+
+    def shim_copy(self):
+        return self
+
+    def shim_deepcopy(self, memo):
+        return self
+
+    def shim_signature(self):
+        return __import__("inspect").signature(real)
+
+    cls = type(
+        "builtin_function_or_method",
+        (),
+        {
+            "__slots__": ("__weakref__",),
+            "__new__": shim_new,
+            "__call__": call,
+            "__getattr__": shim_getattr,
+            "__repr__": shim_repr,
+            "__reduce__": shim_reduce,
+            "__copy__": shim_copy,
+            "__deepcopy__": shim_deepcopy,
+            "__class__": property(lambda self: type(real)),
+            "__signature__": property(shim_signature),
+            "__text_signature__": real.__text_signature__,
+            "__self__": real.__self__,
+            "__name__": name,
+            # A property: pydoc drops a docstring that equals the class's own.
+            "__doc__": property(lambda self: real.__doc__),
+            "__module__": "builtins",
+        },
+    )
+    return __vis_builtins_mod__.object.__new__(cls)
+
+
+eval = __vis_builtin_shim__(__vis_real_eval__, __vis_eval__)
+exec = __vis_builtin_shim__(__vis_real_exec__, __vis_exec__)
 
 
 def locals():
