@@ -180,6 +180,133 @@
                 (str sleep-call " => " (pr-str settled))))
           (is (= "2" (ran session "print(1 + 1)"))))))))
 
+;; Vis session 6d57806d: `await fut` on a future that nothing completes ignored
+;; every interrupt, and each such block left a thread and an event loop behind.
+;; Every sandbox primitive waited in ONE native acquire, which runs no bytecode.
+(harness/defbuilt-test
+  interrupt-unwinds-a-primitive-wait-test
+  (doseq [[setup wait] [["fut = asyncio.get_running_loop().create_future()" "await fut"]
+                        ["fut = asyncio.get_running_loop().create_future()" "eval('await fut')"]
+                        ["ev = asyncio.Event()" "await ev.wait()"]
+                        ["lk = asyncio.Lock()\nawait lk.acquire()" "await lk.acquire()"]
+                        ["sem = asyncio.Semaphore(0)" "await sem.acquire()"]
+                        ["q = asyncio.Queue()" "await q.get()"]
+                        ["cond = asyncio.Condition()" "async with cond:\n    await cond.wait()"]
+                        ["bar = asyncio.Barrier(2)" "await bar.wait()"]]]
+    (let [waiting (promise)
+          session (harness/tool-session {"ready" (fn [_]
+                                                   (deliver waiting true)
+                                                   "go")})
+          answer (future (block session (str "import asyncio\n" setup "\nawait ready()\n" wait)))]
+
+      (is (true? (deref waiting 30000 false)) "the block never reached its wait")
+      (Thread/sleep 150)
+      (let [landed (runtime/interrupt!)
+            settled (deref answer 1200 ::hung)]
+
+        (is (true? landed) wait)
+        (is (not= ::hung settled) (str wait " ignored the host's interrupt window"))
+        (when (not= ::hung settled)
+          (is (str/includes? (str (:error settled)) "KeyboardInterrupt")
+              (str wait " => " (pr-str settled)))
+          (is (= "2" (ran session "print(1 + 1)"))))))))
+
+;; Audit of Vis session 6d57806d: an interrupt that landed just after a condition
+;; wait took its lock back left the lock taken with no owner. Every later
+;; `async with cond:` then waited forever. The window is narrow, so the case runs
+;; four times.
+(harness/defbuilt-test
+  interrupt-keeps-a-condition-usable-test
+  (dotimes [attempt 4]
+    (let [holding (promise)
+          session (harness/tool-session {"ready" (fn [_]
+                                                   (deliver holding true)
+                                                   "go")})
+          answer (future (block session
+                                (str "import asyncio\ncond = asyncio.Condition()\n"
+                                     "async def a():\n    async with cond:\n"
+                                     "        await asyncio.wait_for(cond.wait(), 0.2)\n"
+                                     "async def b():\n    await asyncio.sleep(0.05)\n"
+                                     "    async with cond:\n        await ready()\n"
+                                     "        await asyncio.sleep(1000)\n"
+                                     "await asyncio.gather(a(), b())")))]
+
+      (is (true? (deref holding 30000 false)) "the sibling never took the condition")
+      (Thread/sleep 400)
+      (let [settled (loop [n 0]
+                      (runtime/interrupt!)
+                      (let [r (deref answer 100 ::hung)]
+                        (if (and (= ::hung r) (< n 50)) (recur (inc n)) r)))]
+        (is (not= ::hung settled) (str "attempt " attempt " ignored the interrupts"))
+        (is (= "False acquired"
+               (ran session
+                    (str "print(cond.locked(), end=' ')\n"
+                         "await asyncio.wait_for(cond.acquire(), 1)\nprint('acquired')")))
+            (str "attempt " attempt))))))
+
+;; Re-audit of Vis session 6d57806d: exec text from a block body shows the
+;; block's shadowed names in the session for the call. An interrupt must still
+;; put the tool back.
+(harness/defbuilt-test
+  interrupt-restores-names-around-exec-test
+  (let [waiting
+        (promise)
+
+        session
+        (harness/tool-session {"ready" (fn [_]
+                                         (deliver waiting true)
+                                         "go")
+                               "echo" (fn [[x]]
+                                        x)})
+
+        answer
+        (future (block session
+                       "echo = 'shadow'\nawait ready()\nexec('while True:\\n    n = echo')"))]
+
+    (is (true? (deref waiting 30000 false)) "the block never reached exec")
+    (Thread/sleep 150)
+    (let [landed
+          (runtime/interrupt!)
+
+          settled
+          (deref answer 1200 ::hung)]
+
+      (is (true? landed))
+      (is (not= ::hung settled) "exec ignored the host's interrupt window")
+      (is (= "7" (ran session "print(await echo(7))"))))))
+
+(harness/defbuilt-test
+  sliced-waits-keep-their-contract-test
+  (let [session (harness/tool-session {"echo" (fn [[x]]
+                                                x)})]
+    (testing "a bounded wait still times out after its whole timeout"
+      (is (= "TimeoutError True"
+             (ran session
+                  (str "import asyncio, time\nev = asyncio.Event()\nt0 = time.monotonic()\n"
+                       "try:\n    await asyncio.wait_for(ev.wait(), 0.35)\n"
+                       "except TimeoutError as e:\n"
+                       "    print(type(e).__name__, time.monotonic() - t0 >= 0.35)")))))
+    (testing "a sibling's notify wakes a waiter, through gather"
+      (is (= "[None, 'set']"
+             (ran session
+                  (str "import asyncio\nev = asyncio.Event()\n"
+                       "async def setter():\n    await asyncio.sleep(0.25)\n    ev.set()\n"
+                       "async def waiter():\n    await ev.wait()\n    return 'set'\n"
+                       "print(await asyncio.gather(setter(), waiter()))")))))
+    (testing "a queue hands every item over between gather children"
+      (is (= "[None, [0, 1, 2]]"
+             (ran session
+                  (str "import asyncio\nq = asyncio.Queue(1)\n"
+                       "async def prod():\n    for i in range(3):\n        await q.put(i)\n"
+                       "async def cons():\n    return [await q.get() for _ in range(3)]\n"
+                       "print(await asyncio.gather(prod(), cons()))")))))
+    (testing "a contended lock with a deadline of 0 times out instead of raising ValueError"
+      (is (= "TimeoutError"
+             (ran session
+                  (str "import asyncio\nlk = asyncio.Lock()\nawait lk.acquire()\n"
+                       "try:\n    await asyncio.wait_for(lk.acquire(), 0)\n"
+                       "except Exception as e:\n    print(type(e).__name__)")))))))
+
 (harness/defbuilt-test
   sliced-sleep-keeps-the-time-sleep-contract-test
   (let [session (harness/block-session)]

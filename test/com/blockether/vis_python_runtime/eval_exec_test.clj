@@ -196,3 +196,102 @@
                   (str "async def co():\n    return 1\n" "def made():\n    c = eval('co()')\n"
                        "    kind = type(c).__name__\n    c.close()\n    return kind\n"
                        "print(made())")))))))
+
+(harness/defbuilt-test
+  block-scope-test
+  ;; Vis session 6d57806d: text that a block body passes to eval or exec lost
+  ;; its names, and `exec('echo = 1')` replaced the `echo` tool for good.
+  (let [session (tools-session)]
+    (testing "a walrus in eval text binds a session name, like at module level"
+      (is (= "5" (out session "eval('(w_ := 5)')\nprint(w_)")))
+      (is (= "5" (out session "print(w_)"))))
+    (testing "eval of exec code binds a session name"
+      (is (= "3" (out session "eval(compile('e_ = 3', '', 'exec'))\nprint(e_)"))))
+    (testing "text inside a comprehension reads its names and binds session names"
+      (is (= "[0, 2, 4]" (out session "print([eval('i_ * 2') for i_ in range(3)])")))
+      (is (= "1 False"
+             (out session "[exec('t_ = i_') for i_ in range(2)]\nprint(t_, 'i_' in globals())"))))
+    (testing "a comprehension's name does not replace a session name of the same name"
+      (is (= "[0, 1] keep"
+             (out session "c_ = 'keep'\nprint([eval('c_') for c_ in range(2)], c_)"))))
+    (testing "text that rebinds a tool changes it only for that call"
+      (is (= "1" (out session "exec('echo = 1\\nprint(echo)')")))
+      (is (= "ok" (out session "print(await echo('ok'))"))))
+    (testing "a function in the text sees the tool name that the text rebinds"
+      ;; Audit R1: the function looked the name up in the session and got the tool.
+      (is (= "5" (out session "exec('echo = 5\\ndef f_(): return echo\\nprint(f_())')")))
+      (is (= "2" (out session "echo = 1\nexec('def g_(): return echo + 1\\nprint(g_())')"))))
+    (testing "a helper that the text calls still sees the tool that the block shadows"
+      ;; Re-audit N1: the block's value was put in the session for the whole call.
+      (is (= "" (out session "def kind_():\n    return type(echo).__name__")))
+      (is (= "function" (out session "echo = 'mine'\nprint(eval('kind_()'))"))))
+    (testing "text that reaches names by string sees the block's names"
+      ;; Re-audit F1: only the names in the text's code were placed, so a
+      ;; nested eval or a locals() lookup missed the comprehension variable.
+      (is (= "[0, 10, 20]" (out session "print([eval('eval(\"i_ * 10\")') for i_ in range(3)])")))
+      (is (= "[0, 1, 2]" (out session "print([eval('locals()[\"i_\"]') for i_ in range(3)])")))
+      (is (= "2" (out session "echo = 1\nprint(eval('eval(\"echo + 1\")'))"))))
+    (testing "a write by string to a tool name changes it only for that call"
+      ;; Re-audit F2: a nested exec or globals() write replaced the tool for good.
+      (is (= "" (out session "exec('exec(\"echo = 3\")')\nexec('globals()[\"echo\"] = 3')")))
+      (is (= "alive" (out session "print(await echo('alive'))")))
+      (is (= "block 3" (out session "echo = 1\nexec('exec(\"echo = 3\")')\nprint('block', echo)"))))
+    (testing "locals() in the text is the session's globals, as at module level"
+      ;; Audit R2: it was a mapping that pickle, json and repr could not handle.
+      (is (= "True" (out session "print(eval('locals()') is globals())"))))
+    (testing "text sees and rebinds a tool name that the block shadows"
+      (is (= "2 5"
+             (out session "echo = 1\nexec('x9 = echo + 1')\nexec('echo = 5')\nprint(x9, echo)")))
+      (is (= "still" (out session "print(await echo('still'))"))))
+    (testing "exec text deletes a session name"
+      (is (= "False" (out session "d_ = 1\nexec('del d_')\nprint('d_' in globals())"))))
+    (testing "locals() in the text reads session names and tools"
+      (is (= "7 True True"
+             (out session
+                  (str "z_ = 7\nprint(eval('locals()[\"z_\"]'), eval('\"z_\" in locals()'), "
+                       "eval('\"echo\" in locals()'))")))))
+    (testing "a helper's text still gets a copy of the helper's locals"
+      (is (= "(1, 1)"
+             (out
+               session
+               "def f():\n    a = 1\n    exec('a = 2')\n    return a, eval('a')\nprint(f())"))))))
+
+(harness/defbuilt-test
+  text-asyncio-import-test
+  ;; Vis session 6d57806d: `import asyncio` in exec text bound the real module
+  ;; over the session's shim, and every later `asyncio.gather` of tool calls
+  ;; failed with "Task got bad yield".
+  (let [session
+        (tools-session)
+
+        gathered
+        "print(await asyncio.gather(echo(1), echo(2)))"]
+
+    (testing "an import in exec text binds the shim and keeps the session's asyncio"
+      (is (= "" (out session "exec('import asyncio')")))
+      (is (= "[1, 2]" (out session gathered))))
+    (testing "the shim from the text settles tool calls in the same text"
+      (is
+        (=
+          "[1, 2]"
+          (out
+            session
+            "exec('import asyncio as aio\\nr_ = await aio.gather(echo(1), echo(2))')\nprint(r_)"))))
+    (testing "an import in a helper's exec text binds the shim"
+      (is (= "True"
+             (out session
+                  (str "def g():\n    loc = {}\n    exec('import asyncio', globals(), loc)\n"
+                       "    return loc['asyncio'] is __vis_asyncio__\nprint(g())")))))
+    (testing "a star import and bytes text bind the shim's names"
+      (is (= "True"
+             (out session "exec('from asyncio import *')\nprint(sleep is __vis_asyncio__.sleep)")))
+      (is (= "True" (out session "exec(b'import asyncio\\nprint(asyncio is __vis_asyncio__)')"))))
+    (testing "text whose globals cannot see the shim keeps its own import"
+      ;; Audit R8: the rewrite named `__vis_asyncio__`, which those globals lack.
+      (is (= "ImportError"
+             (out session
+                  (str "try:\n    exec('import asyncio', {'__builtins__': {}})\n"
+                       "except Exception as e:\n    print(type(e).__name__)")))))
+    (testing "unparsable text keeps its own error"
+      (is (= "ERROR SyntaxError: '(' was never closed (<string>, line 2)"
+             (out session "exec('import asyncio\\nx = (')"))))))

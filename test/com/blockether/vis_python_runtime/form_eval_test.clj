@@ -121,24 +121,19 @@
         (is (str/includes? (str (:error answer)) "e7_boom"))
         (is (= "False" (ran s "print('e7y' in globals())")))))))
 
-(harness/defbuilt-test
-  stdlib-import-passthrough-test
-  ;; Only `asyncio` is rewritten. Every other stdlib import — including the three
-  ;; once dropped as native-crash risks — reaches the block verbatim.
-  (let [s (harness/block-session)]
-    (testing "import ssl / select / selectors survives, and the modules work"
-      (is (= "True True True"
-             (ran s
-                  (str "import ssl, select, selectors\n"
-                       "print(ssl.CERT_NONE == 0, callable(select.select), "
-                       "selectors.SelectSelector is not None)")))))
-    (testing "from ssl import ... binds the name instead of vanishing"
-      (is (= "True" (ran s "from ssl import CERT_NONE\nprint(CERT_NONE == 0)"))))
-    (testing "the preprocessor hands such a block back byte-for-byte"
-      (is (= "True"
-             (ran s
-                  (str "src = 'import ssl\\nx = 1\\n'\n"
-                       "print(__vis_strip_protected_imports__(src) == src)")))))))
+(harness/defbuilt-test stdlib-import-passthrough-test
+                       ;; Only `asyncio` is rewritten. Every other stdlib import — including the three
+                       ;; once dropped as native-crash risks — reaches the block verbatim.
+                       (let [s (harness/block-session)]
+                         (testing "import ssl / select / selectors survives, and the modules work"
+                           (is (= "True True True"
+                                  (ran s
+                                       (str "import ssl, select, selectors\n"
+                                            "print(ssl.CERT_NONE == 0, callable(select.select), "
+                                            "selectors.SelectSelector is not None)")))))
+                         (testing "from ssl import ... binds the name instead of vanishing"
+                           (is (= "True"
+                                  (ran s "from ssl import CERT_NONE\nprint(CERT_NONE == 0)"))))))
 
 (harness/defbuilt-test guest-threads-test
                        ;; Guest Python may CREATE threads — importlib's import machinery, `threading`,
@@ -240,3 +235,77 @@
     (let [answer (block (boom-session) "await boom()")]
       (is (= "" (out answer)))
       (is (str/includes? (str (:error answer)) "boom message")))))
+
+(harness/defbuilt-test
+  asyncio-import-test
+  ;; Vis session 6d57806d: only top-level asyncio imports bound the shim. A nested
+  ;; import bound real asyncio, which cannot settle a tool call. The source-level
+  ;; rewrite also moved error lines and failed on `from asyncio import *`.
+  (let [s
+        (harness/tool-session {"echo" (fn [[x]]
+                                        x)})
+
+        gathered
+        "print(await asyncio.gather(echo(1), echo(2)))"]
+
+    (testing "an import inside a def or an if binds the shim"
+      (is (= "True"
+             (ran
+               s
+               "def f():\n    import asyncio\n    return asyncio\nprint(f() is __vis_asyncio__)")))
+      (is (= "True" (ran s "if True:\n    import asyncio\nprint(asyncio is __vis_asyncio__)")))
+      (is (= "[1, 2]" (ran s gathered))))
+    (testing "a protected name binds nothing, and other names bind the shim's"
+      (is (= "False True [3]"
+             (ran s
+                  (str "from asyncio import gather, sleep\n"
+                       "print(gather is __vis_asyncio__.gather, sleep is __vis_asyncio__.sleep, "
+                       "await gather(echo(3)))")))))
+    (testing "a star import binds the shim's names but not a protected one"
+      (is (= "True False"
+             (ran
+               s
+               "from asyncio import *\nprint(sleep is __vis_asyncio__.sleep, 'gather' in dir())"))))
+    (testing "a star import binds only names of asyncio.__all__"
+      ;; Audit R3: it bound every shim attribute, `time` and `close` among them.
+      (is (=
+            "module False"
+            (ran
+              s
+              "import time\nfrom asyncio import *\nprint(type(time).__name__, 'close' in dir())"))))
+    (testing "in a def a name the shim lacks comes from asyncio, and an alias binds"
+      ;; Audit R5 and R6: `AbstractEventLoop` was an ImportError, and `sleep as echo`
+      ;; bound nothing.
+      (is (= "('AbstractEventLoop', True) t"
+             (ran s
+                  (str "def f():\n    from asyncio import AbstractEventLoop, sleep as echo\n"
+                       "    return AbstractEventLoop.__name__, echo is __vis_asyncio__.sleep\n"
+                       "print(f(), await echo('t'))")))))
+    (testing "a plain dotted import keeps the shim"
+      (is (= "True" (ran s "import asyncio.queues\nprint(asyncio is __vis_asyncio__)"))))
+    (testing "a submodule import stays a real import"
+      (is (= "asyncio.events True"
+             (ran
+               s
+               (str
+                 "from asyncio.events import AbstractEventLoop as A\n"
+                 "import asyncio.events as ev\nprint(ev.__name__, A is ev.AbstractEventLoop)")))))
+    (testing "a name neither the shim nor asyncio has is an ImportError, as in CPython"
+      (is (= "ie asyncio"
+             (ran s
+                  (str "def f():\n    from asyncio import missing_xyz\n"
+                       "try:\n    f()\nexcept ImportError as e:\n    print('ie', e.name)")))))
+    (testing "other imports in the same statement stay real imports"
+      (is (= "1 True"
+             (ran s "import json, asyncio\nprint(json.dumps(1), asyncio is __vis_asyncio__)"))))
+    (testing "the lines after a rewritten import keep their numbers"
+      (is (= "6"
+             (ran s
+                  (str "import asyncio\n\n\n# comment\ntry:\n    1/0\n"
+                       "except Exception as e:\n    print(e.__traceback__.tb_lineno)")))))
+    (testing "a block of only protected asyncio imports has no forms"
+      (is (= "0 1 1"
+             (ran s
+                  (str "print(__vis_count_forms__('from asyncio import gather'), "
+                       "__vis_count_forms__('import asyncio'), "
+                       "__vis_count_forms__('if 1:\\n    from asyncio import gather'))")))))))

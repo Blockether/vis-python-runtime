@@ -142,19 +142,8 @@ def __vis_count_forms__(src):
     # protected imports away, so a block whose only statement is `from asyncio
     # import gather` executes NOTHING. The host reads this count to tell an
     # empty block from a real one, and a stripped-to-nothing block is empty.
-    return len(__vis_ast__.parse(__vis_strip_protected_imports__(src)).body)
-
-
-def __vis_banned_name__(src, banned):
-    banned = set(banned)
-    return next(
-        (
-            n.id
-            for n in __vis_ast__.walk(__vis_ast__.parse(src))
-            if isinstance(n, __vis_ast__.Name) and n.id in banned
-        ),
-        None,
-    )
+    tree, _ = __vis_fix_asyncio_imports__(__vis_ast__.parse(src))
+    return sum(1 for node in tree.body if not getattr(node, "vis_dropped", False))
 
 
 class __vis_Raise__:
@@ -2028,14 +2017,119 @@ class BrokenBarrierError(RuntimeError):
     pass
 
 
+__vis_sync_cache__ = {}
+
+
 def __vis_sync_mod__():
     # LAZY on purpose: this runtime source is eval'd into EVERY sandbox context
     # and `import threading` costs ~13 ms there, so a block that never builds a
     # lock, queue or future must not pay for one that does. After the first build
-    # it is a `sys.modules` hit.
-    import threading
+    # it is a dict hit.
+    ns = __vis_sync_cache__.get("ns")
+    if ns is None:
+        ns = __vis_sync_cache__["ns"] = __vis_sliced_sync__()
+    return ns
 
-    return threading
+
+def __vis_sliced_sync__():
+    # threading's primitives with every wait SLICED. The host stops a timed-out
+    # block with an asynchronous KeyboardInterrupt, which CPython raises only
+    # between bytecodes. A waiter parked in ONE native acquire runs none, so an
+    # `await` on a future that nothing completes could not be stopped, and the
+    # host retired the whole interpreter instead.
+    import threading
+    import types
+
+    from vis_runtime import SLEEP_SLICE_SECONDS as slice_s
+
+    monotonic = __vis_time__.monotonic
+
+    def take(lock, held, blocking, wait=-1):
+        # One native acquire whose success lands in `held` inside the same C
+        # call. The interrupt is raised only between bytecodes, so it can land
+        # after the lock is taken, but never before `held` records it.
+        held.extend(filter(None, map(lock.acquire, (blocking,), (wait,))))
+        return bool(held)
+
+    def acquire(lock, timeout=None, held=None):
+        # `lock.acquire(True, timeout)` in slices: True when it got the lock. A
+        # caller that must know whether an interrupt left the lock taken passes
+        # `held`, a list that is not empty once the lock is taken.
+        held = [] if held is None else held
+        if timeout is not None and timeout <= 0:
+            return take(lock, held, False)
+        deadline = None if timeout is None else monotonic() + timeout
+        while True:
+            wait = slice_s if deadline is None else min(slice_s, deadline - monotonic())
+            if wait <= 0:
+                return take(lock, held, False)
+            if take(lock, held, True, wait):
+                return True
+
+    class Condition(threading.Condition):
+        def wait(self, timeout=None):
+            # CPython's own `Condition.wait`, with only the waiter's acquire
+            # sliced: the notify protocol and the cleanup stay exactly its own.
+            if not self._is_owned():
+                raise RuntimeError("cannot wait on un-acquired lock")
+            waiter = threading._allocate_lock()
+            waiter.acquire()
+            self._waiters.append(waiter)
+            saved_state = self._release_save()
+            gotit = False
+            try:
+                if timeout is None:
+                    gotit = acquire(waiter)
+                elif timeout > 0:
+                    gotit = acquire(waiter, timeout)
+                else:
+                    gotit = waiter.acquire(False)
+                return gotit
+            finally:
+                held = []
+                try:
+                    # A sibling can hold the lock for as long as it likes, so
+                    # taking it back is sliced too. An interrupt that lands
+                    # before the lock is taken leaves it NOT held, and the
+                    # exception says so.
+                    acquire(self._lock, None, held)
+                except BaseException as e:
+                    if not held:
+                        e.vis_lock_lost = self._lock
+                    raise
+                finally:
+                    if not gotit:
+                        try:
+                            self._waiters.remove(waiter)
+                        except ValueError:
+                            pass
+
+        def __exit__(self, typ, val, tb):
+            if getattr(val, "vis_lock_lost", None) is self._lock:
+                return None
+            return self._lock.__exit__(typ, val, tb)
+
+    def sliced(base):
+        # Each of these waits on the ONE condition its `__init__` builds.
+        class Sliced(base):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._cond = Condition(threading.Lock())
+
+        Sliced.__name__ = Sliced.__qualname__ = base.__name__
+        return Sliced
+
+    return types.SimpleNamespace(
+        acquire=acquire,
+        Lock=threading.Lock,
+        get_ident=threading.get_ident,
+        BrokenBarrierError=threading.BrokenBarrierError,
+        Condition=Condition,
+        Event=sliced(threading.Event),
+        Semaphore=sliced(threading.Semaphore),
+        BoundedSemaphore=sliced(threading.BoundedSemaphore),
+        Barrier=sliced(threading.Barrier),
+    )
 
 
 class __vis_Blocking__:
@@ -2100,10 +2194,20 @@ class __vis_Lock__:
         return owner is not None and owner == __vis_ident__()
 
     def _acquire(self, timeout=None):
-        if self._lock.acquire(True, -1.0 if timeout is None else float(timeout)):
+        timeout = None if timeout is None else float(timeout)
+        held = []
+        try:
+            if not __vis_sync_mod__().acquire(self._lock, timeout, held):
+                raise TimeoutError()
             self._owner = __vis_ident__()
             return True
-        raise TimeoutError()
+        except BaseException:
+            # An interrupt after the lock was taken fails the acquire, so the
+            # lock must not stay taken with no owner to release it.
+            if held:
+                self._owner = None
+                self._lock.release()
+            raise
 
     def acquire(self):
         return __vis_Blocking__(self._acquire)
@@ -2124,7 +2228,9 @@ class __vis_Lock__:
         return None
 
     async def __aexit__(self, typ, val, tb):
-        self.release()
+        # A condition wait interrupted while it took the lock back does not hold it.
+        if typ is None or self._is_owner():
+            self.release()
         return False
 
 
@@ -2239,10 +2345,15 @@ class __vis_Condition__:
         # The wait RELEASES the lock and re-acquires it before returning, on the
         # error path too - so ownership is dropped and restored around it.
         self._lock._owner = None
+        lost = False
         try:
             return self._cond.wait(timeout)
+        except BaseException as e:
+            lost = getattr(e, "vis_lock_lost", None) is self._lock._lock
+            raise
         finally:
-            self._lock._owner = __vis_ident__()
+            if not lost:
+                self._lock._owner = __vis_ident__()
 
     def _wait(self, timeout=None):
         if self._wait_raw(timeout):
@@ -2288,7 +2399,9 @@ class __vis_Condition__:
         return None
 
     async def __aexit__(self, typ, val, tb):
-        self._lock.release()
+        # A wait interrupted while it took the lock back does not hold it.
+        if typ is None or self._lock._is_owner():
+            self._lock.release()
         return False
 
 
@@ -3362,6 +3475,121 @@ class __vis_StarImportFix__(__vis_ast__.NodeTransformer):
         return node
 
 
+class __vis_AsyncioImportFix__(__vis_ast__.NodeTransformer):
+    # Every `import asyncio` binds the runtime's own shim, at every depth and in
+    # eval and exec text too. Real asyncio cannot settle a tool call ("Task got
+    # bad yield"), and one `exec('import asyncio')` replaced the session's shim.
+    #   `import asyncio` / `import asyncio.x`   ->  `asyncio = __vis_asyncio__`
+    #   `import asyncio as aio`                 ->  `aio = __vis_asyncio__`
+    #   `from asyncio import run, sleep as s`   ->  `run = __vis_asyncio_name__("run")`
+    #   `from asyncio import *`                 ->  each name of `asyncio.__all__`
+    # A submodule (`from asyncio.events import x`, `import asyncio.x as y`)
+    # stays a real import. At the top level a protected name (`gather`) binds
+    # nothing, so the sandbox's own shows through; inside a `def` or a class a
+    # name cannot replace it, so every name binds. A statement that binds
+    # nothing becomes `pass` with the attribute `vis_dropped`. Each new
+    # statement keeps the import's position.
+    def __init__(self, prot):
+        self.prot = prot
+        self.changed = False
+        self.depth = 0
+
+    def _nested(self, node):
+        self.depth += 1
+        try:
+            return self.generic_visit(node)
+        finally:
+            self.depth -= 1
+
+    visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = _nested
+
+    def _binds(self, name):
+        return self.depth > 0 or name not in self.prot
+
+    def _bind(self, node, name, attr):
+        val = __vis_ast__.Name(id="__vis_asyncio__", ctx=__vis_ast__.Load())
+        if attr is not None:
+            val = __vis_ast__.Call(
+                func=__vis_ast__.Name(
+                    id="__vis_asyncio_name__", ctx=__vis_ast__.Load()
+                ),
+                args=[__vis_ast__.Constant(value=attr)],
+                keywords=[],
+            )
+        stmt = __vis_ast__.Assign(
+            targets=[__vis_ast__.Name(id=name, ctx=__vis_ast__.Store())], value=val
+        )
+        return __vis_ast__.fix_missing_locations(__vis_ast__.copy_location(stmt, node))
+
+    def _out(self, node, stmts):
+        self.changed = True
+        if stmts:
+            return stmts
+        stmt = __vis_ast__.copy_location(__vis_ast__.Pass(), node)
+        stmt.vis_dropped = True
+        return stmt
+
+    def visit_Import(self, node):
+        keep, stmts = [], []
+        for a in node.names:
+            if a.name == "asyncio" or (
+                a.asname is None and a.name.startswith("asyncio.")
+            ):
+                stmts.append(self._bind(node, a.asname or "asyncio", None))
+            else:
+                keep.append(a)
+        if not stmts:
+            return node
+        if keep:
+            node.names = keep
+            stmts.insert(0, node)
+        return self._out(node, stmts)
+
+    def visit_ImportFrom(self, node):
+        if node.level or node.module != "asyncio":
+            return node
+        stmts = []
+        for a in node.names:
+            if a.name == "*":
+                stmts.extend(
+                    self._bind(node, k, k)
+                    for k in __vis_asyncio_exports__()
+                    if self._binds(k)
+                )
+            elif self._binds(a.asname or a.name):
+                stmts.append(self._bind(node, a.asname or a.name, a.name))
+        return self._out(node, stmts)
+
+
+def __vis_asyncio_exports__():
+    # The names `from asyncio import *` binds: real asyncio's `__all__`.
+    return [k for k in __import__("asyncio").__all__ if isinstance(k, str)]
+
+
+def __vis_asyncio_name__(name):
+    # `from asyncio import name`: the shim's own name, else real asyncio's (a
+    # type such as `AbstractEventLoop` for a hint or an isinstance check). A
+    # name neither has is an ImportError, as in CPython.
+    try:
+        return getattr(__vis_asyncio__, name)
+    except AttributeError:
+        pass
+    try:
+        return getattr(__import__("asyncio"), name)
+    except AttributeError:
+        raise ImportError(
+            "cannot import name '" + name + "' from 'asyncio'", name="asyncio"
+        ) from None
+
+
+def __vis_fix_asyncio_imports__(tree, g=None):
+    # `tree` with every asyncio import rewritten, and whether one was.
+    g = globals() if g is None else g
+    fix = __vis_AsyncioImportFix__(set(g.get("__vis_protected_names__") or []))
+    tree = fix.visit(tree)
+    return tree, fix.changed
+
+
 __vis_future_mod__ = __import__("__future__")
 
 
@@ -3579,30 +3807,117 @@ def __vis_is_block_frame__(frame):
     return frame is not None and frame.f_code.co_name == "__vis_main__"
 
 
-def __vis_namespaces__(name, frame, globals, locals, module_scope):
-    # The namespaces that builtin eval or exec picks when `frame` calls it. A
+def __vis_namespaces__(name, frame, globals, locals):
+    # The namespaces that builtin eval or exec picks when `frame` calls it, and
+    # the block's live locals when a block body is the caller, else None. A
     # shim that called the builtin with None ran the code against the SHIM's own
     # frame: a helper's `exec('print(x)')` could not see the helper's `x`.
     if globals is not None:
-        return globals, locals
+        return globals, locals, None
     if frame is None:
         raise TypeError(
             name + " must be given globals and locals when called without a frame"
         )
     globals = frame.f_globals
     if locals is None:
-        if module_scope and __vis_is_block_frame__(frame):
-            # MODULE-SCOPE `exec`: at real module level `exec('x = 1')` binds x
-            # in the module globals. Every block runs inside `async def
-            # __vis_main__`, where the implicit target is a frame-locals dict
-            # that is thrown away, so the name vanished. Only the no-namespace
-            # exec made DIRECTLY from a block body is redirected.
-            locals = globals
-        else:
-            locals = frame.f_locals
-            if type(locals) is __vis_frame_locals_proxy__:
-                locals = dict(locals)
-    return globals, locals
+        locals = frame.f_locals
+        if __vis_is_block_frame__(frame):
+            # MODULE SCOPE: at real module level `eval('(w := 1)')` and
+            # `exec('x = 1')` bind in the module globals. Every block runs
+            # inside `async def __vis_main__`, where the implicit target was a
+            # frame-locals copy that is thrown away, so the name vanished.
+            return globals, globals, locals
+        if type(locals) is __vis_frame_locals_proxy__:
+            locals = dict(locals)
+    return globals, locals, None
+
+
+__vis_unset__ = object()
+__vis_code_type__ = type(compile("0", "<string>", "eval"))
+# Names through which code reaches other names by string, so `co_names` does
+# not list what it touches: `eval('eval("i_")')` names only `eval`.
+__vis_dynamic_names__ = frozenset(
+    ("eval", "exec", "locals", "vars", "globals", "dir", "breakpoint")
+)
+
+
+def __vis_code_names__(code):
+    # Every global or module name that `code` and the functions in it can read,
+    # bind or delete.
+    names, stack = set(), [code]
+    while stack:
+        co = stack.pop()
+        names.update(co.co_names)
+        stack.extend(c for c in co.co_consts if isinstance(c, __vis_code_type__))
+    return names
+
+
+def __vis_in_block__(g, live, code, run):
+    # Run eval or exec `code` from a block body against the plain session
+    # globals, as module-level text runs, and answer `run()`. The block's own
+    # locals are the names it shadows (`echo = 1`) and a running comprehension's
+    # variables. Each one that the code names shows in the globals for the call
+    # only, so the text reads it and a `def` in the text sees it too. A
+    # protected name the code names never outlives the call (`exec('print = 1')`
+    # replaced `print` for every later block); a new value for a name the block
+    # shadows goes back to the block. Code that names none of these runs with
+    # the globals untouched, so a helper it calls still sees the tool. Code
+    # that can reach names by string counts as naming all of them.
+    if not isinstance(code, __vis_code_type__):
+        return run()
+    used = __vis_code_names__(code)
+    prot = g.get("__vis_protected_names__") or ()
+    if used & __vis_dynamic_names__:
+        used = set(live) | set(prot)
+    shadow = {n: v for n, v in live.items() if n in used}
+    names = {n for n in prot if n in used} | set(shadow)
+    if not names:
+        return run()
+    saved = {n: g.get(n, __vis_unset__) for n in names}
+    g.update(shadow)
+    placed = {n: g.get(n, __vis_unset__) for n in names}
+    try:
+        return run()
+    finally:
+        for n in names:
+            now = g.get(n, __vis_unset__)
+            if n in shadow and n in prot and now is not placed[n]:
+                if now is not __vis_unset__:
+                    live[n] = now
+            old = saved[n]
+            if old is __vis_unset__:
+                g.pop(n, None)
+            else:
+                g[n] = old
+
+
+def __vis_sees_shim__(g):
+    # Can code run against globals `g` name `__vis_asyncio__`? Runtime names
+    # are mirrored into builtins, and exec adds the real builtins when `g` has
+    # none.
+    if not isinstance(g, dict) or "__vis_asyncio__" in g:
+        return isinstance(g, dict)
+    b = g.get("__builtins__", __vis_builtins__)
+    names = b if isinstance(b, dict) else getattr(b, "__dict__", {})
+    return "__vis_asyncio__" in names and "__vis_asyncio_name__" in names
+
+
+def __vis_text_imports__(source, mode, flags, g):
+    # exec text with its asyncio imports rewritten, as a tree; any other text
+    # unchanged. Text that does not parse stays text, so it raises its own error.
+    # Text whose globals cannot see the shim (`{'__builtins__': {}}`) keeps
+    # its own import and the error it raises there.
+    marker = "asyncio" if isinstance(source, str) else b"asyncio"
+    if mode != "exec" or marker not in source or not __vis_sees_shim__(g):
+        return source
+    try:
+        tree = __vis_real_compile__(
+            source, "<string>", "exec", flags | __vis_ast__.PyCF_ONLY_AST, True
+        )
+    except Exception:
+        return source
+    tree, changed = __vis_fix_asyncio_imports__(tree, g)
+    return tree if changed else source
 
 
 def __vis_source_code__(source, mode, frame, probe, g, loc):
@@ -3613,6 +3928,7 @@ def __vis_source_code__(source, mode, frame, probe, g, loc):
     # compile that allows it, so text that compiles today gets the same code
     # object. Any other refusal raises the ORIGINAL error.
     flags = frame.f_code.co_flags & __vis_future_mask__ if frame is not None else 0
+    source = __vis_text_imports__(source, mode, flags, g)
     try:
         return __vis_real_compile__(source, "<string>", mode, flags, True)
     except Exception as e:
@@ -3691,17 +4007,23 @@ def __vis_eval__(_shim, /, *args, **kwargs):
         return __vis_real_eval__(*args, **kwargs)
     source, globals, locals = call
     frame = __vis_caller_frame__(1)
-    g, loc = __vis_namespaces__("eval", frame, globals, locals, False)
+    g, loc, live = __vis_namespaces__("eval", frame, globals, locals)
     if isinstance(source, str):
         source = str.lstrip(source, " \t")
     elif isinstance(source, (bytes, bytearray)):
         source = bytes(source).lstrip(b" \t")
+    text = isinstance(source, (str, bytes))
+    if text:
+        code = __vis_source_code__(source, "eval", frame, __vis_eval_probe__, g, loc)
     else:
-        return __vis_real_eval__(source, g, loc)
-    code = __vis_source_code__(source, "eval", frame, __vis_eval_probe__, g, loc)
-    if code.co_flags & __vis_co_coroutine__:
-        return __vis_run_awaiting__(code, g, loc)
-    return __vis_real_eval__(code, g, loc)
+        code = source
+
+    def run():
+        if text and code.co_flags & __vis_co_coroutine__:
+            return __vis_run_awaiting__(code, g, loc)
+        return __vis_real_eval__(code, g, loc)
+
+    return run() if live is None else __vis_in_block__(g, live, code, run)
 
 
 def __vis_exec__(_shim, /, *args, **kwargs):
@@ -3714,14 +4036,23 @@ def __vis_exec__(_shim, /, *args, **kwargs):
         return __vis_real_exec__(*args, **kwargs)
     source, globals, locals = call
     frame = __vis_caller_frame__(1)
-    g, loc = __vis_namespaces__("exec", frame, globals, locals, True)
+    g, loc, live = __vis_namespaces__("exec", frame, globals, locals)
     if closure is not None or not isinstance(source, (str, bytes, bytearray)):
-        return __vis_real_exec__(source, g, loc, closure=closure)
-    code = __vis_source_code__(source, "exec", frame, __vis_exec_probe__, g, loc)
-    if code.co_flags & __vis_co_coroutine__:
-        __vis_run_awaiting__(code, g, loc)
-        return None
-    return __vis_real_exec__(code, g, loc)
+        code = source
+
+        def run():
+            return __vis_real_exec__(source, g, loc, closure=closure)
+
+    else:
+        code = __vis_source_code__(source, "exec", frame, __vis_exec_probe__, g, loc)
+
+        def run():
+            if code.co_flags & __vis_co_coroutine__:
+                __vis_run_awaiting__(code, g, loc)
+                return None
+            return __vis_real_exec__(code, g, loc)
+
+    return run() if live is None else __vis_in_block__(g, live, code, run)
 
 
 def __vis_builtin_shim__(real, call):
@@ -3804,76 +4135,6 @@ def vars(*obj):
     if __vis_is_block_frame__(frame):
         return __vis_globals__()
     return frame.f_locals if frame is not None else __vis_globals__()
-
-
-def __vis_strip_protected_imports__(src):
-    # Rewrite imports so the sandbox can't break AND the model's habits still
-    # work:
-    #   • `import asyncio` / `import asyncio as aio`  ->  `aio = __vis_asyncio__`
-    #     (our shim; real asyncio + `asyncio.run` trips a NATIVE
-    #     `PosixSupportLibrary$UnsupportedPosixFeatureException: socket was
-    #     excluded`). The shim routes run/gather/... onto our driver.
-    #   • `from asyncio import run, sleep as s`        ->  `run = __vis_asyncio__.run`
-    #     ; `s = __vis_asyncio__.sleep`. A name that is ALREADY a protected
-    #     builtin (gather) is dropped so the builtin keeps showing through.
-    #   • `import socket`                                ->  passthrough. socket is
-    #     ALSO auto-imported onto builtins (always present); the module imports
-    #     fine even with the network toggle off — only a live connect is gated by
-    #     `allowHostSocketAccess`, which raises a clean UnsupportedOperation.
-    #   • `import ssl` / `select` / `selectors`        ->  passthrough. They were
-    #     once DELETED as native-crash risks; on this build they import and run
-    #     (ssl reports "OpenSSL compatible GraalVM JSSE"), and deleting the
-    #     statement made an unverified HTTPS request unfixable from a block: the
-    #     escape hatch vanished silently and the later use raised a NameError
-    #     nobody could explain. A real future incompatibility has to fail LOUDLY
-    #     at import, never by editing the statement away.
-    #   • an import binding a tool name (`import doc`)  ->  KEPT; it just shadows
-    #     that name for THIS block (the wrapper never declares it `global`).
-    # Everything else (json, re, ...) is untouched; the ORIGINAL src is returned
-    # when nothing changed (line numbers / formatting preserved).
-    prot = set(globals().get("__vis_protected_names__") or [])
-
-    def bind(name, attr):
-        val = __vis_ast__.Name(id="__vis_asyncio__", ctx=__vis_ast__.Load())
-        if attr is not None:
-            val = __vis_ast__.Attribute(value=val, attr=attr, ctx=__vis_ast__.Load())
-        return __vis_ast__.Assign(
-            targets=[__vis_ast__.Name(id=name, ctx=__vis_ast__.Store())], value=val
-        )
-
-    tree = __vis_ast__.parse(src)
-    changed = False
-    newbody = []
-    for node in tree.body:
-        if isinstance(node, __vis_ast__.Import):
-            keep = []
-            for a in node.names:
-                base = a.name.split(".")[0]
-                if base == "asyncio":
-                    newbody.append(bind(a.asname or "asyncio", None))
-                    changed = True
-                else:
-                    keep.append(a)
-            if keep:
-                node.names = keep
-                newbody.append(node)
-        elif isinstance(node, __vis_ast__.ImportFrom):
-            base = (node.module or "").split(".")[0]
-            if base == "asyncio":
-                for a in node.names:
-                    bound = a.asname or a.name
-                    if bound not in prot:  # gather etc. stay the builtin
-                        newbody.append(bind(bound, a.name))
-                changed = True
-            else:
-                newbody.append(node)
-        else:
-            newbody.append(node)
-    if not changed:
-        return src
-    tree.body = newbody
-    __vis_ast__.fix_missing_locations(tree)
-    return __vis_ast__.unparse(tree)
 
 
 def __vis_body_awaits__(fn):
@@ -3961,6 +4222,7 @@ def __vis_normalize_module__(tree, flags):
     # exactly as it did in the block that defined it.
     tree = __vis_AsyncDefFix__().visit(tree)
     tree = __vis_AwaitFix__().visit(tree)
+    tree, _ = __vis_fix_asyncio_imports__(tree)
     tree = __vis_StarImportFix__().visit(tree)
     tree = __vis_AnnFix__(
         bool(flags & __vis_future_mod__.annotations.compiler_flag)

@@ -730,29 +730,6 @@ def to_json(value):
         return json.dumps(str(value))
 
 
-def rewrite_imports(source, namespace):
-    """Rewrite the block's imports the way the sandbox needs them.
-
-    `import asyncio` binds the runtime's own shim, and `from asyncio import
-    gather` binds nothing, because the sandbox's `gather` is the one that knows
-    about the pool. The rewrite is the runtime's own
-    `__vis_strip_protected_imports__`, and it happens HERE rather than in the
-    host: running a block is what needs it, so a host that calls `run_block`
-    gets it without owning a second copy of the rule.
-
-    A source the rewrite cannot parse comes back untouched — the block is about
-    to raise that same SyntaxError with its own line numbers, which is the
-    message worth showing.
-    """
-    stripper = namespace.get("__vis_strip_protected_imports__")
-    if stripper is None:
-        return source
-    try:
-        return stripper(source)
-    except BaseException:
-        return source
-
-
 class _BlockCapture(io.StringIO):
     """In-memory stdout that also hands each write to an optional host sink."""
 
@@ -805,7 +782,7 @@ def run_block(source, namespace):
         runner = namespace.get("__vis_run_async__")
     if runner is None:
         raise RuntimeError("session is not equipped: install(namespace) first")
-    return _capture_block(rewrite_imports(source, namespace), namespace, runner)
+    return _capture_block(source, namespace, runner)
 
 
 def run_sync_block(source, namespace):
