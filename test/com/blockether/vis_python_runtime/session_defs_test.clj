@@ -843,3 +843,22 @@
       (is (str/includes? out "REAL-TOOL")))
     (testing "what the replay dropped is readable, by name"
       (is (= ["defs" "probe_tool"] dropped)))))
+
+;; User report 168155ca: size checks after cheap blocks walked too many diagnostic rows.
+(harness/defbuilt-test
+  snapshot-wide-values-scan-budget-test
+  (let [session (harness/block-session)]
+    (runtime/exec!
+      session
+      (str "def __snapshot_budget_probe__():\n"
+           "    import types\n" "    global __vis_builtins__\n"
+           "    original = __vis_builtins__\n" "    visits = [0]\n"
+           "    rows = [{str(j): 'detail' * 10 for j in range(8)} for _ in range(6000)]\n"
+           "    def counted_id(value):\n"
+           "        visits[0] += 1\n" "        return original.id(value)\n"
+           "    proxy = types.SimpleNamespace(**vars(original))\n" "    proxy.id = counted_id\n"
+           "    __vis_builtins__ = proxy\n" "    try:\n"
+           "        size = __vis_rough_size__(rows, 1024 * 1024)\n" "    finally:\n"
+           "        __vis_builtins__ = original\n"
+           "    return [size > 1024 * 1024, visits[0] < 6000]\n"))
+    (is (= [true true] (harness/ev session "__snapshot_budget_probe__()")))))
