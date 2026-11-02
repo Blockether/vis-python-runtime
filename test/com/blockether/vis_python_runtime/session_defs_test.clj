@@ -220,6 +220,56 @@
       (is (str/includes? stdout "generator cannot be pickled")))))
 
 (harness/defbuilt-test
+  session-defs-snapshot-reuse-stays-exact-test
+  ;; The snapshot reuses the source, literal and pickle of each unchanged name from
+  ;; the last block. A reused entry that outlived its value restored an old helper,
+  ;; class or value after a restart, and a deleted value stayed in memory.
+  (let [session
+        (harness/block-session)
+
+        _
+        (block session
+               (str "def f():\n    return 1\n"
+                    "class K:\n    v = 1\n" "T = (1, 'a', 2.5)\n"
+                    "BIG = ('x' * 600,)\n" "L = [1, 2]\n"
+                    "GONE = ('g' * 600,)\n" "W = ('\u017c' * 600,)\n"))
+
+        _
+        (snapshot session)
+
+        _
+        (block session
+               (str "def f():\n    return 2\n"
+                    "class K:\n    v = 2\n" "T = (2, 'b')\n"
+                    "BIG = ('y' * 600,)\n" "L.append(3)\n"
+                    "del GONE\n" "W = W + ('\u0105',)\n"))
+
+        reused
+        (snapshot session)
+
+        kept
+        (harness/ev session
+                    (str "sorted(n for t in ('functions', 'consts', 'values')"
+                         " for n in __vis_snapshot_memo__[t])"))
+
+        _
+        (harness/ev session "__vis_snapshot_memo__.clear()")
+
+        fresh
+        (snapshot session)]
+
+    (testing "a snapshot that reuses work equals one built from nothing" (is (= fresh reused)))
+    (testing "redefinitions, rebinding and changes in place are in the snapshot"
+      (is (str/includes? reused "return 2"))
+      (is (str/includes? reused "v = 2"))
+      (is (str/includes? reused "T = (2, 'b')"))
+      (is (str/includes? reused "L = [1, 2, 3]"))
+      (is (not (str/includes? reused "return 1"))))
+    (testing "a deleted name leaves the memo"
+      (is (some #{"BIG"} kept))
+      (is (not (some #{"GONE"} kept))))))
+
+(harness/defbuilt-test
   session-defs-carries-a-regex-match-test
   ;; `re.Match` has no pickle support, so `m = re.search(...)` came back from a
   ;; restart as a NameError. The snapshot now saves the pattern call that answers

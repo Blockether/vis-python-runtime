@@ -4978,7 +4978,7 @@ def __vis_chunk__(text, name):
     return (src + "\n", bound)
 
 
-def __vis_class_source__(cls):
+def __vis_class_source__(cls, blocks):
     # `inspect.getsource` cannot read a SANDBOX class: it resolves the file through
     # `cls.__module__`, and a block is not a module. The class body is in linecache
     # under the block that defined it, so find it THERE — a helper that returns a
@@ -4987,25 +4987,45 @@ def __vis_class_source__(cls):
     # through a method: a `@dataclass` has no method the session wrote, and reading
     # it through one dropped the whole class. The decorator lines are part of the
     # class — `@dataclass` is what gives it its `__init__`.
+    #
+    # `blocks` caches each block's text and class bodies: a block name is unique
+    # and its text never changes, and parsing every kept block again after every
+    # block was most of a class's snapshot cost.
     name = getattr(cls, "__name__", "")
     if not name:
         return None
+    needle = "class " + name
     for block_name in reversed(list(globals().get("__vis_block_names__") or [])):
         entry = __vis_linecache__.cache.get(block_name)
         if not entry:
             continue
-        block = "".join(entry[2])
-        if ("class " + name) not in block:
-            continue
-        try:
-            tree = __vis_ast__.parse(block)
-        except Exception:
-            continue
-        for node in __vis_ast__.walk(tree):
-            if isinstance(node, __vis_ast__.ClassDef) and node.name == name:
+        known = blocks.get(block_name)
+        if known is None or known[0] is not entry:
+            block = "".join(entry[2])
+            bodies = {}
+            try:
+                tree = __vis_ast__.parse(block)
+            except Exception:
+                tree = None
+            if tree is not None:
                 lines = block.splitlines()
-                start = min([node.lineno] + [d.lineno for d in node.decorator_list])
-                return "\n".join(lines[start - 1 : node.end_lineno])
+                for node in __vis_ast__.walk(tree):
+                    if (
+                        isinstance(node, __vis_ast__.ClassDef)
+                        and node.name not in bodies
+                    ):
+                        start = min(
+                            [node.lineno] + [d.lineno for d in node.decorator_list]
+                        )
+                        bodies[node.name] = "\n".join(
+                            lines[start - 1 : node.end_lineno]
+                        )
+            known = blocks[block_name] = (entry, block, bodies)
+        if needle not in known[1]:
+            continue
+        body = known[2].get(name)
+        if body is not None:
+            return body
     return None
 
 
@@ -5090,20 +5110,27 @@ class __vis_CappedSink__:
         return size
 
 
-def __vis_rough_size__(value, limit):
-    # A LOWER bound from builtin sizes. Count each level before expanding it.
-    # A wide container can exceed the budget without reading its children.
+def __vis_size_scan__(value, limit):
+    # `(size, plain, frozen)`. `size` is a LOWER bound from builtin sizes,
+    # stopping once it passes `limit`. Pickling or `repr`-ing a multi-megabyte
+    # string only to learn it is too large copies it whole, and the snapshot runs
+    # after EVERY block. Count each level before expanding it: a wide container
+    # can exceed the budget without reading its children. `plain` says the walk
+    # covered the whole value and met only exact builtin types; `frozen` says
+    # that none of them, and none of their sizes, can change.
     import sys
 
     total = 0
     pending = [value]
     seen = set()
     steps = 0
+    plain = True
+    frozen = True
     while pending:
         containers = []
         for v in pending:
             if steps >= 100000:
-                return total
+                return (total, False, False)
             steps += 1
             key = __vis_builtins__.id(v)
             if key in seen:
@@ -5114,9 +5141,19 @@ def __vis_rough_size__(value, limit):
             except Exception:
                 pass
             if total > limit:
-                return total
-            if type(v) in (dict, list, tuple, set, frozenset):
+                return (total, False, False)
+            t = type(v)
+            if t is dict or t is list or t is set:
                 containers.append(v)
+                frozen = False
+            elif t is tuple or t is frozenset:
+                containers.append(v)
+            elif t is str:
+                # Pickling a non-ASCII `str` adds a UTF-8 cache to its size.
+                if not v.isascii():
+                    frozen = False
+            elif t not in __vis_plain_leaves__:
+                plain = False
         pending = []
         for v in containers:
             if type(v) is dict:
@@ -5124,7 +5161,27 @@ def __vis_rough_size__(value, limit):
                 pending.extend(v.values())
             else:
                 pending.extend(v)
-    return total
+    return (total, plain, plain and frozen)
+
+
+def __vis_rough_size__(value, limit):
+    # A LOWER bound on a value's size; see `__vis_size_scan__`.
+    return __vis_size_scan__(value, limit)[0]
+
+
+def __vis_frozen__(v):
+    # Is `v` a deeply immutable exact builtin? The same object then always gives
+    # the same literal and the same pickle, so the snapshot can reuse both.
+    # A non-ASCII `str` is left out: pickling it adds a UTF-8 cache that
+    # `sys.getsizeof` counts, so its size can change once.
+    t = type(v)
+    if t is str:
+        return v.isascii()
+    if t in __vis_plain_leaves__:
+        return True
+    if t is tuple or t is frozenset:
+        return all(__vis_frozen__(x) for x in v)
+    return False
 
 
 def __vis_match_reduce__(m):
@@ -5224,6 +5281,7 @@ def __vis_snapshot__():
     # costs ONLY itself — and is named in the file, so the restore can say so.
     import base64
     import inspect
+    import pickle
     import sys
 
     g = globals()
@@ -5243,6 +5301,23 @@ def __vis_snapshot__():
     pending = []
     entries = {}
     dotted = {}
+    # Work kept from the last snapshot, by name: most names are unchanged after a
+    # block, and their source, literal or pickle came out the same again. Each
+    # entry holds the object it was made from and is reused only for that object.
+    memo = g.get("__vis_snapshot_memo__")
+    if not isinstance(memo, dict) or memo.get("format") != 1:
+        memo = g["__vis_snapshot_memo__"] = {
+            "format": 1,
+            "functions": {},
+            "blocks": {},
+            "consts": {},
+            "literals": {},
+            "values": {},
+        }
+    fmemo = memo["functions"]
+    kmemo = memo["consts"]
+    lmemo = memo["literals"]
+    vmemo = memo["values"]
     noted = g.get("__vis_dotted_imports__")
     for path in sorted(noted) if isinstance(noted, set) else ():
         dotted.setdefault(path.partition(".")[0], []).append(path)
@@ -5288,22 +5363,28 @@ def __vis_snapshot__():
                     refs.setdefault(__vis_builtins__.id(v), n)
                     entries[n] = ("function", "saved")
                     continue
-                try:
-                    raw = inspect.getsource(v)
-                except Exception:
-                    raw = None
-                chunk = __vis_chunk__(raw, n) if raw else None
+                known = fmemo.get(n)
+                if known is not None and known[0] is v and known[1] is code:
+                    chunk, order = known[2], known[3]
+                else:
+                    try:
+                        raw = inspect.getsource(v)
+                    except Exception:
+                        raw = None
+                    chunk = __vis_chunk__(raw, n) if raw else None
+                    order = __vis_block_order__(f, code)
+                    fmemo[n] = (v, code, chunk, order)
                 if chunk:
                     seen[key] = n
                     bound_names.add(chunk[1])
-                    funcs.append((__vis_block_order__(f, code), chunk[0]))
+                    funcs.append((order, chunk[0]))
                     refs.setdefault(__vis_builtins__.id(v), n)
                     entries[n] = ("function", "saved")
                 else:
                     entries[n] = ("function", "its source cannot be read back")
                 continue
             if isinstance(v, type):
-                body = __vis_class_source__(v)
+                body = __vis_class_source__(v, memo["blocks"])
                 chunk = __vis_chunk__(body, n) if body else None
                 if chunk:
                     classes.append(chunk[0])
@@ -5338,6 +5419,14 @@ def __vis_snapshot__():
             # time. SIZE FIRST: `repr` of a multi-megabyte blob costs more than the
             # whole snapshot. Only a repr that reads back as a LITERAL of the same
             # value (`__vis_plain__`) is kept; every other value is pickled below.
+            known = kmemo.get(n)
+            if known is not None and known[0] is v:
+                if known[1] is not None:
+                    consts.append(known[1])
+                    entries[n] = ("variable", "saved")
+                    continue
+                pending.append((n, v))
+                continue
             if (
                 v is None
                 or isinstance(v, (int, float, bool))
@@ -5345,14 +5434,26 @@ def __vis_snapshot__():
                 or (
                     isinstance(v, (dict, list, tuple, set, frozenset))
                     and len(v) <= 100
-                    and __vis_rough_size__(v, 16384) <= 16384
+                    and __vis_size_scan__(v, 16384)[0] <= 16384
                 )
             ):
                 rep = repr(v)
-                if len(rep) <= 500 and __vis_literal_ok__(rep) and __vis_plain__(v):
+                ok = False
+                if len(rep) <= 500:
+                    known = lmemo.get(n)
+                    if known is not None and known[0] == rep:
+                        ok = known[1]
+                    else:
+                        ok = __vis_literal_ok__(rep)
+                        lmemo[n] = (rep, ok)
+                if ok and __vis_plain__(v):
                     consts.append(n + " = " + rep)
                     entries[n] = ("variable", "saved")
+                    if __vis_frozen__(v):
+                        kmemo[n] = (v, n + " = " + rep)
                     continue
+            if __vis_frozen__(v):
+                kmemo[n] = (v, None)
             pending.append((n, v))
         except Exception as exc:
             entries[n] = (
@@ -5368,9 +5469,25 @@ def __vis_snapshot__():
         what = __vis_def_type__(v)
         limit = min(__vis_value_limit__, budget)
         try:
-            if __vis_rough_size__(v, limit) > limit:
+            known = vmemo.get(n)
+            if known is not None and known[0] is v:
+                if known[1] > limit or known[3] > limit:
+                    raise __vis_ValueTooLarge__()
+                budget -= known[3]
+                values[n] = known[2]
+                entries[n] = (kind, "saved")
+                continue
+            size, plain, frozen = __vis_size_scan__(v, limit)
+            if size > limit:
                 raise __vis_ValueTooLarge__()
-            blob = __vis_pickle_value__(v, refs, limit)
+            if plain:
+                # Only exact builtins: no session ref and no `re.Match` can be inside,
+                # so the C pickler alone writes the same bytes, without Python hooks.
+                blob = pickle.dumps(v, protocol=5)
+                if len(blob) > limit:
+                    raise __vis_ValueTooLarge__()
+            else:
+                blob = __vis_pickle_value__(v, refs, limit)
         except __vis_ValueTooLarge__:
             entries[n] = (
                 kind,
@@ -5391,6 +5508,18 @@ def __vis_snapshot__():
         budget -= len(blob)
         values[n] = base64.b64encode(blob).decode("ascii")
         entries[n] = (kind, "saved")
+        if plain and frozen:
+            vmemo[n] = (v, size, values[n], len(blob))
+    # Drop the entries of names that are gone or bound to another object, so the
+    # memo never keeps a deleted value alive.
+    for table in (fmemo, kmemo, vmemo):
+        for n in [n for n, known in table.items() if g.get(n, table) is not known[0]]:
+            del table[n]
+    for n in [n for n in lmemo if n not in g]:
+        del lmemo[n]
+    live = set(g.get("__vis_block_names__") or ())
+    for b in [b for b in memo["blocks"] if b not in live]:
+        del memo["blocks"][b]
     unsaved = {n: status for n, (_kind, status) in entries.items() if status != "saved"}
     if not (imports or consts or classes or funcs or aliases or values or unsaved):
         return ("", entries)
