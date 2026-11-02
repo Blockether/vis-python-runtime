@@ -66,11 +66,12 @@ _finder = _EditableFinder()
 
 
 def refresh(packages, *, reload=False):
-    """Process package-site changes; on explicit reload discard editable module caches.
+    """Process package-site changes; on explicit reload discard this site's editable caches.
 
     Call only after the host has applied the session policy. .pth paths are import
     locations, never additional filesystem grants. Standard site semantics also
     support editable backends that install import hooks instead of path lines.
+    One process can hold several sites, so a reload never evicts another site's modules.
     """
     if packages is None:
         return
@@ -88,7 +89,7 @@ def refresh(packages, *, reload=False):
     ]
     stamp = tuple((str(p), p.read_bytes()) for p in files)
     previous = _sites.get(packages)
-    old_roots = set(_roots)
+    old_roots = set(previous[2]) if previous is not None else set()
     if previous is None or previous[0] != stamp:
         if previous is not None:
             for sequence, added in zip(
@@ -140,7 +141,7 @@ def refresh(packages, *, reload=False):
                 spec.origin if spec.has_location else None,
                 *getattr(module, "__path__", ()),
             ]
-            if any(_editable(path, old_roots | _roots) for path in paths):
+            if any(_editable(path, old_roots | _sites[packages][2]) for path in paths):
                 sys.modules.pop(name, None)
                 parent, _, child = name.rpartition(".")
                 owner = sys.modules.get(parent)

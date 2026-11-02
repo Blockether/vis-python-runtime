@@ -172,6 +172,53 @@
         (runtime/exec! session "sys.modules.pop('vis_site_fixture', None)")))))
 
 (harness/defbuilt-test
+  editable-reload-keeps-other-sites-test
+  ;; One Vis extension worker holds the package sites of all extensions of a session.
+  ;; A reload of one site must not evict the editable imports of another site.
+  (with-editable-site
+    (fn [session packages source]
+      (let [root
+            (.getParentFile ^java.io.File packages)
+
+            other
+            (doto (io/file root "other packages") .mkdirs)
+
+            other-source
+            (doto (io/file root "other source") .mkdirs)]
+
+        (spit (io/file packages "fixture.pth") (str source "\n"))
+        (spit (io/file source "vis_site_a.py") "VALUE = 'a'\n")
+        (spit (io/file other "fixture.pth") (str other-source "\n"))
+        (spit (io/file other-source "vis_site_b.py") "VALUE = 'b'\n")
+        (runtime/install-runtime! session)
+        (try (runtime/exec! session
+                            (str "import sys, package_paths\n"
+                                 "package_paths.refresh("
+                                 (pr-str (str packages))
+                                 ")\n"
+                                 "package_paths.refresh("
+                                 (pr-str (str other))
+                                 ")\n"
+                                 "import vis_site_a, vis_site_b\n"
+                                 "site_a = vis_site_a\n"
+                                 "package_paths.refresh("
+                                 (pr-str (str other))
+                                 ", reload=True)\n"))
+             (is (= "True"
+                    (runtime/eval-str session "str(sys.modules.get('vis_site_a') is site_a)"))
+                 "Another site's editable module keeps its identity")
+             (is (= "False" (runtime/eval-str session "str('vis_site_b' in sys.modules)"))
+                 "The reloaded site's editable module is discarded")
+             (finally (io/delete-file (io/file other "fixture.pth"))
+                      (runtime/exec! session
+                                     (str "package_paths.refresh("
+                                          (pr-str (str other))
+                                          ", reload=True)\n"
+                                          "sys.path[:] = [p for p in sys.path if p != "
+                                          (pr-str (str other))
+                                          "]\n" "sys.modules.pop('vis_site_a', None)\n"))))))))
+
+(harness/defbuilt-test
   editable-pth-is-importable-test
   ;; Blockether/vis#175: a site path alone does not activate an editable install.
   (with-editable-site
