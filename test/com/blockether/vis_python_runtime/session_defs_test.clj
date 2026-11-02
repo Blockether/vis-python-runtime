@@ -546,6 +546,35 @@
       (is (some #{"  part_3: str, 900000 chars"} (str/split-lines listing)))
       (is (str/includes? listing "part_4: str, 900000 chars | not saved: str does not fit")))))
 
+(harness/defbuilt-test
+  session-defs-budget-keeps-the-newest-values-test
+  ;; Session 19081dce lost its newest results `w`, `wa` and `wc`, and kept older
+  ;; values whose names sort first. The budget keeps the values bound last.
+  (let [session
+        (harness/block-session)
+
+        bind!
+        (fn [prefix n]
+          (block session
+                 (str/join "\n"
+                           (for [i (range n)]
+                             (format "%s_%d = \"%d\" * 900000" prefix i i))))
+          ;; The host takes a snapshot after each block.
+          (snapshot session))
+
+        _
+        (bind! "a_old" 3)
+
+        _
+        (bind! "z_new" 2)
+
+        listing
+        (ran session "print(defs())")]
+
+    (testing "the newest values fill the budget first, and the oldest one is not saved"
+      (is (some #{"  z_new_1: str, 900000 chars"} (str/split-lines listing)))
+      (is (str/includes? listing "a_old_2: str, 900000 chars | not saved: str does not fit")))))
+
 (harness/defbuilt-test session-defs-del-drops-and-frees-a-variable-test
                        ;; `del name` is how a session retires a variable: the next snapshot must not
                        ;; carry it, and its memory must go now — a reference cycle would otherwise

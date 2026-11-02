@@ -5081,9 +5081,10 @@ def __vis_block_order__(filename, code):
 # A session VARIABLE survives a restart as a pickle inside the snapshot. One
 # value may take `__vis_value_limit__` bytes and all of them together
 # `__vis_values_budget__`; a value past either is reported as NOT SAVED with its
-# reason, never cut short. The snapshot is the session's own file, written by
-# the host beside it, and it already holds source the restore executes: a pickle
-# in it adds no new trust boundary.
+# reason, never cut short. The values bound last fill the budget first. The
+# snapshot is the session's own file, written by the host beside it, and it
+# already holds source the restore executes: a pickle in it adds no new trust
+# boundary.
 __vis_value_limit__ = 1 << 20
 __vis_values_budget__ = 4 << 20
 
@@ -5289,6 +5290,7 @@ def __vis_snapshot__():
     import base64
     import inspect
     import sys
+    import weakref
 
     g = globals()
     prot = set(g.get("__vis_protected_names__") or [])
@@ -5311,14 +5313,17 @@ def __vis_snapshot__():
     # block, and their source, literal or pickle came out the same again. Each
     # entry holds the object it was made from and is reused only for that object.
     memo = g.get("__vis_snapshot_memo__")
-    if not isinstance(memo, dict) or memo.get("format") != 2:
+    if not isinstance(memo, dict) or memo.get("format") != 3:
         memo = g["__vis_snapshot_memo__"] = {
-            "format": 2,
+            "format": 3,
             "functions": {},
             "blocks": {},
             "consts": {},
             "literals": {},
             "values": {},
+            # name -> (weak reference or id of its value, snapshot that first saw it)
+            "bound": {},
+            "count": 0,
         }
     fmemo = memo["functions"]
     kmemo = memo["consts"]
@@ -5468,6 +5473,31 @@ def __vis_snapshot__():
                 + __vis_def_gist__(__vis_failure_text__(exc), 120)
                 + ")",
             )
+    # The budget keeps the values bound LAST: the next block most likely reads a
+    # result the session just made. Session 19081dce lost its newest results to
+    # older values whose names sort first. `bound` keeps, for each name, the
+    # snapshot that first saw its value. It holds a weak reference, or the id of a
+    # value without one, so it never keeps a value alive. A reused id can only
+    # cost a value its place in this order.
+    count = memo["count"] = memo["count"] + 1
+    old = memo["bound"]
+    bound = memo["bound"] = {}
+    for n, v in pending:
+        held = __vis_builtins__.id(v)
+        try:
+            if type(v).__weakrefoffset__:
+                held = weakref.ref(v)
+        except Exception:
+            pass
+        known = old.get(n)
+        if known is not None and (
+            known[0]() is v if type(known[0]) is weakref.ref else known[0] == held
+        ):
+            bound[n] = known
+        else:
+            bound[n] = (held, count)
+    # A stable sort: the values of one snapshot keep their name order.
+    pending.sort(key=lambda item: -bound[item[0]][1])
     values = {}
     # Names whose value is large or of unknown size; see `__vis_defs_snapshot__`.
     heavy = set()
@@ -5533,6 +5563,8 @@ def __vis_snapshot__():
     live = set(g.get("__vis_block_names__") or ())
     for b in [b for b in memo["blocks"] if b not in live]:
         del memo["blocks"][b]
+    # The values come in budget order, newest first, so the host spills the newest
+    # large values first too.
     unsaved = {n: status for n, (_kind, status) in entries.items() if status != "saved"}
     if not (imports or consts or classes or funcs or aliases or values or unsaved):
         return ("", entries)
@@ -5561,7 +5593,9 @@ def __vis_snapshot__():
             # `repr(values)`, without its scan of each character: base64 text has
             # no quote or backslash, so its repr is the text in single quotes.
             + "{"
-            + ", ".join([repr(n) + ": '" + b + "'" for n, b in values.items()])
+            # Name order, not budget order: the other values keep their place in
+            # the text, so the host's delta sends only what changed.
+            + ", ".join([repr(n) + ": '" + b + "'" for n, b in sorted(values.items())])
             + "}"
             + "\n__vis_unsaved__ = "
             + repr(unsaved)
