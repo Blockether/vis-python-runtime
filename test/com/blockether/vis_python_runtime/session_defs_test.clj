@@ -229,20 +229,20 @@
 
         _
         (block session
-               (str "def f():\n    return 1\n"
-                    "class K:\n    v = 1\n" "T = (1, 'a', 2.5)\n"
-                    "BIG = ('x' * 600,)\n" "L = [1, 2]\n"
-                    "GONE = ('g' * 600,)\n" "W = ('\u017c' * 600,)\n"))
+               (str "def f():\n    return 1\n" "class K:\n    v = 1\n"
+                    "T = (1, 'a', 2.5)\n" "BIG = ('x' * 600,)\n"
+                    "L = [1, 2]\n" "GONE = ('g' * 600,)\n"
+                    "W = ('\u017c' * 600,)\n" "P = list(range(300))\n"))
 
         _
         (snapshot session)
 
         _
         (block session
-               (str "def f():\n    return 2\n"
-                    "class K:\n    v = 2\n" "T = (2, 'b')\n"
-                    "BIG = ('y' * 600,)\n" "L.append(3)\n"
-                    "del GONE\n" "W = W + ('\u0105',)\n"))
+               (str "def f():\n    return 2\n" "class K:\n    v = 2\n"
+                    "T = (2, 'b')\n" "BIG = ('y' * 600,)\n"
+                    "L.append(3)\n" "del GONE\n"
+                    "W = W + ('\u0105',)\n" "P.append(-1)\n"))
 
         reused
         (snapshot session)
@@ -268,6 +268,55 @@
     (testing "a deleted name leaves the memo"
       (is (some #{"BIG"} kept))
       (is (not (some #{"GONE"} kept))))))
+
+(harness/defbuilt-test session-defs-keeps-a-wide-text-that-fits-test
+                       ;; Session b0d9837e lost `st_s`: `sys.getsizeof` counts a text with one wide
+                       ;; character twice and grows once pickling caches its UTF-8 copy. A text far
+                       ;; under the limit was saved once, then dropped as over the budget.
+                       (let [session
+                             (harness/block-session)
+
+                             _
+                             (block session "wide = 'z' * 600000 + '\u017c'\n")
+
+                             first-text
+                             (snapshot session)
+
+                             second-text
+                             (snapshot session)]
+
+                         (testing "the text is saved by its UTF-8 size, and stays saved"
+                           (is (str/includes? first-text "'wide': '"))
+                           (is (str/includes? second-text "'wide': '"))
+                           (is (not (str/includes? second-text "1 MiB"))))))
+
+(harness/defbuilt-test
+  session-defs-collects-only-for-a-large-loss-test
+  ;; Session 7d217191: a full collection after each deleted name cost about 15 ms
+  ;; in a large session. It runs only when a gone value can still be alive.
+  (let [session
+        (harness/block-session)
+
+        _
+        (block session
+               (str "import gc\n" "full = [0]\n"
+                    "def on_gc(phase, info):\n"
+                    "    if phase == 'start' and info.get('generation') == 2:\n"
+                    "        full[0] += 1\n" "def collections_in_snapshot():\n"
+                    "    gc.callbacks.append(on_gc)\n" "    gc.disable()\n"
+                    "    try:\n" "        before = full[0]\n"
+                    "        __vis_defs_snapshot__()\n" "        return full[0] - before\n"
+                    "    finally:\n" "        gc.enable()\n"
+                    "        gc.callbacks.remove(on_gc)\n" "small = [1, 2]\n"
+                    "big = list(range(100000))\n" "gen = (i for i in range(3))\n"))
+
+        counts
+        (vec (for [code [nil "del small\n" "del big\n" "del gen\n"]]
+               (do (when code (block session code))
+                   (harness/ev session "collections_in_snapshot()"))))]
+
+    (testing "a small or freed value goes without a collection, a large list with one"
+      (is (= [0 0 1 0] counts)))))
 
 (harness/defbuilt-test
   session-defs-carries-a-regex-match-test

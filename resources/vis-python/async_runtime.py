@@ -5087,6 +5087,9 @@ def __vis_block_order__(filename, code):
 __vis_value_limit__ = 1 << 20
 __vis_values_budget__ = 4 << 20
 
+# A saved value of this many pickle bytes or more counts as large when it goes.
+__vis_heavy_bytes__ = 256 << 10
+
 
 class __vis_ValueTooLarge__(Exception):
     pass
@@ -5110,50 +5113,40 @@ class __vis_CappedSink__:
         return size
 
 
-def __vis_size_scan__(value, limit):
-    # `(size, plain, frozen)`. `size` is a LOWER bound from builtin sizes,
-    # stopping once it passes `limit`. Pickling or `repr`-ing a multi-megabyte
-    # string only to learn it is too large copies it whole, and the snapshot runs
-    # after EVERY block. Count each level before expanding it: a wide container
-    # can exceed the budget without reading its children. `plain` says the walk
-    # covered the whole value and met only exact builtin types; `frozen` says
-    # that none of them, and none of their sizes, can change.
+def __vis_rough_size__(value, limit):
+    # A LOWER bound from builtin sizes. Count each level before expanding it.
+    # A wide container can exceed the budget without reading its children.
+    # A `str` counts its length, which its literal and its UTF-8 pickle reach at
+    # least. `sys.getsizeof` doubles a text that has one wide character, and grows
+    # once pickling caches a UTF-8 copy, so a saved value could stop fitting.
     import sys
 
     total = 0
     pending = [value]
     seen = set()
     steps = 0
-    plain = True
-    frozen = True
     while pending:
         containers = []
         for v in pending:
             if steps >= 100000:
-                return (total, False, False)
+                return total
             steps += 1
             key = __vis_builtins__.id(v)
             if key in seen:
                 continue
             seen.add(key)
-            try:
-                total += sys.getsizeof(v)
-            except Exception:
-                pass
-            if total > limit:
-                return (total, False, False)
             t = type(v)
-            if t is dict or t is list or t is set:
+            if t is str:
+                total += len(v)
+            else:
+                try:
+                    total += sys.getsizeof(v)
+                except Exception:
+                    pass
+            if total > limit:
+                return total
+            if t in (dict, list, tuple, set, frozenset):
                 containers.append(v)
-                frozen = False
-            elif t is tuple or t is frozenset:
-                containers.append(v)
-            elif t is str:
-                # Pickling a non-ASCII `str` adds a UTF-8 cache to its size.
-                if not v.isascii():
-                    frozen = False
-            elif t not in __vis_plain_leaves__:
-                plain = False
         pending = []
         for v in containers:
             if type(v) is dict:
@@ -5161,27 +5154,41 @@ def __vis_size_scan__(value, limit):
                 pending.extend(v.values())
             else:
                 pending.extend(v)
-    return (total, plain, plain and frozen)
-
-
-def __vis_rough_size__(value, limit):
-    # A LOWER bound on a value's size; see `__vis_size_scan__`.
-    return __vis_size_scan__(value, limit)[0]
+    return total
 
 
 def __vis_frozen__(v):
     # Is `v` a deeply immutable exact builtin? The same object then always gives
     # the same literal and the same pickle, so the snapshot can reuse both.
-    # A non-ASCII `str` is left out: pickling it adds a UTF-8 cache that
-    # `sys.getsizeof` counts, so its size can change once.
     t = type(v)
-    if t is str:
-        return v.isascii()
     if t in __vis_plain_leaves__:
         return True
     if t is tuple or t is frozenset:
         return all(__vis_frozen__(x) for x in v)
     return False
+
+
+class __vis_NotPlain__(Exception):
+    pass
+
+
+def __vis_plain_pickle__(value, limit):
+    # The pickle of a value made only of builtins, written by the C pickler alone.
+    # It calls `reducer_override` only for an object outside its own fast paths,
+    # so a session object or an `re.Match` raises `__vis_NotPlain__`, and the
+    # caller uses `__vis_pickle_value__`. Without hooks, nothing runs in Python for
+    # each element, and the bytes are the same as with them.
+    import pickle
+
+    class Pickler(pickle.Pickler):
+        def reducer_override(self, obj):
+            if type(obj) in __vis_plain_leaves__:
+                return NotImplemented
+            raise __vis_NotPlain__()
+
+    sink = __vis_CappedSink__(limit)
+    Pickler(sink, protocol=5).dump(value)
+    return b"".join(sink.parts)
 
 
 def __vis_match_reduce__(m):
@@ -5281,7 +5288,6 @@ def __vis_snapshot__():
     # costs ONLY itself — and is named in the file, so the restore can say so.
     import base64
     import inspect
-    import pickle
     import sys
 
     g = globals()
@@ -5305,9 +5311,9 @@ def __vis_snapshot__():
     # block, and their source, literal or pickle came out the same again. Each
     # entry holds the object it was made from and is reused only for that object.
     memo = g.get("__vis_snapshot_memo__")
-    if not isinstance(memo, dict) or memo.get("format") != 1:
+    if not isinstance(memo, dict) or memo.get("format") != 2:
         memo = g["__vis_snapshot_memo__"] = {
-            "format": 1,
+            "format": 2,
             "functions": {},
             "blocks": {},
             "consts": {},
@@ -5434,7 +5440,7 @@ def __vis_snapshot__():
                 or (
                     isinstance(v, (dict, list, tuple, set, frozenset))
                     and len(v) <= 100
-                    and __vis_size_scan__(v, 16384)[0] <= 16384
+                    and __vis_rough_size__(v, 16384) <= 16384
                 )
             ):
                 rep = repr(v)
@@ -5463,6 +5469,9 @@ def __vis_snapshot__():
                 + ")",
             )
     values = {}
+    # Names whose value is large or of unknown size; see `__vis_defs_snapshot__`.
+    heavy = set()
+    memo["heavy"] = heavy
     budget = __vis_values_budget__
     for n, v in pending:
         kind = "class" if isinstance(v, type) else "variable"
@@ -5470,24 +5479,20 @@ def __vis_snapshot__():
         limit = min(__vis_value_limit__, budget)
         try:
             known = vmemo.get(n)
-            if known is not None and known[0] is v:
-                if known[1] > limit or known[3] > limit:
-                    raise __vis_ValueTooLarge__()
-                budget -= known[3]
-                values[n] = known[2]
-                entries[n] = (kind, "saved")
-                continue
-            size, plain, frozen = __vis_size_scan__(v, limit)
-            if size > limit:
+            if known is None or known[0] is not v:
+                known = None
+            if known is not None and known[3]:
+                # The same deeply immutable object always pickles the same.
+                blob = known[1]
+            elif type(v) in (str, bytes) and len(v) > limit:
                 raise __vis_ValueTooLarge__()
-            if plain:
-                # Only exact builtins: no session ref and no `re.Match` can be inside,
-                # so the C pickler alone writes the same bytes, without Python hooks.
-                blob = pickle.dumps(v, protocol=5)
-                if len(blob) > limit:
-                    raise __vis_ValueTooLarge__()
             else:
-                blob = __vis_pickle_value__(v, refs, limit)
+                try:
+                    blob = __vis_plain_pickle__(v, limit)
+                except __vis_NotPlain__:
+                    blob = __vis_pickle_value__(v, refs, limit)
+            if len(blob) > limit:
+                raise __vis_ValueTooLarge__()
         except __vis_ValueTooLarge__:
             entries[n] = (
                 kind,
@@ -5495,6 +5500,7 @@ def __vis_snapshot__():
                 if limit == __vis_value_limit__
                 else what + " does not fit: saved values reached their 4 MiB budget",
             )
+            heavy.add(n)
             continue
         except Exception as exc:
             entries[n] = (
@@ -5504,12 +5510,19 @@ def __vis_snapshot__():
                 + __vis_def_gist__(__vis_failure_text__(exc), 120)
                 + ")",
             )
+            heavy.add(n)
             continue
         budget -= len(blob)
-        values[n] = base64.b64encode(blob).decode("ascii")
+        # A changed list or dict is pickled again, but the same bytes keep their text.
+        if known is not None and known[1] == blob:
+            values[n] = known[2]
+        else:
+            values[n] = base64.b64encode(blob).decode("ascii")
         entries[n] = (kind, "saved")
-        if plain and frozen:
-            vmemo[n] = (v, size, values[n], len(blob))
+        frozen = known[3] if known is not None else __vis_frozen__(v)
+        vmemo[n] = (v, blob, values[n], frozen)
+        if len(blob) >= __vis_heavy_bytes__:
+            heavy.add(n)
     # Drop the entries of names that are gone or bound to another object, so the
     # memo never keeps a deleted value alive.
     for table in (fmemo, kmemo, vmemo):
@@ -5545,7 +5558,11 @@ def __vis_snapshot__():
         parts.append(
             "# Saved variables (base64 pickles) and the names that could not be saved.\n"
             + "__vis_values__ = "
-            + repr(values)
+            # `repr(values)`, without its scan of each character: base64 text has
+            # no quote or backslash, so its repr is the text in single quotes.
+            + "{"
+            + ", ".join([repr(n) + ": '" + b + "'" for n, b in values.items()])
+            + "}"
             + "\n__vis_unsaved__ = "
             + repr(unsaved)
             + "\n"
@@ -5557,17 +5574,34 @@ def __vis_defs_snapshot__():
     # The snapshot text the host writes after every block ("" = nothing to keep,
     # so the host drops a stale file). A name that disappeared since the last
     # snapshot was `del`eted: CPython frees it at once unless a reference cycle
-    # holds it, so collect those too — a dropped variable stops costing memory
-    # now, not at some later collection.
+    # holds it, so collect those too. A full collection walks the whole heap and
+    # costs tens of milliseconds in a large session, so it runs only when a gone
+    # value can still be alive: its weak reference still answers, or it has none
+    # and was large or of unknown size.
     import gc
+    import weakref
 
     text, entries = __vis_snapshot__()
     g = globals()
-    names = frozenset(entries)
-    last = g.get("__vis_snapshot_names__")
-    g["__vis_snapshot_names__"] = names
-    if last is not None and not last <= names:
-        gc.collect()
+    memo = g.get("__vis_snapshot_memo__")
+    heavy = memo.get("heavy") or () if isinstance(memo, dict) else ()
+    watch = {}
+    for n in entries:
+        v = g.get(n)
+        if type(v).__weakrefoffset__:
+            try:
+                watch[n] = weakref.ref(v)
+                continue
+            except TypeError:
+                pass
+        watch[n] = n in heavy
+    last = g.get("__vis_snapshot_watch__")
+    g["__vis_snapshot_watch__"] = watch
+    if isinstance(last, dict):
+        for n, held in last.items():
+            if n not in entries and (held is True or (held and held() is not None)):
+                gc.collect()
+                break
     return text
 
 
