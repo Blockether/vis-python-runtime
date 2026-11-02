@@ -5091,38 +5091,39 @@ class __vis_CappedSink__:
 
 
 def __vis_rough_size__(value, limit):
-    # A LOWER bound on a value's size: `sys.getsizeof` summed over plain builtin
-    # containers, stopping once it passes `limit`. Pickling or `repr`-ing a
-    # multi-megabyte string only to learn it is too large copies it whole, and
-    # the snapshot runs after EVERY block.
+    # A LOWER bound from builtin sizes. Count each level before expanding it.
+    # A wide container can exceed the budget without reading its children.
     import sys
-    from collections import deque
 
-    # Count wide containers before their children. Large diagnostic rows can
-    # already exceed the budget without visiting each field in each row.
     total = 0
-    pending = deque([value])
+    pending = [value]
     seen = set()
     steps = 0
-    while pending and steps < 100000:
-        v = pending.popleft()
-        steps += 1
-        key = __vis_builtins__.id(v)
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            total += sys.getsizeof(v)
-        except Exception:
-            pass
-        if total > limit:
-            break
-        t = type(v)
-        if t is dict:
-            pending.extend(v.keys())
-            pending.extend(v.values())
-        elif t in (list, tuple, set, frozenset):
-            pending.extend(v)
+    while pending:
+        containers = []
+        for v in pending:
+            if steps >= 100000:
+                return total
+            steps += 1
+            key = __vis_builtins__.id(v)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                total += sys.getsizeof(v)
+            except Exception:
+                pass
+            if total > limit:
+                return total
+            if type(v) in (dict, list, tuple, set, frozenset):
+                containers.append(v)
+        pending = []
+        for v in containers:
+            if type(v) is dict:
+                pending.extend(v.keys())
+                pending.extend(v.values())
+            else:
+                pending.extend(v)
     return total
 
 
