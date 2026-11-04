@@ -202,11 +202,14 @@
   session-defs-restored-class-source-test
   ;; Blockether/vis#437: a restored class must read back like a local one, through
   ;; the block source that the restore registered.
-  (let [{:keys [stdout]} (across-processes
-                           "class Node:\n    def __init__(self, v):\n        self.v = v\n"
-                           "import inspect\nprint(inspect.getsource(Node).splitlines()[0])\n")]
+  (let [{:keys [stdout]}
+        (across-processes
+          "class Node:\n    def __init__(self, v):\n        self.v = v\n"
+          (str "import inspect, linecache\n"
+               "lines, n = inspect.getsourcelines(Node)\n"
+               "print(lines[0].strip(), linecache.getline(inspect.getfile(Node), n).strip())\n"))]
     (testing "a restored class reads back through the block source of the restore"
-      (is (= "class Node:" stdout)))))
+      (is (= "class Node: class Node:" stdout)))))
 
 (harness/defbuilt-test
   session-defs-skips-a-value-too-big-to-store-test

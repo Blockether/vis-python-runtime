@@ -146,11 +146,13 @@ __vis_io__.open = __vis_open__
 # The block is known exactly when the class is BUILT: its body is a code object
 # compiled under that block's name. So `__build_class__` records it, weakly, and
 # `inspect.getfile` answers it when its own lookup fails; `__firstlineno__` gives
-# the line. Each wrapper carries the original and the record map, so a reinstall
-# wraps the same originals and keeps every record.
+# the line. A session class without a known block raises CPython's `__main__`
+# error, never the false "built-in" one. Each wrapper carries the original and the
+# record map, so a reinstall wraps the same originals and keeps every record.
 def __vis_install_class_files__():
     import functools
     import inspect
+    import sys
 
     current = __vis_builtins__.__build_class__
     real_build = getattr(current, "__vis_real__", current)
@@ -159,38 +161,78 @@ def __vis_install_class_files__():
     if files is None:
         files = __vis_weakref__.WeakKeyDictionary()
 
+    def is_block(f):
+        return isinstance(f, str) and (
+            f == "<prog>" or (f[:6] == "<prog:" and f[-1:] == ">")
+        )
+
     # Closures, not globals: this runs for EVERY class statement in the process,
     # imports included, and a block can clear its own globals.
     def build_class(func, name, /, *bases, **kwds):
         cls = real_build(func, name, *bases, **kwds)
         try:
             f = func.__code__.co_filename
-            if f == "<prog>" or (f[:6] == "<prog:" and f[-1:] == ">"):
+            if is_block(f):
                 files[cls] = f
         except Exception:
             pass  # a metaclass can return an object that has no weak reference
         return cls
+
+    def body_block(cls):
+        # A decorator that REBUILDS the class with `type(...)`, like
+        # `@dataclass(slots=True)`, returns a class that `build_class` never saw.
+        # The functions of its body still name the block: each is qualified under
+        # the class and starts after `__firstlineno__`. A function that another
+        # block assigned to the class fails one of these tests. If the remaining
+        # functions name more than one block, the answer is unknown.
+        prefix = cls.__qualname__ + "."
+        first = vars(cls).get("__firstlineno__")
+        if not isinstance(first, int):
+            return None
+        found = set()
+        for v in vars(cls).values():
+            for fn in (
+                v,
+                getattr(v, "__func__", None),
+                getattr(v, "fget", None),
+                getattr(v, "fset", None),
+                getattr(v, "fdel", None),
+            ):
+                code = getattr(fn, "__code__", None)
+                if (
+                    code is not None
+                    and is_block(code.co_filename)
+                    and str(getattr(fn, "__qualname__", "")).startswith(prefix)
+                    and code.co_firstlineno >= first
+                ):
+                    found.add(code.co_filename)
+        return found.pop() if len(found) == 1 else None
 
     @functools.wraps(real_getfile)
     def getfile(obj):
         try:
             return real_getfile(obj)
         except (TypeError, OSError):
+            if not isinstance(obj, type):
+                raise
             try:
                 f = files.get(obj)
-                if f is None and isinstance(obj, type):
-                    # A decorator that REBUILDS the class, like `@dataclass(slots=True)`,
-                    # returns a class that `build_class` never saw. Its annotations
-                    # function was compiled in the class body, so it names the block.
-                    code = getattr(vars(obj).get("__annotate_func__"), "__code__", None)
-                    g = getattr(code, "co_filename", "")
-                    if g == "<prog>" or (g[:6] == "<prog:" and g[-1:] == ">"):
-                        f = g
+                if f is None:
+                    f = body_block(obj)
+                module = sys.modules.get(obj.__module__)
+                # `builtins` holds a copy of every `__vis_*` name (`__vis_pin_runtime__`).
+                in_session = module is not __vis_builtins__ and (
+                    "__vis_block_names__" in getattr(module, "__dict__", {})
+                )
             except Exception:
-                f = None
-            if f is None:
-                raise
-            return f
+                f, in_session = None, False
+            if f is not None:
+                return f
+            if in_session:
+                # The same answer that CPython gives for a class of `__main__`: the
+                # class is not built-in, its source is not known.
+                raise OSError("source code not available") from None
+            raise
 
     build_class.__vis_real__ = real_build
     build_class.__vis_files__ = files

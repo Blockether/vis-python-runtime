@@ -89,7 +89,12 @@
                   (str "import inspect\n"
                        "class SourceProbe:\n" "    def method(self):\n"
                        "        return 1\n\n" "print(inspect.getsource(SourceProbe).strip())\n"))))
-      (is (str/starts-with? (ran s "print(inspect.getsource(SourceProbe))") "class SourceProbe:")))
+      ;; The line is the class's line in ITS block, not in the block that asks.
+      (is (= "<prog:1> 2 class SourceProbe:"
+             (ran s
+                  (str "x = 1\ny = 2\n"
+                       "lines, n = inspect.getsourcelines(SourceProbe)\n"
+                       "print(inspect.getfile(SourceProbe), n, lines[0].strip())\n")))))
     (testing "a class keeps its own block after a later block redefines its name"
       ;; One file for all classes of a name would read the NEWER body for the
       ;; older class: wrong source, silently.
@@ -99,13 +104,28 @@
                   (str "class Redefined:\n    v = 2\n\n"
                        "print(inspect.getsource(old).splitlines()[1].strip())\n"
                        "print(inspect.getsource(Redefined).splitlines()[1].strip())\n")))))
-    (testing "a class that a decorator rebuilds reads back through its annotations"
+    (testing "a class that a decorator rebuilds reads back through the functions of its body"
       ;; `@dataclass(slots=True)` returns a new class, built by `type(...)`.
-      (is (= "@dataclass(slots=True)"
+      ;; The function that another block assigns to the class must not move it.
+      (block s
+             (str "from dataclasses import dataclass\n\n"
+                  "@dataclass(slots=True)\n" "class Slotted:\n    x: int = 0\n\n"
+                  "@dataclass(slots=True)\n"
+                  "class Methods:\n    def m(self):\n        return 1\n"))
+      (is (= "3 @dataclass(slots=True)\n7 @dataclass(slots=True)"
              (ran s
-                  (str "from dataclasses import dataclass\n" "@dataclass(slots=True)\n"
-                       "class Slotted:\n    x: int = 0\n\n"
-                       "print(inspect.getsource(Slotted).splitlines()[0])\n")))))))
+                  (str "pad = [\n    1,\n    2,\n    3,\n    4,\n    5,\n]\n"
+                       ;; Line 8, after the class line 7: only its name tells it apart.
+                       "def stray(self):\n    return 2\n\n"
+                       "Methods.stray = stray\n" "for c in (Slotted, Methods):\n"
+                       "    lines, n = inspect.getsourcelines(c)\n"
+                       "    print(n, lines[0].strip())\n")))))
+    (testing "a session class without a known block is not called built-in"
+      (is (= "OSError source code not available\nTypeError <class 'dict'> is a built-in class"
+             (ran s
+                  (str "for c in (type('Made', (), {}), dict):\n"
+                       "    try:\n" "        inspect.getsource(c)\n"
+                       "    except Exception as e:\n" "        print(type(e).__name__, e)\n")))))))
 
 (harness/defbuilt-test
   live-source-eviction-test
