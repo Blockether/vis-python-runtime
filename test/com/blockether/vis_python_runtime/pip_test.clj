@@ -219,6 +219,64 @@
                                           "]\n" "sys.modules.pop('vis_site_a', None)\n"))))))))
 
 (harness/defbuilt-test
+  site-at-position-test
+  ;; Blockether/vis#226: site appends .pth path lines behind every other site, so an
+  ;; extension imported a shared copy of its own editable project. `at` places the
+  ;; site and its path lines where the host asks, on every call.
+  (with-editable-site
+    (fn [session packages source]
+      (let [root
+            (.getParentFile ^java.io.File packages)
+
+            shared
+            (doto (io/file root "shared packages") .mkdirs)
+
+            shared-source
+            (doto (io/file root "shared source") .mkdirs)]
+
+        (spit (io/file shared "shared.pth") (str shared-source "\n"))
+        (spit (io/file shared-source "vis_order_probe.py") "VALUE = 1\n")
+        (spit (io/file source "vis_order_probe.py") "VALUE = 226\n")
+        (runtime/install-runtime! session)
+        (try (runtime/exec! session
+                            (str "import sys, package_paths\n"
+                                 "package_paths.refresh("
+                                 (pr-str (str shared))
+                                 ")\n"))
+             ;; The project site gets its .pth after the shared site, as in the report.
+             (spit (io/file packages "project.pth") (str source "\n"))
+             (runtime/exec! session
+                            (str "package_paths.refresh(" (pr-str (str packages))
+                                 ", at=0)\n" "first = list(sys.path)\n"
+                                 "package_paths.refresh(" (pr-str (str packages))
+                                 ", at=0)\n" "import vis_order_probe\n"))
+             (is (= "226" (runtime/eval-str session "str(vis_order_probe.VALUE)"))
+                 "The site placed first wins over a site that was added before it")
+             (is (= "True" (runtime/eval-str session "str(first == sys.path)"))
+                 "A repeated call leaves sys.path unchanged")
+             (runtime/exec! session
+                            (str "package_paths.refresh("
+                                 (pr-str (str shared))
+                                 ", at=0)\n"
+                                 "package_paths.refresh("
+                                 (pr-str (str packages))
+                                 ", at=0)\n"))
+             (is (= [(str packages) (str source)]
+                    [(runtime/eval-str session "sys.path[0]")
+                     (runtime/eval-str session "sys.path[1]")])
+                 "An unchanged site moves back to the position of a later call")
+             (finally (io/delete-file (io/file shared "shared.pth"))
+                      (runtime/exec! session
+                                     (str "package_paths.refresh("
+                                          (pr-str (str shared))
+                                          ", reload=True)\n"
+                                          "sys.path[:] = [p for p in sys.path if p not in ("
+                                          (pr-str (str shared))
+                                          ", " (pr-str (str shared-source))
+                                          ")]\n"
+                                          "sys.modules.pop('vis_order_probe', None)\n"))))))))
+
+(harness/defbuilt-test
   editable-pth-is-importable-test
   ;; Blockether/vis#175: a site path alone does not activate an editable install.
   (with-editable-site

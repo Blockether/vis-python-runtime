@@ -65,13 +65,36 @@ class _EditableFinder:
 _finder = _EditableFinder()
 
 
-def refresh(packages, *, reload=False):
+def _path_lines(packages, names):
+    """The existing directories that the .pth files of `packages` add, in site order."""
+    lines = []
+    for name in names:
+        if not name.endswith(".pth"):
+            continue
+        try:
+            text = (packages / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in text.splitlines():
+            line = line.rstrip()
+            if not line or line.startswith(("#", "import ", "import\t")):
+                continue
+            path = os.path.abspath(os.path.join(packages, line))
+            if os.path.exists(path) and path not in lines:
+                lines.append(path)
+    return lines
+
+
+def refresh(packages, *, reload=False, at=None):
     """Process package-site changes; on explicit reload discard this site's editable caches.
 
     Call only after the host has applied the session policy. .pth paths are import
     locations, never additional filesystem grants. Standard site semantics also
     support editable backends that install import hooks instead of path lines.
     One process can hold several sites, so a reload never evicts another site's modules.
+
+    site appends .pth path lines behind all other entries. With `at`, every call puts
+    the site and its path lines at `sys.path[at:]`, so that site wins over the others.
     """
     if packages is None:
         return
@@ -128,6 +151,12 @@ def refresh(packages, *, reload=False):
         _sites[packages] = (stamp, added, roots)
         _roots.clear()
         _roots.update(root for _, _, roots in _sites.values() for root in roots)
+        importlib.invalidate_caches()
+    if at is not None:
+        site_paths = [os.path.abspath(packages)]
+        site_paths += [p for p in _path_lines(packages, names) if p not in site_paths]
+        sys.path[:] = [p for p in sys.path if p not in site_paths]
+        sys.path[at:at] = site_paths
         importlib.invalidate_caches()
     if _roots and _finder not in sys.meta_path:
         sys.meta_path.insert(0, _finder)
