@@ -94,7 +94,8 @@ def refresh(packages, *, reload=False, at=None):
     One process can hold several sites, so a reload never evicts another site's modules.
 
     site appends .pth path lines behind all other entries. With `at`, every call puts
-    the site and its path lines at `sys.path[at:]`, so that site wins over the others.
+    the site and its path lines at `sys.path[at:]`, and the import hooks of its .pth
+    files before PathFinder, so that site wins over the others.
     """
     if packages is None:
         return
@@ -157,6 +158,16 @@ def refresh(packages, *, reload=False, at=None):
         site_paths += [p for p in _path_lines(packages, names) if p not in site_paths]
         sys.path[:] = [p for p in sys.path if p not in site_paths]
         sys.path[at:at] = site_paths
+        # An editable import hook (setuptools, editables) appends its finder after
+        # PathFinder, so a copy on sys.path would win. Put the site's finders before it.
+        hooks = [f for f in _sites[packages][1][1] if f in sys.meta_path]
+        if hooks:
+            rest = [f for f in sys.meta_path if f not in hooks]
+            spot = next(
+                (i for i, f in enumerate(rest) if f is importlib.machinery.PathFinder),
+                len(rest),
+            )
+            sys.meta_path[:] = rest[:spot] + hooks + rest[spot:]
         importlib.invalidate_caches()
     if _roots and _finder not in sys.meta_path:
         sys.meta_path.insert(0, _finder)

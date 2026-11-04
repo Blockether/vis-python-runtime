@@ -277,6 +277,67 @@
                                           "sys.modules.pop('vis_order_probe', None)\n"))))))))
 
 (harness/defbuilt-test
+  site-hook-at-position-test
+  ;; Blockether/vis#226 with an import hook: setuptools writes
+  ;; `import __editable___..._finder; ...install()` for a remapped package, and that
+  ;; finder goes after PathFinder, so a shared copy on sys.path won.
+  (with-editable-site
+    (fn [session packages source]
+      (let [root
+            (.getParentFile ^java.io.File packages)
+
+            shared
+            (doto (io/file root "shared packages") .mkdirs)
+
+            shared-source
+            (doto (io/file root "shared source") .mkdirs)]
+
+        (spit (io/file shared "shared.pth") (str shared-source "\n"))
+        (spit (io/file shared-source "vis_hook_probe.py") "VALUE = 1\n")
+        (spit (io/file source "vis_hook_probe.py") "VALUE = 226\n")
+        (spit (io/file packages "vis_hook_finder.py")
+              (str "import importlib.util, sys\n"
+                   "PATH = "
+                   (pr-str (str (io/file source "vis_hook_probe.py")))
+                   "\n"
+                   "class Finder:\n" "    @classmethod\n"
+                   "    def find_spec(cls, name, path=None, target=None):\n"
+                   "        if name == 'vis_hook_probe':\n"
+                   "            return importlib.util.spec_from_file_location(name, PATH)\n"
+                   "def install():\n"
+                   "    if Finder not in sys.meta_path:\n"
+                   "        sys.meta_path.append(Finder)\n"))
+        (runtime/install-runtime! session)
+        (try (runtime/exec! session
+                            (str "import sys, package_paths\n"
+                                 "package_paths.refresh("
+                                 (pr-str (str shared))
+                                 ")\n"))
+             (spit (io/file packages "hook.pth")
+                   "import vis_hook_finder; vis_hook_finder.install()\n")
+             (runtime/exec! session
+                            (str "package_paths.refresh(" (pr-str (str packages))
+                                 ", at=0)\n" "import vis_hook_probe\n"))
+             (is (= "226" (runtime/eval-str session "str(vis_hook_probe.VALUE)"))
+                 "The import hook of the site placed first wins over a shared copy")
+             (finally (io/delete-file (io/file shared "shared.pth"))
+                      (io/delete-file (io/file packages "hook.pth"))
+                      (runtime/exec! session
+                                     (str "package_paths.refresh("
+                                          (pr-str (str shared))
+                                          ", reload=True)\n"
+                                          "package_paths.refresh("
+                                          (pr-str (str packages))
+                                          ", reload=True)\n"
+                                          "sys.path[:] = [p for p in sys.path if p not in ("
+                                          (pr-str (str shared))
+                                          ", "
+                                          (pr-str (str shared-source))
+                                          ")]\n"
+                                          "sys.modules.pop('vis_hook_probe', None)\n"
+                                          "sys.modules.pop('vis_hook_finder', None)\n"))))))))
+
+(harness/defbuilt-test
   editable-pth-is-importable-test
   ;; Blockether/vis#175: a site path alone does not activate an editable install.
   (with-editable-site
