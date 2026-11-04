@@ -138,6 +138,70 @@ __vis_builtins__.open = __vis_open__
 __vis_io__.open = __vis_open__
 
 
+# ── the FILE of a class that a block defines. `inspect.getfile` finds a class's file
+# through `sys.modules[cls.__module__].__file__`, and the session module has none: a
+# block is not a module, and each block compiles under its own `<prog:N>`, so one
+# module file cannot name them all. `inspect.getsource(cls)` therefore raised
+# "is a built-in class" while the methods of that class read back (Blockether/vis#437).
+# The block is known exactly when the class is BUILT: its body is a code object
+# compiled under that block's name. So `__build_class__` records it, weakly, and
+# `inspect.getfile` answers it when its own lookup fails; `__firstlineno__` gives
+# the line. Each wrapper carries the original and the record map, so a reinstall
+# wraps the same originals and keeps every record.
+def __vis_install_class_files__():
+    import functools
+    import inspect
+
+    current = __vis_builtins__.__build_class__
+    real_build = getattr(current, "__vis_real__", current)
+    real_getfile = getattr(inspect.getfile, "__vis_real__", inspect.getfile)
+    files = getattr(current, "__vis_files__", None)
+    if files is None:
+        files = __vis_weakref__.WeakKeyDictionary()
+
+    # Closures, not globals: this runs for EVERY class statement in the process,
+    # imports included, and a block can clear its own globals.
+    def build_class(func, name, /, *bases, **kwds):
+        cls = real_build(func, name, *bases, **kwds)
+        try:
+            f = func.__code__.co_filename
+            if f == "<prog>" or (f[:6] == "<prog:" and f[-1:] == ">"):
+                files[cls] = f
+        except Exception:
+            pass  # a metaclass can return an object that has no weak reference
+        return cls
+
+    @functools.wraps(real_getfile)
+    def getfile(obj):
+        try:
+            return real_getfile(obj)
+        except (TypeError, OSError):
+            try:
+                f = files.get(obj)
+                if f is None and isinstance(obj, type):
+                    # A decorator that REBUILDS the class, like `@dataclass(slots=True)`,
+                    # returns a class that `build_class` never saw. Its annotations
+                    # function was compiled in the class body, so it names the block.
+                    code = getattr(vars(obj).get("__annotate_func__"), "__code__", None)
+                    g = getattr(code, "co_filename", "")
+                    if g == "<prog>" or (g[:6] == "<prog:" and g[-1:] == ">"):
+                        f = g
+            except Exception:
+                f = None
+            if f is None:
+                raise
+            return f
+
+    build_class.__vis_real__ = real_build
+    build_class.__vis_files__ = files
+    getfile.__vis_real__ = real_getfile
+    __vis_builtins__.__build_class__ = build_class
+    inspect.getfile = getfile
+
+
+__vis_install_class_files__()
+
+
 def __vis_count_forms__(src):
     # What the DRIVER would run, not what was typed: the sandbox rewrites the
     # protected imports away, so a block whose only statement is `from asyncio

@@ -199,6 +199,16 @@
       (is (= "Point(x=1, y=2) 7 3" stdout)))))
 
 (harness/defbuilt-test
+  session-defs-restored-class-source-test
+  ;; Blockether/vis#437: a restored class must read back like a local one, through
+  ;; the block source that the restore registered.
+  (let [{:keys [stdout]} (across-processes
+                           "class Node:\n    def __init__(self, v):\n        self.v = v\n"
+                           "import inspect\nprint(inspect.getsource(Node).splitlines()[0])\n")]
+    (testing "a restored class reads back through the block source of the restore"
+      (is (= "class Node:" stdout)))))
+
+(harness/defbuilt-test
   session-defs-skips-a-value-too-big-to-store-test
   ;; The snapshot used to `repr` every global BEFORE checking its size, so one
   ;; multi-megabyte string cost ~130ms per block to render text the cap then threw

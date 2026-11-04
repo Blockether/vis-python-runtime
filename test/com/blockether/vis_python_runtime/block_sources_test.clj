@@ -78,6 +78,36 @@
                        " and source_probe.__code__.co_filename in __vis_block_names__)")))))))
 
 (harness/defbuilt-test
+  block-class-source-test
+  ;; Regression Blockether/vis#437: `inspect.getsource` raised "is a built-in class"
+  ;; for a class that a block defined. `inspect` finds a class's file through its
+  ;; module, and the session module has no file.
+  (let [s (harness/block-session)]
+    (testing "getsource reads back a class in its own block and in a later block"
+      (is (= "class SourceProbe:\n    def method(self):\n        return 1"
+             (ran s
+                  (str "import inspect\n"
+                       "class SourceProbe:\n" "    def method(self):\n"
+                       "        return 1\n\n" "print(inspect.getsource(SourceProbe).strip())\n"))))
+      (is (str/starts-with? (ran s "print(inspect.getsource(SourceProbe))") "class SourceProbe:")))
+    (testing "a class keeps its own block after a later block redefines its name"
+      ;; One file for all classes of a name would read the NEWER body for the
+      ;; older class: wrong source, silently.
+      (block s "class Redefined:\n    v = 1\n\nold = Redefined\n")
+      (is (= "v = 1\nv = 2"
+             (ran s
+                  (str "class Redefined:\n    v = 2\n\n"
+                       "print(inspect.getsource(old).splitlines()[1].strip())\n"
+                       "print(inspect.getsource(Redefined).splitlines()[1].strip())\n")))))
+    (testing "a class that a decorator rebuilds reads back through its annotations"
+      ;; `@dataclass(slots=True)` returns a new class, built by `type(...)`.
+      (is (= "@dataclass(slots=True)"
+             (ran s
+                  (str "from dataclasses import dataclass\n" "@dataclass(slots=True)\n"
+                       "class Slotted:\n    x: int = 0\n\n"
+                       "print(inspect.getsource(Slotted).splitlines()[0])\n")))))))
+
+(harness/defbuilt-test
   live-source-eviction-test
   (testing "the source of an old block that still backs a live definition survives"
     (let [s (narrow-session)]
