@@ -212,6 +212,38 @@
       (is (str/includes? (said "MISS") "Methods: logs(offset, lines), wait(secs)")))))
 
 (harness/defbuilt-test
+  shell-drive-refreshes-held-handle-test
+  ;; User report: `sh.wait(10)` without an assignment left `sh` at `running` with an
+  ;; empty `out` after the process had ended, so finished tests read as still running.
+  (let [stage
+        (fn [op status out]
+          (fn [_]
+            (array-map "op" op "id" "sh-1" "stage" status "status" status "out" out)))
+
+        session
+        (harness/tool-session {"shell_result" (stage "shell" "running" "")
+                               "_shell_wait" (stage "_shell_wait" "exited" "done")
+                               "_shell_logs" (stage "_shell_logs" "exited" "log")
+                               "_shell_stop" (stage "_shell_stop" "stopped" "")})
+
+        said
+        (->> (ran session
+                  (str "h = await shell_result()\n"
+                       "r = h.wait(5)\n" "print('WAIT', r is h, h.status, h.out)\n"
+                       "page = h.logs(0, lines=1)\n"
+                       "print('LOGS', page is h, page.out, h.status, h.out)\n"
+                       "h.stop()\n" "print('STOP', h.status, sorted(dict(h)) == sorted(dict(r)))"))
+             str/split-lines
+             (map #(str/split % #" " 2))
+             (into {}))]
+
+    (testing "a wait writes its answer into the handle that the caller holds"
+      (is (= "True exited done" (said "WAIT"))))
+    (testing "a log page is its own object and leaves the handle as it was"
+      (is (= "False log exited done" (said "LOGS"))))
+    (testing "a stop refreshes the same handle again" (is (= "stopped True" (said "STOP"))))))
+
+(harness/defbuilt-test
   non-string-op-key-rebuilds-test
   ;; Session report 5f6d6c9e-12e1-47be-bf40-dec47985df30: an MCP tool echoed the
   ;; server's JSON Schema, where `properties.op` is a MAP, and every such result

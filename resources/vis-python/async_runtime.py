@@ -870,14 +870,27 @@ class __VisShell__(__VisResult__):
                 break
             __vis_page__ = next(__vis_page__, None)
 
+    def __vis_drive__(self, __vis_name__, __vis_args__):
+        # A stage that DRIVES the process (`wait`, `type`, `stop`) writes its answer
+        # into THIS handle and returns it: `sh.wait(30)` without an assignment leaves
+        # `sh` current, so no stale handle reads `running` after the process ended.
+        # A log page stays its own object, because paging needs one object per page.
+        __vis_answer__ = self.__vis_op__(__vis_name__, __vis_args__)
+        if not isinstance(__vis_answer__, __VisShell__):
+            return __vis_answer__
+        dict.clear(self)
+        dict.update(self, __vis_answer__)
+        self.__dict__.pop("__vis_logs_spec__", None)
+        return self
+
     def type(self, text, is_enter=True):
-        return self.__vis_op__(
+        return self.__vis_drive__(
             "_shell_type",
             {"id": self["id"], "text": str(text), "is_enter": bool(is_enter)},
         )
 
     def stop(self):
-        return self.__vis_op__("_shell_stop", {"id": self["id"]})
+        return self.__vis_drive__("_shell_stop", {"id": self["id"]})
 
     def wait(self, seconds=120, **aliases):
         # ONE wait, and it does NOT live here: the bounded poll loop is host code
@@ -894,7 +907,7 @@ class __VisShell__(__VisResult__):
                 "wait: no keyword '%s'. Keywords: seconds (secs/timeout mean it)."
                 % sorted(aliases)[0]
             )
-        return self.__vis_op__(
+        return self.__vis_drive__(
             "_shell_wait", {"id": self["id"], "seconds": int(seconds)}
         )
 
