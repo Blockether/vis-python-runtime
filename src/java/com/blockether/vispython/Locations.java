@@ -9,7 +9,7 @@ import java.util.Set;
 /**
  * Every directory this runtime decides for itself, in one place.
  *
- * <p>Two of them are per-machine STATE under {@code ~/.vis/python}: what pip
+ * <p>Two of them are per-machine STATE under {@code <vis home>/python}: what pip
  * installed and what CPython compiled. Both are caches in the sense that
  * matters - deleting the tree costs a download and a recompile, never data -
  * and neither belongs inside a shipped, hashed installation. The rest name the
@@ -23,6 +23,8 @@ public final class Locations {
   public static final String PYTHON_HOME_ENV = "VIS_PYTHON_HOME";
   public static final String PACKAGES_ENV = "VIS_PYTHON_PACKAGES";
   public static final String PYCACHE_PREFIX_ENV = "VIS_PYTHON_PYCACHE_PREFIX";
+  public static final String HOME_PROPERTY = "vis.home";
+  public static final String HOME_ENV = "VIS_HOME";
 
   private Locations() {}
 
@@ -31,12 +33,35 @@ public final class Locations {
     return value == null || value.isBlank() ? null : value.trim();
   }
 
-  private static String statePath(String... parts) {
+  /**
+   * The Vis state directory: the {@code vis.home} property, then {@code VIS_HOME},
+   * then {@code ~/.vis}. A leading {@code ~} or a relative value resolves to an
+   * absolute path. Vis resolves its own state with the same rule, so a Vis with
+   * its own home keeps this runtime's state there too. Null without a home.
+   */
+  public static String visHome() {
+    String setting = System.getProperty(HOME_PROPERTY);
+    if (setting == null || setting.isBlank()) {
+      setting = env(HOME_ENV);
+    }
+    if (setting != null && !setting.isBlank()) {
+      return Path.of(JailPolicy.expandHome(setting.trim())).toAbsolutePath().toString();
+    }
     String home = System.getProperty("user.home");
-    if (home == null || home.isBlank()) {
+    return home == null || home.isBlank() ? null : Path.of(home, ".vis").toAbsolutePath().toString();
+  }
+
+  /** The root of this runtime's per-machine state, {@code <vis home>/python}, or null. */
+  public static String stateRoot() {
+    return statePath();
+  }
+
+  private static String statePath(String... parts) {
+    String home = visHome();
+    if (home == null) {
       return null;
     }
-    Path path = Path.of(home, ".vis", "python");
+    Path path = Path.of(home, "python");
     for (String part : parts) {
       path = path.resolve(part);
     }
