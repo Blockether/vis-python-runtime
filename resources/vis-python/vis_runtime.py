@@ -854,6 +854,27 @@ def _json_default(value):
     return str(value)
 
 
+def _record_json_default(plain):
+    """`JSONEncoder.default` that also writes a result record as its fields.
+
+    `json.dumps(r)` refused a record a tool answered (Blockether/vis#462). The
+    encoder asks `default` again for each field value, so a record inside a
+    record is written too. A caller's own `default=` replaces this method and
+    gets the record, as `_tool_arg` does.
+    """
+
+    def default(self, value):
+        fields = getattr(type(value), "__vis_record_fields__", None)
+        if fields is None:
+            return plain(self, value)
+        return {name: getattr(value, name) for name in fields}
+
+    return default
+
+
+json.JSONEncoder.default = _record_json_default(json.JSONEncoder.default)
+
+
 def to_json(value):
     """Render a Python value as JSON — the one data wire back to the host.
 

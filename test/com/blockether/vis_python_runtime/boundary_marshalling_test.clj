@@ -80,6 +80,24 @@
                        "again = pickle.loads(pickle.dumps(job))\n"
                        "assert dict(again) == {'number': 42} and again.keys() == ('number',)\n"
                        "print('records unpack')")))))
+    ;; Regression Blockether/vis#462: a record answers the mapping methods and JSON.
+    (testing "mapping methods and json.dumps read the record fields"
+      (is (= "records serialize"
+             (ran session
+                  (str "import json\n"
+                       "assert job.get('number') == 42 and job.get('missing') is None\n"
+                       "assert job.get('missing', 7) == 7\n"
+                       "assert job.items() == (('number', 42),) and job.values() == (42,)\n"
+                       "assert json.loads(json.dumps(job)) == {'number': 42}\n"
+                       "rows = json.dumps({'rows': [job]}, indent=1)\n"
+                       "assert json.loads(rows) == {'rows': [{'number': 42}]}\n"
+                       "assert json.loads(json.dumps(item))['items'] == [{'number': 42}]\n"
+                       "assert json.loads(json.dumps(await ledger.empty())) == {}\n"
+                       "assert json.loads(json.dumps(job, default=dict)) == {'number': 42}\n"
+                       "assert item.items == [job] and item.get is None\n"
+                       "try:\n    json.dumps(object())\n" "except TypeError:\n    pass\n"
+                       "else:\n    raise AssertionError('an unknown object serialized')\n"
+                       "print('records serialize')")))))
     (testing "unknown names report available fields, never expose class attributes"
       (is
         (=
@@ -189,6 +207,14 @@
                    "empty = await ledger.pages(True)\n"
                    "assert not empty and len(empty) == 0 and list(empty) == []\n"
                    "print('sequence behavior verified')"))))
+    ;; Regression Blockether/vis#462: a sequence record still reads and serializes by field.
+    (is (= "sequence record serializes"
+           (ran session
+                (str "assert r.get('total') == 20 and r.values() == (r.results, 20)\n"
+                     "assert r.items() == (('results', r.results), ('total', 20))\n"
+                     "pages = [{'title': 'First'}] * 2\n"
+                     "assert json.loads(json.dumps(r)) == {'results': pages, 'total': 20}\n"
+                     "print('sequence record serializes')"))))
     (is (= "plain record stays field-only"
            (ran session
                 (str

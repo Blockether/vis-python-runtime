@@ -1194,15 +1194,35 @@ def __vis_record__(
         "__getattr__": __vis_getattr__,
         "__iter__": None,
         "__reduce__": __vis_reduce__,
+        # Marks the class as a record: `json.dumps` writes these fields.
+        "__vis_record_fields__": __vis_fields__,
     }
-    if "keys" not in __vis_fields__:
-        # `keys()` with `__getitem__` lets `dict(r)` and `{**r}` read the fields.
-        # They prefer `keys()` to `__iter__`, so a sequence record still works.
-        # A field named `keys` wins, so its value stays readable.
-        def __vis_keys__(self):
-            return __vis_fields__
 
-        __vis_namespace__["keys"] = __vis_keys__
+    # `keys()` with `__getitem__` lets `dict(r)` and `{**r}` read the fields.
+    # They prefer `keys()` to `__iter__`, so a sequence record still works.
+    # `get`, `items` and `values` read the fields as a dict does
+    # (Blockether/vis#462). A field of the same name wins, so its value stays
+    # readable.
+    def __vis_keys__(self):
+        return __vis_fields__
+
+    def __vis_get__(self, key, default=None):
+        return getattr(self, key) if key in __vis_fields__ else default
+
+    def __vis_items__(self):
+        return tuple((__k__, getattr(self, __k__)) for __k__ in __vis_fields__)
+
+    def __vis_values__(self):
+        return tuple(getattr(self, __k__) for __k__ in __vis_fields__)
+
+    for __vis_method_name__, __vis_method__ in (
+        ("keys", __vis_keys__),
+        ("get", __vis_get__),
+        ("items", __vis_items__),
+        ("values", __vis_values__),
+    ):
+        if __vis_method_name__ not in __vis_fields__:
+            __vis_namespace__[__vis_method_name__] = __vis_method__
     if __vis_sequence_field__ is not None:
 
         def __vis_iter__(self):
