@@ -145,24 +145,42 @@
                      "    try:\n        item[key]\n"
                      "    except TypeError as exc:\n        assert 'string' in str(exc)\n"
                      "    else:\n        raise AssertionError('non-string field accepted')\n"
-                     "try:\n    item['state'] = 'changed'\n"
-                     "except TypeError:\n    pass\n"
+                     "try:\n    item['state'] = 'changed'\n" "except TypeError:\n    pass\n"
                      "else:\n    raise AssertionError('mutable subscription')\n"
-                     "try:\n    item['items'][0].number = 99\n" "except AttributeError:\n    pass\n"
-                     "else:\n    raise AssertionError('mutable nested record')\n"
-                     "try:\n    del item.state\n"
+                     "try:\n    item['items'][0].number = 99\n"
                      "except AttributeError:\n    pass\n"
+                     "else:\n    raise AssertionError('mutable nested record')\n"
+                     "try:\n    del item.state\n" "except AttributeError:\n    pass\n"
                      "else:\n    raise AssertionError('field deleted')\n"
                      "for change in (lambda: item.update(state='x'), lambda: item.pop('state'),\n"
                      "               lambda: item.popitem(), lambda: item.clear(),\n"
                      "               lambda: item.setdefault('new', 1),\n"
                      "               lambda: item.__delitem__('state'),\n"
-                     "               lambda: item.__ior__({'state': 'x'})):\n"
+                     "               lambda: item.__ior__({'state': 'x'}),\n"
+                     "               lambda: item.__init__({'state': 'x'})):\n"
                      "    try:\n        change()\n"
                      "    except TypeError as exc:\n        assert 'read-only' in str(exc)\n"
                      "    else:\n        raise AssertionError('record changed')\n"
                      "assert item['state'] == 'ready' and item['items'][0]['number'] == 42\n"
-                     "print('records frozen')")))))))
+                     "print('records frozen')")))))
+    (testing "a record lists its fields, copies by value and builds again from its class"
+      (is (= "records copy"
+             (ran session
+                  (str "import copy\n"
+                       "assert {'state', 'items', 'keys'} <= set(dir(item))\n"
+                       "twin = copy.copy(item)\n"
+                       "assert type(twin) is type(item) and twin == item and twin is not item\n"
+                       "made = type(item)({'state': 'x'})\n"
+                       "assert str(made) == \"BuildStatus(state='x')\" and made.state == 'x'\n"
+                       "print('records copy')")))))
+    (testing "a cyclic argument is refused by name, not by the recursion limit"
+      (is (= "cycle refused"
+             (ran session
+                  (str "loop = [item]\nloop.append(loop)\n"
+                       "try:\n    await ledger.status(loop)\n"
+                       "except ValueError as exc:\n    assert 'Circular' in str(exc)\n"
+                       "else:\n    raise AssertionError('cycle accepted')\n"
+                       "print('cycle refused')")))))))
 
 ;; Regression Blockether/vis#256: only an explicit public list field grants sequence behavior.
 (harness/defbuilt-test

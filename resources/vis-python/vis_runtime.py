@@ -733,24 +733,29 @@ def _tool_arg(value):
     return text if isinstance(text, str) else str(value)
 
 
-def _tool_records(value):
+def _tool_records(value, path=()):
     """`value` with each result record inside it in the shape of the wire.
 
     A record that a tool answered is a dict subclass. JSON writes it as a plain
     object and never asks `default`, so its class name would not cross. The class
     carries that name as `__vis_object__`; the record crosses as
     ``{"__vis_object__": name, "__vis_attrs__": fields}``, at any depth
-    (Blockether/vis#427).
+    (Blockether/vis#427). `path` holds the containers around `value`: one that
+    holds itself is refused with the text of `json`, which meets it only after
+    this walk.
     """
+    if not isinstance(value, (dict, list, tuple)):
+        return value
+    if any(value is held for held in path):
+        raise ValueError("Circular reference detected")
+    path = (*path, value)
     if isinstance(value, dict):
-        fields = {key: _tool_records(item) for key, item in value.items()}
+        fields = {key: _tool_records(item, path) for key, item in value.items()}
         name = getattr(type(value), "__vis_object__", None)
         if isinstance(name, str):
             return {"__vis_object__": name, "__vis_attrs__": fields}
         return fields
-    if isinstance(value, (list, tuple)):
-        return [_tool_records(item) for item in value]
-    return value
+    return [_tool_records(item, path) for item in value]
 
 
 def _host_tool(name, session=None):

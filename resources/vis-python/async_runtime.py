@@ -1159,6 +1159,21 @@ class __VisRecord__(dict):
     __vis_object__ = None
     __vis_sequence_field__ = None
 
+    def __init__(self, *__vis_args__, **__vis_kwargs__):
+        # A record takes its fields once. The text slot is unset only before
+        # that, so a second `__init__` is a write and gets the read-only refusal.
+        try:
+            object.__getattribute__(self, "__vis_text__")
+        except AttributeError:
+            dict.__init__(self, *__vis_args__, **__vis_kwargs__)
+            object.__setattr__(self, "__vis_text__", None)
+        else:
+            self.__vis_read_only__()
+
+    def __dir__(self):
+        # `dir(r)` is how a reader finds the fields.
+        return sorted({*dict.keys(self), *object.__dir__(self)})
+
     def __vis_missing_field__(self, __vis_name__):
         return (
             f"{type(self).__name__} has no field {__vis_name__!r}; "
