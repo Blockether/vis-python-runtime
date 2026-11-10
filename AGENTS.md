@@ -40,8 +40,9 @@ supplies session directories; the library adds interpreter and bytecode-cache ac
 confinement and thread accounting together; see `confinement_test.clj` and `threads_test.clj`.
 
 The wire dialect is JSON in both directions. The bridge transports it without a second encoding.
-Preserve the existing host-call and bootstrap contract with Vis' `packages/vis-agent/src/blockether/vis/__init__.py`;
-changes across that boundary need consumer-side verification, not duplicated runtime files in Vis.
+Preserve the existing host-call contract with Vis. The extension bootstrap is a Vis host shim
+(`resources/vis-host-python/extension_bootstrap.py` in Vis) and has no copy here. Changes across
+that boundary need consumer-side verification, not duplicated files in either repository.
 
 Diagnostics are recorded in a bounded C ring and pulled by the host, never pushed from workers.
 They are off until requested and contain host-chosen names/counts/durations, not guest payloads,

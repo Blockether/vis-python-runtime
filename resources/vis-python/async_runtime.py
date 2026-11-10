@@ -1097,7 +1097,7 @@ __vis_paged_tools__ = frozenset(("grep", "find_files", "find"))
 def __vis_typed_result__(__vis_d__):
     # Trusted extension objects live in another process. Rebuild only their
     # public data, never their methods, class imports or interpreter references.
-    if isinstance(__vis_d__, __VisDict__):
+    if isinstance(__vis_d__, (__VisDict__, __VisRecord__)):
         return __vis_d__
     if isinstance(__vis_d__.get("__vis_object__"), str) and isinstance(
         __vis_d__.get("__vis_attrs__"), dict
@@ -1144,109 +1144,141 @@ def __vis_typed_result__(__vis_d__):
     return __VisDict__(__vis_t__)
 
 
-def __vis_record__(
-    __vis_name__, __vis_attrs__, __vis_sequence_field__, __vis_text__=None
-):
-    # ONE record: a frozen dataclass with the typed public fields of one result.
-    # Its class is built for that result and is bound to no module name, so
-    # `pickle` cannot find the class again. A record pickles and copies BY VALUE,
-    # as a call to this function (Blockether/vis#317). `__vis_text__` is the
-    # `str` of the extension's model when its class defines its own `__str__`
-    # (Blockether/vis#367); methods never cross.
-    import dataclasses as __vis_dataclasses__
+class __VisRecord__(dict):
+    # ONE record: the typed public fields of one object that a tool answered. It
+    # IS a dict, so `json.dumps(r)`, `dict(r)`, `{**r}` and `isinstance(r, Mapping)`
+    # work with no hook (Blockether/vis#462), and each field also answers by
+    # attribute. Dict names keep their dict meaning: a field named `items` is
+    # `r["items"]`. A record is read-only. Its class has the name that the tool
+    # sent and no module binding, so it pickles and copies BY VALUE, as a call to
+    # `__vis_record__` (Blockether/vis#317). Methods never cross.
+    #
+    # `__vis_object__` on the class is the name on the wire. It marks a record for
+    # every encoder that sends one back across a boundary.
+    __slots__ = ("__vis_text__",)
+    __vis_object__ = None
+    __vis_sequence_field__ = None
 
-    __vis_fields__ = tuple(__vis_attrs__)
-
-    def __vis_missing_field__(self, name):
+    def __vis_missing_field__(self, __vis_name__):
         return (
-            f"{type(self).__name__} has no field {name!r}; "
-            f"available fields: {', '.join(__vis_fields__) or '(none)'}"
+            f"{type(self).__name__} has no field {__vis_name__!r}; "
+            f"available fields: {', '.join(map(str, dict.keys(self))) or '(none)'}"
         )
 
-    def __vis_getitem__(self, key):
-        if not isinstance(key, str):
-            if __vis_sequence_field__ is not None:
-                return getattr(self, __vis_sequence_field__)[key]
+    def __missing__(self, __vis_key__):
+        raise KeyError(self.__vis_missing_field__(__vis_key__))
+
+    def __getitem__(self, __vis_key__):
+        if not isinstance(__vis_key__, str):
             raise TypeError(f"{type(self).__name__} field name must be a string")
-        if key not in __vis_fields__:
-            raise KeyError(__vis_missing_field__(self, key))
-        return getattr(self, key)
+        return dict.__getitem__(self, __vis_key__)
 
-    def __vis_getattr__(self, name):
-        # Reached only after normal lookup fails: name the real fields, as
-        # `__getitem__` does, so a guessed attribute corrects itself.
-        raise AttributeError(__vis_missing_field__(self, name))
+    def __getattr__(self, __vis_name__):
+        # Reached only after normal lookup fails: answer the field, or name the
+        # real fields, so a guessed attribute corrects itself.
+        if dict.__contains__(self, __vis_name__):
+            return dict.__getitem__(self, __vis_name__)
+        raise AttributeError(self.__vis_missing_field__(__vis_name__))
 
-    def __vis_reduce__(self):
+    def __vis_read_only__(self, *__vis_args__, **__vis_kwargs__):
+        raise TypeError(
+            f"{type(self).__name__} is read-only; copy it with dict(r) to change it"
+        )
+
+    __setitem__ = __delitem__ = __ior__ = __vis_read_only__
+    update = pop = popitem = clear = setdefault = __vis_read_only__
+
+    def __setattr__(self, __vis_name__, __vis_value__):
+        raise AttributeError(
+            f"{type(self).__name__} is read-only; copy it with dict(r) to change it"
+        )
+
+    def __delattr__(self, __vis_name__):
+        self.__setattr__(__vis_name__, None)
+
+    def __repr__(self):
+        return (
+            type(self).__name__
+            + "("
+            + ", ".join(f"{__k__}={__v__!r}" for __k__, __v__ in dict.items(self))
+            + ")"
+        )
+
+    def __str__(self):
+        # The `str` of the extension's model, when its class defines its own
+        # `__str__` (Blockether/vis#367).
+        __vis_text__ = self.__vis_text__
+        return repr(self) if __vis_text__ is None else __vis_text__
+
+    def __reduce__(self):
         return (
             __vis_record__,
             (
-                __vis_name__,
-                {__k__: getattr(self, __k__) for __k__ in __vis_fields__},
-                __vis_sequence_field__,
-                __vis_text__,
+                type(self).__vis_object__,
+                dict(dict.items(self)),
+                type(self).__vis_sequence_field__,
+                self.__vis_text__,
             ),
         )
 
-    # Explicitly disable Python's integer-subscription iteration fallback.
-    __vis_namespace__ = {
-        "__getitem__": __vis_getitem__,
-        "__getattr__": __vis_getattr__,
-        "__iter__": None,
-        "__reduce__": __vis_reduce__,
-        # Marks the class as a record: `json.dumps` writes these fields.
-        "__vis_record_fields__": __vis_fields__,
-    }
 
-    # `keys()` with `__getitem__` lets `dict(r)` and `{**r}` read the fields.
-    # They prefer `keys()` to `__iter__`, so a sequence record still works.
-    # `get`, `items` and `values` read the fields as a dict does
-    # (Blockether/vis#462). A field of the same name wins, so its value stays
-    # readable.
-    def __vis_keys__(self):
-        return __vis_fields__
+class __VisSequenceRecord__(__VisRecord__):
+    # A record that declares one field as its rows: iteration, `len`, `in`, an
+    # integer index and a slice read that field (Blockether/vis#256). String keys
+    # and the dict methods still read the fields.
+    __slots__ = ()
 
-    def __vis_get__(self, key, default=None):
-        return getattr(self, key) if key in __vis_fields__ else default
+    def __vis_rows__(self):
+        return dict.__getitem__(self, type(self).__vis_sequence_field__)
 
-    def __vis_items__(self):
-        return tuple((__k__, getattr(self, __k__)) for __k__ in __vis_fields__)
+    def __getitem__(self, __vis_key__):
+        if not isinstance(__vis_key__, str):
+            return self.__vis_rows__()[__vis_key__]
+        return dict.__getitem__(self, __vis_key__)
 
-    def __vis_values__(self):
-        return tuple(getattr(self, __k__) for __k__ in __vis_fields__)
+    def __iter__(self):
+        return iter(self.__vis_rows__())
 
-    for __vis_method_name__, __vis_method__ in (
-        ("keys", __vis_keys__),
-        ("get", __vis_get__),
-        ("items", __vis_items__),
-        ("values", __vis_values__),
-    ):
-        if __vis_method_name__ not in __vis_fields__:
-            __vis_namespace__[__vis_method_name__] = __vis_method__
-    if __vis_sequence_field__ is not None:
+    def __reversed__(self):
+        return reversed(self.__vis_rows__())
 
-        def __vis_iter__(self):
-            return iter(getattr(self, __vis_sequence_field__))
+    def __len__(self):
+        return len(self.__vis_rows__())
 
-        def __vis_len__(self):
-            return len(getattr(self, __vis_sequence_field__))
+    def __contains__(self, __vis_value__):
+        return __vis_value__ in self.__vis_rows__()
 
-        __vis_namespace__.update(__iter__=__vis_iter__, __len__=__vis_len__)
-    if __vis_text__ is not None:
 
-        def __vis_str__(self):
-            return __vis_text__
+__vis_record_classes__ = {}
 
-        __vis_namespace__["__str__"] = __vis_str__
 
-    __vis_cls__ = __vis_dataclasses__.make_dataclass(
-        __vis_name__,
-        [(name, object) for name in __vis_attrs__],
-        namespace=__vis_namespace__,
-        frozen=True,
-        slots=True,
-    )
-    return __vis_cls__(**__vis_attrs__)
+def __vis_record__(
+    __vis_name__, __vis_attrs__, __vis_sequence_field__=None, __vis_text__=None
+):
+    # Build one record. One class serves every record of a name and sequence
+    # field; `setdefault` keeps one class when two threads build it at once.
+    __vis_shape__ = (__vis_name__, __vis_sequence_field__)
+    __vis_cls__ = __vis_record_classes__.get(__vis_shape__)
+    if __vis_cls__ is None:
+        __vis_cls__ = __vis_record_classes__.setdefault(
+            __vis_shape__,
+            type(
+                __vis_name__,
+                (
+                    __VisRecord__
+                    if __vis_sequence_field__ is None
+                    else __VisSequenceRecord__,
+                ),
+                {
+                    "__slots__": (),
+                    "__vis_object__": __vis_name__,
+                    "__vis_sequence_field__": __vis_sequence_field__,
+                },
+            ),
+        )
+    __vis_r__ = __vis_cls__(__vis_attrs__)
+    object.__setattr__(__vis_r__, "__vis_text__", __vis_text__)
+    return __vis_r__
 
 
 def __vis_typed_value__(__vis_v__):

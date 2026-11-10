@@ -56,48 +56,48 @@
     (testing "top-level and nested records keep field values and mapping-name collisions"
       (is (= "records readable"
              (ran session
-                  (str "import dataclasses\n"
-                       "item = await ledger.status('ready')\n"
+                  (str "import collections.abc\n" "item = await ledger.status('ready')\n"
                        "assert item['state'] == item.state == 'ready'\n"
-                       "assert item['items'] is item.items\n"
-                       "assert item['items'][0]['number'] == item.items[0].number == 42\n"
-                       "assert item['keys'] == item.keys == 'keys field'\n"
-                       "assert item['values'] == item.values == 'values field'\n"
-                       "assert item['get'] is item.get is None\n"
+                       "assert item['items'][0]['number'] == item['items'][0].number == 42\n"
+                       "assert item['keys'] == 'keys field' and item['values'] == 'values field'\n"
+                       "assert list(item.keys()) == ['state', 'items', 'keys', 'values', 'get']\n"
+                       "assert item['get'] is None and item.get('state') == 'ready'\n"
                        "again = await ledger.status('again')\n"
                        "assert again['state'] == 'again' and item['state'] == 'ready'\n"
-                       "assert dataclasses.is_dataclass(item)\n"
+                       "assert isinstance(item, collections.abc.Mapping)\n"
                        "assert not hasattr(item, '__dict__')\n" "print('records readable')")))))
-    ;; dict() and ** read the fields through keys(); a field named keys still wins.
+    ;; dict() and ** read the fields; a field named keys is read by key.
     (testing "dict and ** unpacking read the record fields"
       (is (= "records unpack"
              (ran session
                   (str "import pickle\n"
-                       "job = item.items[0]\n" "assert job.keys() == ('number',)\n"
+                       "job = item['items'][0]\n" "assert list(job.keys()) == ['number']\n"
                        "assert dict(job) == {'number': 42} and {**job} == {'number': 42}\n"
                        "assert dict(await ledger.empty()) == {}\n"
-                       "assert item.keys == 'keys field' and item['keys'] == 'keys field'\n"
+                       "assert item['keys'] == 'keys field'\n"
                        "again = pickle.loads(pickle.dumps(job))\n"
-                       "assert dict(again) == {'number': 42} and again.keys() == ('number',)\n"
+                       "assert again == job and type(again).__name__ == 'Job'\n"
                        "print('records unpack')")))))
     ;; Regression Blockether/vis#462: a record answers the mapping methods and JSON.
     (testing "mapping methods and json.dumps read the record fields"
-      (is (= "records serialize"
-             (ran session
-                  (str "import json\n"
-                       "assert job.get('number') == 42 and job.get('missing') is None\n"
-                       "assert job.get('missing', 7) == 7\n"
-                       "assert job.items() == (('number', 42),) and job.values() == (42,)\n"
-                       "assert json.loads(json.dumps(job)) == {'number': 42}\n"
-                       "rows = json.dumps({'rows': [job]}, indent=1)\n"
-                       "assert json.loads(rows) == {'rows': [{'number': 42}]}\n"
-                       "assert json.loads(json.dumps(item))['items'] == [{'number': 42}]\n"
-                       "assert json.loads(json.dumps(await ledger.empty())) == {}\n"
-                       "assert json.loads(json.dumps(job, default=dict)) == {'number': 42}\n"
-                       "assert item.items == [job] and item.get is None\n"
-                       "try:\n    json.dumps(object())\n" "except TypeError:\n    pass\n"
-                       "else:\n    raise AssertionError('an unknown object serialized')\n"
-                       "print('records serialize')")))))
+      (is
+        (= "records serialize"
+           (ran session
+                (str "import json\n"
+                     "assert job.get('number') == 42 and job.get('missing') is None\n"
+                     "assert job.get('missing', 7) == 7\n"
+                     "assert list(job.items()) == [('number', 42)] and list(job.values()) == [42]\n"
+                     "assert json.loads(json.dumps(job)) == {'number': 42}\n"
+                     "rows = json.dumps({'rows': [job]}, indent=1)\n"
+                     "assert json.loads(rows) == {'rows': [{'number': 42}]}\n"
+                     "assert json.loads(json.dumps(item))['items'] == [{'number': 42}]\n"
+                     "assert json.loads(json.dumps(await ledger.empty())) == {}\n"
+                     "assert json.loads(json.dumps(job, default=str)) == {'number': 42}\n"
+                     "assert json.JSONEncoder.default.__module__ == 'json.encoder'\n"
+                     "assert item['items'] == [job] and list(item) == list(item.keys())\n"
+                     "try:\n    json.dumps(object())\n" "except TypeError:\n    pass\n"
+                     "else:\n    raise AssertionError('an unknown object serialized')\n"
+                     "print('records serialize')")))))
     (testing "unknown names report available fields, never expose class attributes"
       (is
         (=
@@ -130,7 +130,7 @@
               "    else:\n        raise AssertionError('unknown attribute accepted')\n"
               "assert not hasattr(item, 'methods')\n"
               "assert getattr(item, 'methods', 'fallback') == 'fallback'\n"
-              "try:\n    item.items[0].missing\n"
+              "try:\n    item['items'][0].missing\n"
               "except AttributeError as exc:\n    assert 'Job has no field' in str(exc) and 'number' in str(exc)\n"
               "else:\n    raise AssertionError('nested record accepted an attribute')\n"
               "try:\n    empty.missing\n"
@@ -138,19 +138,31 @@
               "else:\n    raise AssertionError('empty record accepted an attribute')\n"
               "print('missing attributes explained')")))))
     (testing "non-string indices and both assignment forms remain unsupported"
-      (is (= "records frozen"
-             (ran session
-                  (str "for key in (0, -1, None, ['state'], slice(None)):\n"
-                       "    try:\n        item[key]\n"
-                       "    except TypeError as exc:\n        assert 'string' in str(exc)\n"
-                       "    else:\n        raise AssertionError('non-string field accepted')\n"
-                       "try:\n    item['state'] = 'changed'\n" "except TypeError:\n    pass\n"
-                       "else:\n    raise AssertionError('mutable subscription')\n"
-                       "try:\n    item.items[0].number = 99\n"
-                       "except dataclasses.FrozenInstanceError:\n    pass\n"
-                       "else:\n    raise AssertionError('mutable nested record')\n"
-                       "assert item['state'] == 'ready' and item['items'][0]['number'] == 42\n"
-                       "print('records frozen')")))))))
+      (is
+        (= "records frozen"
+           (ran session
+                (str "for key in (0, -1, None, ['state'], slice(None)):\n"
+                     "    try:\n        item[key]\n"
+                     "    except TypeError as exc:\n        assert 'string' in str(exc)\n"
+                     "    else:\n        raise AssertionError('non-string field accepted')\n"
+                     "try:\n    item['state'] = 'changed'\n"
+                     "except TypeError:\n    pass\n"
+                     "else:\n    raise AssertionError('mutable subscription')\n"
+                     "try:\n    item['items'][0].number = 99\n" "except AttributeError:\n    pass\n"
+                     "else:\n    raise AssertionError('mutable nested record')\n"
+                     "try:\n    del item.state\n"
+                     "except AttributeError:\n    pass\n"
+                     "else:\n    raise AssertionError('field deleted')\n"
+                     "for change in (lambda: item.update(state='x'), lambda: item.pop('state'),\n"
+                     "               lambda: item.popitem(), lambda: item.clear(),\n"
+                     "               lambda: item.setdefault('new', 1),\n"
+                     "               lambda: item.__delitem__('state'),\n"
+                     "               lambda: item.__ior__({'state': 'x'})):\n"
+                     "    try:\n        change()\n"
+                     "    except TypeError as exc:\n        assert 'read-only' in str(exc)\n"
+                     "    else:\n        raise AssertionError('record changed')\n"
+                     "assert item['state'] == 'ready' and item['items'][0]['number'] == 42\n"
+                     "print('records frozen')")))))))
 
 ;; Regression Blockether/vis#256: only an explicit public list field grants sequence behavior.
 (harness/defbuilt-test
@@ -179,7 +191,7 @@
     (is
       (= "sequence behavior verified"
          (ran session
-              (str "import dataclasses\n" "r = await ledger.pages(False)\n"
+              (str "r = await ledger.pages(False)\n"
                    "assert [p.title for p in r] == ['First', 'First']\n"
                    "assert len(r) == 2 and r.total == 20 and bool(r)\n"
                    "assert r[0] is r.results[0] and r[-1] is r.results[-1]\n"
@@ -188,7 +200,7 @@
                    "assert next(iter(r))['title'] == 'First'\n"
                    "assert dict(r) == {'results': r.results, 'total': 20} == {**r}\n"
                    "assert [p.title for p in list(r)] == ['First', 'First']\n"
-                   "assert dataclasses.is_dataclass(r[0])\n"
+                   "assert list(r.keys()) == ['results', 'total'] and r[0] in r\n"
                    "assert not hasattr(r, '__dict__') and not hasattr(r, 'append')\n"
                    "for key in (2, -3):\n" "    try:\n        r[key]\n"
                    "    except IndexError:\n        pass\n"
@@ -200,7 +212,7 @@
                    "except KeyError as exc:\n    assert 'available fields' in str(exc)\n"
                    "else:\n    raise AssertionError('unknown field accepted')\n"
                    "try:\n    r.results = []\n"
-                   "except dataclasses.FrozenInstanceError:\n    pass\n"
+                   "except AttributeError:\n    pass\n"
                    "else:\n    raise AssertionError('field assignment accepted')\n"
                    "try:\n    r[0] = None\n" "except TypeError:\n    pass\n"
                    "else:\n    raise AssertionError('item assignment accepted')\n"
@@ -210,25 +222,21 @@
     ;; Regression Blockether/vis#462: a sequence record still reads and serializes by field.
     (is (= "sequence record serializes"
            (ran session
-                (str "assert r.get('total') == 20 and r.values() == (r.results, 20)\n"
-                     "assert r.items() == (('results', r.results), ('total', 20))\n"
+                (str "assert r.get('total') == 20 and list(r.values()) == [r.results, 20]\n"
+                     "assert list(r.items()) == [('results', r.results), ('total', 20)]\n"
                      "pages = [{'title': 'First'}] * 2\n"
                      "assert json.loads(json.dumps(r)) == {'results': pages, 'total': 20}\n"
                      "print('sequence record serializes')"))))
-    (is (= "plain record stays field-only"
+    (is (= "plain record reads as a mapping"
            (ran session
-                (str
-                  "plain = await ledger.plain()\n"
-                  "assert plain['results'][0].title == 'First'\n"
-                  "assert dict(plain) == {'results': plain.results, 'total': 20}\n"
-                  "for operation in (lambda: iter(plain), lambda: len(plain), lambda: plain[0]):\n"
-                  "    try:\n        operation()\n"
-                  "    except TypeError:\n        pass\n"
-                  "    else:\n        raise AssertionError('implicit sequence behavior')\n"
-                  "try:\n    list(plain)\n"
-                  "except TypeError as exc:\n    assert 'not iterable' in str(exc)\n"
-                  "else:\n    raise AssertionError('legacy iteration fallback')\n"
-                  "print('plain record stays field-only')"))))
+                (str "plain = await ledger.plain()\n"
+                     "assert plain['results'][0].title == 'First'\n"
+                     "assert dict(plain) == {'results': plain.results, 'total': 20}\n"
+                     "assert list(plain) == ['results', 'total'] and len(plain) == 2\n"
+                     "try:\n    plain[0]\n"
+                     "except TypeError as exc:\n    assert 'string' in str(exc)\n"
+                     "else:\n    raise AssertionError('implicit sequence behavior')\n"
+                     "print('plain record reads as a mapping')"))))
     (is (= "invalid declarations refused"
            (ran session
                 (str
@@ -257,12 +265,12 @@
         (ran
           session
           (str
-            "import copy, dataclasses, pickle\n"
+            "import copy, pickle\n"
             "r = await ledger.status('STATUS: DEV04')\n"
             "assert str(r) == f'{r}' == 'STATUS: DEV04', str(r)\n"
             "assert repr(r) == \"Status(env='DEV04', phase=Phase(number=2))\", repr(r)\n"
             "assert str(r.phase) == repr(r.phase)\n"
-            "assert [f.name for f in dataclasses.fields(r)] == ['env', 'phase']\n"
+            "assert list(r) == ['env', 'phase']\n"
             "assert str(copy.deepcopy(r)) == str(pickle.loads(pickle.dumps(r))) == 'STATUS: DEV04'\n"
             "for text in (None, 7):\n" "    plain = await ledger.status(text)\n"
             "    assert str(plain) == repr(plain), str(plain)\n"

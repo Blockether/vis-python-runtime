@@ -683,9 +683,11 @@ def host_call(name, payload):
 def _tool_arg(value):
     """One argument JSON cannot carry, as data or text the host can use.
 
-    A record crosses as its DATA: a dataclass instance — one a tool answered or
-    one the model built — reaches the host as ``{"__vis_object__": name,
-    "__vis_attrs__": fields}``, the shape a tool answers a record in. Its fields
+    A record crosses as its DATA: a dataclass instance that the model built
+    reaches the host as ``{"__vis_object__": name, "__vis_attrs__": fields}``,
+    the shape a tool answers a record in. A record that a tool answered is a
+    dict, which JSON never asks about: `_tool_records` gives it the same shape
+    before the encoding. Its fields
     are the public, set ones, and the name is its class name. The host reads the
     fields as the record and keeps the name as a hint: a receiving extension
     picks the one of its declared record classes that the name selects
@@ -713,20 +715,42 @@ def _tool_arg(value):
         return {
             "__vis_object__": type(value).__name__,
             "__vis_attrs__": {
-                f.name: getattr(value, f.name)
+                f.name: _tool_records(getattr(value, f.name))
                 for f in dataclasses.fields(value)
                 if not f.name.startswith("_") and hasattr(value, f.name)
             },
         }
     if isinstance(value, types.SimpleNamespace):
         return {
-            name: item for name, item in vars(value).items() if not name.startswith("_")
+            name: _tool_records(item)
+            for name, item in vars(value).items()
+            if not name.startswith("_")
         }
     try:
         text = os.fspath(value)
     except Exception:
         return str(value)
     return text if isinstance(text, str) else str(value)
+
+
+def _tool_records(value):
+    """`value` with each result record inside it in the shape of the wire.
+
+    A record that a tool answered is a dict subclass. JSON writes it as a plain
+    object and never asks `default`, so its class name would not cross. The class
+    carries that name as `__vis_object__`; the record crosses as
+    ``{"__vis_object__": name, "__vis_attrs__": fields}``, at any depth
+    (Blockether/vis#427).
+    """
+    if isinstance(value, dict):
+        fields = {key: _tool_records(item) for key, item in value.items()}
+        name = getattr(type(value), "__vis_object__", None)
+        if isinstance(name, str):
+            return {"__vis_object__": name, "__vis_attrs__": fields}
+        return fields
+    if isinstance(value, (list, tuple)):
+        return [_tool_records(item) for item in value]
+    return value
 
 
 def _host_tool(name, session=None):
@@ -744,7 +768,11 @@ def _host_tool(name, session=None):
 
     def call(*args, **kwargs):
         payload = json.dumps(
-            {"session": session, "args": list(args), "kwargs": kwargs},
+            {
+                "session": session,
+                "args": _tool_records(args),
+                "kwargs": _tool_records(kwargs),
+            },
             default=_tool_arg,
         )
         reply = json.loads(host_call(name, payload))
@@ -852,27 +880,6 @@ def _json_default(value):
     if isinstance(value, bytes):
         return value.decode("utf-8", "replace")
     return str(value)
-
-
-def _record_json_default(plain):
-    """`JSONEncoder.default` that also writes a result record as its fields.
-
-    `json.dumps(r)` refused a record a tool answered (Blockether/vis#462). The
-    encoder asks `default` again for each field value, so a record inside a
-    record is written too. A caller's own `default=` replaces this method and
-    gets the record, as `_tool_arg` does.
-    """
-
-    def default(self, value):
-        fields = getattr(type(value), "__vis_record_fields__", None)
-        if fields is None:
-            return plain(self, value)
-        return {name: getattr(value, name) for name in fields}
-
-    return default
-
-
-json.JSONEncoder.default = _record_json_default(json.JSONEncoder.default)
 
 
 def to_json(value):

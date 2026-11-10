@@ -463,14 +463,12 @@
         stdout
         (ran fresh
              (str
-               "print(__vis_restore_report__['lost'])\n"
-               "import dataclasses\n" "issue = res.results[0]\n"
+               "print(__vis_restore_report__['lost'])\n" "issue = res.results[0]\n"
                "print(type(res).__name__, res.total, [i.number for i in res], res['query'])\n"
                "print(type(issue).__name__, issue.labels, issue.meta['state'])\n"
                "print(type(issue.meta) is __VisDict__, type(kept['rows']) is __VisResultList__)\n"
                "print(kept['all'][0] is kept['res'], kept['rows'][0]['number'])\n"
-               "try:\n    res.total = 2\n"
-               "except dataclasses.FrozenInstanceError:\n    print('frozen')\n"))]
+               "try:\n    res.total = 2\n" "except AttributeError:\n    print('frozen')\n"))]
 
     (testing "a record pickles and copies by value inside its session"
       (is (= "IssueSearch open 1" local)))

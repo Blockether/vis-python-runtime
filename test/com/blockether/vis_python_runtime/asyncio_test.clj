@@ -759,13 +759,13 @@ except ValueError as exc:
        (block
          session
          (str
-           "import dataclasses\n" "item = await ledger.status('ready')\n"
+           "item = await ledger.status('ready')\n"
            "again = await ledger.status('again')\n" "print(await ledger.echo('entry'))\n"
            "print(dir(ledger))\nprint(ledger.echo.__name__)\n"
            "print(type(item).__name__, item.state, type(item.child).__name__, item.child.number)\n"
-           "print(dataclasses.is_dataclass(item), hasattr(item, 'label'), item is again)\n"
+           "print(isinstance(item, dict), hasattr(item, 'label'), item is again)\n"
            "try:\n    item.state = 'changed'\n"
-           "except dataclasses.FrozenInstanceError:\n    print('frozen')\n"
+           "except AttributeError:\n    print('frozen')\n"
            "print([value.state for value in await gather(ledger.status('one'), ledger.status('two'))])"))]
 
       (is (nil? (:error answer)) (pr-str answer))
