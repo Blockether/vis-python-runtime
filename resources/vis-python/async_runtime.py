@@ -685,7 +685,16 @@ class __VisShell__(__VisResult__):
         )
     )
 
+    # The transports of a handle that does not live in `python_execution`: a
+    # function of the op name and its options. An extension worker sets it, because
+    # the module of an extension shares these globals and can hold its own
+    # `_shell_wait`. Without a route, the session names of the op list answer.
+    __vis_shell_route__ = None
+
     def __vis_op__(self, __vis_name__, __vis_args__):
+        __vis_route__ = type(self).__vis_shell_route__
+        if __vis_route__ is not None:
+            return __vis_settle__(__vis_route__(__vis_name__, __vis_args__))
         fn = globals().get(__vis_name__)
         if fn is None:
             # The host's ONE wording for a sandbox with no process surface

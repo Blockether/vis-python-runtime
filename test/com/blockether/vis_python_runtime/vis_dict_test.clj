@@ -244,6 +244,31 @@
     (testing "a stop refreshes the same handle again" (is (= "stopped True" (said "STOP"))))))
 
 (harness/defbuilt-test
+  shell-route-owns-the-transports-test
+  ;; An extension runs in the globals of the handle. Its own `_shell_wait` took the
+  ;; place of the transport, and `sh.wait` answered that function.
+  (let [stage
+        (fn [status out]
+          (fn [_]
+            (array-map "op" "_shell_wait" "id" "sh-1" "stage" status "status" status "out" out)))
+
+        session
+        (harness/tool-session
+          {"shell_result"
+           (fn [_]
+             (array-map "op" "shell" "id" "sh-1" "stage" "running" "status" "running" "out" ""))
+           "_shell_wait" (stage "exited" "session name")
+           "routed" (stage "exited" "route")})]
+
+    (testing "a handle with a route calls the route, not the session name"
+      (is (= "_shell_wait exited route"
+             (str/trim (ran session
+                            (str "h = await shell_result()\n" "seen = []\n"
+                                 "def route(name, spec):\n" "    seen.append(name)\n"
+                                 "    return routed(spec)\n" "type(h).__vis_shell_route__ = route\n"
+                                 "h.wait(5)\n" "print(seen[0], h.status, h.out)"))))))))
+
+(harness/defbuilt-test
   non-string-op-key-rebuilds-test
   ;; Session report 5f6d6c9e-12e1-47be-bf40-dec47985df30: an MCP tool echoed the
   ;; server's JSON Schema, where `properties.op` is a MAP, and every such result
