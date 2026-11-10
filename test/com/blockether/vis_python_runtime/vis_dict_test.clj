@@ -140,7 +140,9 @@
                                                   (array-map "op" "read_session"
                                                              "session_id" "s-1"
                                                              "transcript" {"turns" [{"index" 1}]}
-                                                             "items" "not the method"))})
+                                                             "items" "not the method"))
+                               "method_first" (fn [_]
+                                                (array-map "keys" ["a"] "exit" 0))})
 
         said
         (->> (ran session
@@ -152,6 +154,8 @@
                     "print('PRIVATE', hasattr(r, '_ipython_canary_method_should_not_exist_'),"
                     " hasattr(r, '__deepcopy__'))\n"
                     "try:\n    r.transcripts\nexcept AttributeError as e:\n    print('MISS', e)\n"
+                    "try:\n    (await method_first()).exits\n"
+                    "except AttributeError as e:\n    print('METHOD', e)\n"
                     "try:\n    r['transcript']['iterations']\n"
                     "except KeyError as e:\n    print('KEY', e)"))
              str/split-lines
@@ -167,8 +171,12 @@
       (is (= "False False" (said "PRIVATE"))))
     (testing "a field the result does NOT carry names the tool, its fields and the near miss"
       (is (str/includes? (said "MISS") "'transcripts' is not a field of 'read_session' result"))
-      (is (str/includes? (said "MISS")
-                         "Every field answers by key AND by attribute: r['op'] is r.op"))
+      (is
+        (str/includes?
+          (said "MISS")
+          "A field answers by key, and by attribute when no dict method has its name: r['op'] is r.op"))
+      (is (str/includes? (said "METHOD") ": r['exit'] is r.exit.")
+          "the example is a field that the dot reads, not a dict method such as `keys`")
       (is (str/includes? (said "MISS") "Keys: 'op', 'session_id', 'transcript', 'items'"))
       (is (str/includes? (said "MISS") "Did you mean 'transcript'?"))
       (is (not (str/includes? (said "MISS") "Methods:"))
@@ -207,7 +215,8 @@
       (is (= "True True" (said "MAP"))))
     (testing "a field the result does NOT carry names the ones it does, and the methods"
       (is (str/includes? (said "MISS") "'output' is not a field of this shell result"))
-      (is (str/includes? (said "MISS") "Keys: 'op', 'id', 'status', 'out', 'exit'"))
+      (is (str/includes? (said "MISS")
+                         ": r['exit'] is r.exit. Keys: 'op', 'id', 'status', 'out', 'exit'"))
       (is (str/includes? (said "MISS") "Did you mean 'out'?"))
       (is (str/includes? (said "MISS") "Methods: logs(offset, lines), wait(secs)")))))
 

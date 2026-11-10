@@ -531,9 +531,14 @@ def __vis_result_who__(__vis_d__):
 
 def __vis_dot_example__(__vis_keys__):
     # Show the key/attribute equivalence on a field this result ACTUALLY carries, so
-    # the example is checkable against the keys printed beside it.
+    # the example is checkable against the keys printed beside it. A field with the
+    # name of a dict method is not an example: its dot is the method.
     for __vis_k__ in __vis_keys__:
-        if isinstance(__vis_k__, str) and __vis_k__.isidentifier():
+        if (
+            isinstance(__vis_k__, str)
+            and __vis_k__.isidentifier()
+            and not hasattr(dict, __vis_k__)
+        ):
             return "r[" + repr(__vis_k__) + "] is r." + __vis_k__
     return "r[key] is r.key"
 
@@ -581,6 +586,9 @@ class __VisDict__(dict):
     # are per-tool by design; both halves end a wrong reach at the first guess
     # instead of costing a re-run.
     __vis_attr_methods__ = ""
+    # The field that the attribute hint shows first as its example, when the map
+    # holds it.
+    __vis_attr_example__ = None
 
     def __missing__(self, __vis_k__):
         raise KeyError(__vis_key_hint__(self, __vis_k__))
@@ -599,8 +607,15 @@ class __VisDict__(dict):
             repr(__vis_name__)
             + " is not a field of "
             + self.__vis_attr_subject__()
-            + ". Every field answers by key AND by attribute: "
-            + __vis_dot_example__(__vis_keys__)
+            + ". A field answers by key, and by attribute when no dict method has its name: "
+            + __vis_dot_example__(
+                [
+                    __vis_k__
+                    for __vis_k__ in __vis_keys__
+                    if __vis_k__ == self.__vis_attr_example__
+                ]
+                + __vis_keys__
+            )
             + ". Keys: "
             + (", ".join([repr(__vis_k__) for __vis_k__ in __vis_keys__]) or "(none)")
             + "."
@@ -773,6 +788,8 @@ class __VisShell__(__VisResult__):
     __vis_attr_methods__ = (
         " Methods: logs(offset, lines), wait(secs), type(text), stop()."
     )
+    # Each stage answers `exit`, so each hint of a handle shows the same example.
+    __vis_attr_example__ = "exit"
 
     def __vis_attr_subject__(self):
         # Every stage of the shell family answers the same map, so the op that
