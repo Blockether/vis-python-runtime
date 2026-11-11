@@ -999,7 +999,7 @@ def __vis_grep_next_offset__(__vis_text__):
     return int(__vis_digits__) if __vis_digits__ else None
 
 
-def __vis_paged_spec__(__vis_c__):
+def __vis_paged_spec__(__vis_nm__, __vis_a__, __vis_k__):
     # What a PAGED search would need to continue itself — `(tool-name, options map)`
     # — or None when this call is not one. Read BEFORE the call runs: `__vis_exec_call__`
     # releases `fn`/`a`/`k` in its `finally` the moment it has an answer, so a spec
@@ -1009,11 +1009,8 @@ def __vis_paged_spec__(__vis_c__):
     # refused), so the next page is that map plus `offset`. A call shaped any other
     # way pages to None, and `next(g)` then refuses BY NAME instead of quietly
     # searching for something else.
-    __vis_nm__ = getattr(__vis_c__, "nm", None)
     if __vis_nm__ not in __vis_paged_tools__:
         return None
-    __vis_a__ = getattr(__vis_c__, "a", None) or ()
-    __vis_k__ = getattr(__vis_c__, "k", None) or {}
     if len(__vis_a__) == 1 and isinstance(__vis_a__[0], dict):
         return (__vis_nm__, dict(__vis_a__[0]))
     if __vis_k__ and not __vis_a__:
@@ -1046,6 +1043,8 @@ class __VisGrep__(__VisResultStr__):
     # Every page is a real host search, so the walk is bounded by default: an
     # unbounded one would pour a whole tree into the block that asked for a slice.
     __vis_page_cap__ = 10
+    # A worker routes searches through its host, not extension module globals.
+    __vis_page_route__ = None
 
     def __vis_paged__(self, __vis_tool__, __vis_spec__):
         self.__vis_tool__ = __vis_tool__
@@ -1069,14 +1068,17 @@ class __VisGrep__(__VisResultStr__):
                 " come from a single options map. Re-issue the search as"
                 ' grep({"query": q, ...}) and page from that result.'
             )
+        __vis_next__ = dict(self.__vis_spec__)
+        __vis_next__["offset"] = self.next_offset
+        __vis_route__ = type(self).__vis_page_route__
+        if __vis_route__ is not None:
+            return __vis_settle__(__vis_route__(self.__vis_tool__, __vis_next__))
         __vis_fn__ = globals().get(self.__vis_tool__)
         if __vis_fn__ is None:
             raise RuntimeError(
                 self.__vis_tool__ + " is not available in this sandbox, so this page"
                 " cannot continue."
             )
-        __vis_next__ = dict(self.__vis_spec__)
-        __vis_next__["offset"] = self.next_offset
         return __vis_settle__(__vis_fn__(__vis_next__))
 
     def pages(self, max_pages=None):
@@ -1376,7 +1378,7 @@ def __vis_settle_call__(__vis_c__):
     # first, on purpose: `__vis_exec_call__` releases the callable and its arguments
     # as soon as it has an answer, so anything the answer needs to know about its OWN
     # call has to be taken while the call is still holding it.
-    __vis_paging__ = __vis_paged_spec__(__vis_c__)
+    __vis_paging__ = __vis_paged_spec__(__vis_c__.nm, __vis_c__.a, __vis_c__.k)
     return __vis_as_result__(
         __vis_pyify__(__vis_exec_call__(__vis_c__)), __vis_paging__
     )
