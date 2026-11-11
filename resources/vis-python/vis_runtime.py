@@ -25,13 +25,14 @@ import importlib.machinery
 import importlib.util
 import io
 import json
-import marshal
 import os
 import sys
 import _thread
 import threading
 import time
 import types
+
+import vis_code
 
 #: Module that carries the sandbox runtime. Overridable so a port can point at
 #: the module in its new home without a code change.
@@ -43,6 +44,9 @@ SANDBOX_MODULE = os.environ.get("VIS_PYTHON_SANDBOX_MODULE", "async_runtime")
 AUTO_IMPORTS_MODULE = "auto_imports"
 
 _MODULE_CODE = {}
+_OWNED_MODULES = {}
+_MODULE_LOADS = {}
+_MODULE_LOCK = threading.RLock()
 
 #: Name of the `builtins` module in the sandbox runtime. Its `__vis_` prefix
 #: also makes `__vis_pin_runtime__` keep it in `builtins`.
@@ -461,37 +465,23 @@ def _code_cache_path(module, origin, source):
         return None
     place = importlib.util.source_hash(os.fsencode(origin)).hex()
     key = importlib.util.source_hash(source + b"\0" + stamp).hex()
-    tag = sys.implementation.cache_tag or "python"
+    tag = (sys.implementation.cache_tag or "python") + f"-opt{sys.flags.optimize}"
     return os.path.join(prefix, "vis-sandbox", f"{module}.{tag}.{place}.{key}.bin")
-
-
-def _read_cached_code(path):
-    """The code object kept at `path`, or None when it is missing or unreadable."""
-    try:
-        with open(path, "rb") as handle:
-            code = marshal.load(handle)
-    except (OSError, EOFError, ValueError, TypeError):
-        return None
-    return code if isinstance(code, types.CodeType) else None
 
 
 def _write_cached_code(path, code):
     """Keep `code` at `path` and drop older versions of the same module. Best effort."""
     folder, name = os.path.split(path)
     stem = name.rsplit(".", 2)[0] + "."
-    temporary = f"{path}.{os.getpid()}.tmp"
+    if not vis_code._store(path, code):
+        return
     try:
-        os.makedirs(folder, exist_ok=True)
-        with open(temporary, "wb") as handle:
-            marshal.dump(code, handle)
-        os.replace(temporary, path)
         for other in os.listdir(folder):
             if other.startswith(stem) and other != name:
                 with contextlib.suppress(OSError):
                     os.remove(os.path.join(folder, other))
     except OSError:
-        with contextlib.suppress(OSError):
-            os.remove(temporary)
+        pass
 
 
 def module_code(module):
@@ -513,7 +503,7 @@ def module_code(module):
         with open(origin, "rb") as handle:
             source = handle.read()
         path = _code_cache_path(module, origin, source)
-        code = None if path is None else _read_cached_code(path)
+        code = None if path is None else vis_code._load(path)
         if code is None:
             tree = ast.parse(source.decode("utf-8"), origin)
             if module == SANDBOX_MODULE:
@@ -539,6 +529,66 @@ def install_module(namespace, module):
     code = module_code(module)
     exec(code, namespace)
     return code.co_filename
+
+
+def exec_source(namespace, source, filename, *, flags=0):
+    """Execute host source in an existing namespace with the runtime code cache."""
+    exec(vis_code.code(source, filename, flags), namespace)
+
+
+def exec_module(namespace, slot, source, filename, *, flags=0, attributes=None):
+    """Run source in a separate module owned by the calling session.
+
+    The module stays importable until the session closes. Replacing a slot is
+    atomic on failure: the previous module stays registered if execution fails.
+    Host attributes may supply metadata, not the module name or its builtins.
+    A concurrent or recursive load of the same slot is refused. Closing the
+    session during execution removes the module; completion does not register it
+    again, but the caller can still use the returned module.
+    """
+    owner = namespace["__name__"]
+    session = sys.modules.get(owner)
+    if session is None or session.__dict__ is not namespace:
+        raise ValueError("exec_module requires a live session namespace")
+    if not isinstance(slot, str) or not slot.isidentifier():
+        raise ValueError("exec_module slot must be an identifier")
+    name = owner + "__" + slot
+    module = types.ModuleType(name)
+    module.__dict__.update(attributes or {})
+    module.__name__ = name
+    module.__file__ = filename
+    module.__cached__ = None
+    module.__dict__["__builtins__"] = builtins.__dict__
+    code = vis_code.code(source, filename, flags)
+    with _MODULE_LOCK:
+        if sys.modules.get(owner) is not session:
+            raise ValueError("exec_module requires a live session namespace")
+        if name in _MODULE_LOADS:
+            raise RuntimeError(f"module {name!r} is already executing")
+        owned = _OWNED_MODULES.setdefault(owner, {})
+        previous = owned.get(name)
+        if name in sys.modules and sys.modules[name] is not previous:
+            raise ValueError(f"module {name!r} belongs to another owner")
+        _MODULE_LOADS[name] = module
+        owned[name] = module
+        sys.modules[name] = module
+    try:
+        exec(code, module.__dict__)
+    except BaseException:
+        with _MODULE_LOCK:
+            if sys.modules.get(owner) is session and _MODULE_LOADS.get(name) is module:
+                if previous is None:
+                    owned.pop(name, None)
+                    sys.modules.pop(name, None)
+                else:
+                    owned[name] = previous
+                    sys.modules[name] = previous
+        raise
+    finally:
+        with _MODULE_LOCK:
+            if _MODULE_LOADS.get(name) is module:
+                del _MODULE_LOADS[name]
+    return module
 
 
 def par(thunks):
@@ -998,7 +1048,13 @@ def close_session(name):
     after it — measured. What is still referenced stays alive because something is
     still using it; the rest is freed. Answers whether there was such a session.
     """
-    module = sys.modules.pop(name, None)
+    with _MODULE_LOCK:
+        for child, owned in _OWNED_MODULES.pop(name, {}).items():
+            if sys.modules.get(child) is owned:
+                del sys.modules[child]
+            if _MODULE_LOADS.get(child) is owned:
+                del _MODULE_LOADS[child]
+        module = sys.modules.pop(name, None)
     if module is None:
         return False
     del module
