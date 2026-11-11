@@ -144,6 +144,31 @@ close_from_three(void)
   }
 }
 
+/* Give each caught signal its default action, as exec would. Until exec the child
+   still has the handlers of its host. A JVM handler takes a signal for a thread that
+   the child does not have, so a TERM sent before exec was lost. Ignored signals stay
+   ignored, as exec keeps them. */
+static void
+default_caught_signals(void)
+{
+  struct sigaction current;
+  struct sigaction fallback;
+
+  memset(&fallback, 0, sizeof fallback);
+  fallback.sa_handler = SIG_DFL;
+  sigemptyset(&fallback.sa_mask);
+  for (int signal_number = 1; signal_number < NSIG; signal_number++)
+    {
+      if (signal_number == SIGKILL || signal_number == SIGSTOP)
+        continue;
+      if (sigaction(signal_number, NULL, &current) != 0)
+        continue;
+      if ((current.sa_flags & SA_SIGINFO) != 0 ||
+          (current.sa_handler != SIG_DFL && current.sa_handler != SIG_IGN))
+        sigaction(signal_number, &fallback, NULL);
+    }
+}
+
 static void
 child_fail(const char *message)
 {
@@ -237,6 +262,7 @@ visjail_spawn(const char *argv_blob, int argv_len,
   if (pid == 0)
     {
       close(ready[0]);
+      default_caught_signals();
       if (setsid() < 0)
         child_fail("setsid");
       /* The parent must not expose a pid before group-directed signals work. */

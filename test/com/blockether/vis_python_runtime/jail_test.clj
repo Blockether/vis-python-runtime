@@ -498,6 +498,29 @@
                            (.close (.getErrorStream process))))))
          (finally (delete-tree root)))))
 
+(deftest immediate-terminate-signal-reaches-the-child-test
+  ;; Vis: a TERM sent right after the spawn reached the child before its exec. The child
+  ;; still had the JVM's signal handlers, so the handler took the signal and `sleep`
+  ;; ran on until a KILL (exit 137).
+  (let [root (temp-dir)]
+    (try (doseq [policy [nil {:read-write [(str root)]}]
+                 pty? [false true]
+                 attempt (range 20)]
+
+           (let [^Process process (runtime/spawn-process!
+                                    ["/bin/sleep" "30"]
+                                    (options root {:policy policy :pty? pty? :merge-stderr? true}))]
+             (try (.destroy process)
+                  (is (and (.waitFor process 2000 TimeUnit/MILLISECONDS)
+                           (= 143 (.exitValue process)))
+                      (str "TERM lost: policy=" (some? policy) ", pty=" pty? ", attempt=" attempt))
+                  (finally (.destroyForcibly process)
+                           (.waitFor process 5 TimeUnit/SECONDS)
+                           (.close (.getOutputStream process))
+                           (.close (.getInputStream process))
+                           (.close (.getErrorStream process))))))
+         (finally (delete-tree root)))))
+
 (deftest pty-round-trip-test
   (let [root (temp-dir)]
     (try (let [^Process p (runtime/spawn-process!
