@@ -94,7 +94,6 @@
       ;; the interpreter to stay usable are the whole of that count.
       (is (pos? (:write (runtime/confine! [source-dir] [])))))))
 
-
 ;; Perf pass 2026-11 (Vis session start): each new sandbox or extension process parsed,
 ;; rewrote and compiled the 213 KB runtime again, 100-300 ms before its first block.
 (harness/defbuilt-test
@@ -104,30 +103,23 @@
         (confined-session [] [])
 
         probe
-        (str "import os, sys, vis_runtime\n"
-             "module = vis_runtime.SANDBOX_MODULE\n"
-             "vis_runtime._MODULE_CODE.clear()\n"
-             "first = vis_runtime.module_code(module)\n"
+        (str "import os, sys, vis_runtime\n" "module = vis_runtime.SANDBOX_MODULE\n"
+             "vis_runtime._MODULE_CODE.clear()\n" "first = vis_runtime.module_code(module)\n"
              "origin = vis_runtime.importlib.util.find_spec(module).origin\n"
              "with open(origin, 'rb') as handle:\n"
              "    path = vis_runtime._code_cache_path(module, origin, handle.read())\n"
              "folder, name = os.path.split(path)\n"
              "stem = name.rsplit('.', 2)[0] + '.'\n"
              "kept = [n for n in os.listdir(folder) if n.startswith(stem)]\n"
-             "vis_runtime._MODULE_CODE.clear()\n"
-             "rewrite = vis_runtime._pin_builtin_reads\n"
-             "def refuse(tree):\n"
-             "    raise AssertionError('the runtime was parsed again')\n"
-             "vis_runtime._pin_builtin_reads = refuse\n"
-             "try:\n"
-             "    second = vis_runtime.module_code(module)\n"
-             "finally:\n"
+             "vis_runtime._MODULE_CODE.clear()\n" "rewrite = vis_runtime._pin_builtin_reads\n"
+             "def refuse(tree):\n" "    raise AssertionError('the runtime was parsed again')\n"
+             "vis_runtime._pin_builtin_reads = refuse\n" "try:\n"
+             "    second = vis_runtime.module_code(module)\n" "finally:\n"
              "    vis_runtime._pin_builtin_reads = rewrite\n"
              "print(len(kept), second.co_filename == first.co_filename)")]
 
     (testing "a confined process keeps one compiled runtime and a fresh one reads it back"
       (is (= {:stdout "1 True\n" :error nil} (block session probe))))))
-
 
 ;; Perf pass 2026-11: the sandbox and the extension worker read the runtime from two
 ;; paths, and each write pruned the other path's file, so neither process kept a hit.
@@ -144,8 +136,7 @@
              "for path in paths:\n"
              "    vis_runtime._write_cached_code(path, code)\n"
              "print([os.path.exists(path) for path in paths])\n"
-             "for path in paths:\n"
-             "    os.remove(path)")]
+             "for path in paths:\n" "    os.remove(path)")]
 
     (testing "writing the code of one source path keeps the code of the other"
       (is (= {:stdout "[True, True]\n" :error nil} (block session probe))))))

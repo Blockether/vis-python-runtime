@@ -389,7 +389,8 @@
                  "def holder():\n    with q.mutex:\n        held.set()\n        time.sleep(1)\n"
                  "threading.Thread(target=holder, daemon=True).start()\nheld.wait()\n"
                  "await ready()\nq.get()")
-            ["time.sleep(1.2)\nprint(q.mutex.locked(), q.not_empty.acquire(timeout=1))" "False True"]]
+            ["time.sleep(1.2)\nprint(q.mutex.locked(), q.not_empty.acquire(timeout=1))"
+             "False True"]]
            ["a contended re-acquire gives the lock back before the interrupt"
             (str "c = threading.Condition(threading.Lock())\nlog = []\n"
                  "def holder():\n    try:\n        with c:\n            c.notify()\n"
@@ -398,7 +399,8 @@
                  "c.acquire()\ntry:\n    threading.Thread(target=holder, daemon=True).start()\n"
                  "    await ready()\n    c.wait()\nfinally:\n"
                  "    log.append(c._is_owned())\n    c.release()")
-            ["time.sleep(1.2)\nprint(sorted(map(str, log)), c._lock.locked())" "['True', 'released'] False"]]]]
+            ["time.sleep(1.2)\nprint(sorted(map(str, log)), c._lock.locked())"
+             "['True', 'released'] False"]]]]
     (let [waiting (promise)
           session (harness/tool-session {"ready" (fn [_]
                                                    (deliver waiting true)
