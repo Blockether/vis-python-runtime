@@ -1,5 +1,6 @@
 (ns com.blockether.vis-python-runtime.traversal-test
-  "Directory-entry budgets at the native sandbox boundary (Vis #279)."
+  "Directory-entry budgets at the native sandbox boundary (Vis #279): a spent budget
+   returns partial results with one note."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
@@ -35,21 +36,29 @@
     session
     (str "import os, pathlib, glob\n" "root = pathlib.Path(" (pr-str (str @tree)) ")\n")))
 
+(defn- partial?
+  "True when `answer` has no error and its output says once that its walks are partial."
+  [answer]
+  (let [out (str (:stdout answer))]
+    (and (nil? (:error answer))
+         (= 1 (count (re-seq #"\[vis\] Directory walks stopped after 10000 entries" out)))
+         (str/includes? out "grep"))))
+
 (harness/defbuilt-test
   recursive-traversal-budget-test
-  ;; Vis #279: fail before the watchdog, without hiding unmatched entries.
+  ;; Vis #279: stop before the watchdog and return what the walk found.
   (doseq [confined? [false true]]
     (let [session (harness/block-session)]
       (setup session)
       (when confined? (runtime/confine! [(str @tree) (System/getProperty "user.dir")] []))
-      (doseq [code ["list(root.rglob('*.missing'))" "list(root.glob('**/*.missing'))"
-                    "glob.glob(str(root / '**' / '*.missing'), recursive=True)"
-                    "list(os.walk(root))"]]
+      (doseq [code ["print(len(list(root.rglob('*.missing'))))"
+                    "print(len(list(root.glob('**/*.missing'))))"
+                    "print(len(glob.glob(str(root / '**' / '*.missing'), recursive=True)))"
+                    "print(len(list(os.walk(root))))"]]
         (testing (str "confined=" confined? " " code)
           (let [answer (harness/block session (str "kept = 279\n" code))]
-            (is (str/includes? (str (:error answer)) "10000") (pr-str answer))
-            (is (str/includes? (str (:error answer)) "grep") (pr-str answer))
-            (is (str/includes? (str (:error answer)) (str @tree)) (pr-str answer)))
+            (is (partial? answer) (pr-str answer))
+            (is (str/includes? (str (:stdout answer)) (str @tree)) (pr-str answer)))
           (is (= {:stdout "279\n" :error nil} (harness/block session "print(kept)"))))))))
 
 (harness/defbuilt-test
@@ -65,9 +74,10 @@
                                 (str "with os.scandir(root) as scan:\n"
                                      "    print(len(list(islice(scan, 6000))))\n"
                                      "with os.scandir(root) as scan:\n"
-                                     "    list(islice(scan, 6000))"))]
-      (is (= "6000\n" (:stdout answer)))
-      (is (str/includes? (str (:error answer)) "10000")))
+                                     "    print(len(list(islice(scan, 6000))))"))]
+      (is (partial? answer) (pr-str answer))
+      (is (str/starts-with? (str (:stdout answer)) "6000\n") (pr-str answer))
+      (is (str/ends-with? (str (:stdout answer)) "\n4000\n") (pr-str answer)))
     (is (= {:stdout "10000\n" :error nil}
            (harness/block session
                           (str "with os.scandir(root) as scan:\n"
@@ -79,25 +89,29 @@
     (setup session)
     (runtime/exec! session
                    "import importlib\ncached_listdir = os.listdir\ncached_scandir = os.scandir")
-    (doseq [code ["os.listdir(root)" "cached_listdir(path=root)"
-                  "importlib.reload(os).listdir(root)" "list(cached_scandir(root))"
-                  "it = os.scandir(root)\nfor _ in range(10001): it.__next__()"
-                  "it = os.scandir(root)\nfor _ in range(10001): type(it).__next__(it)"]]
+    (doseq [code ["print(len(os.listdir(root)))" "print(len(cached_listdir(path=root)))"
+                  "print(len(importlib.reload(os).listdir(root)))"
+                  "print(len(list(cached_scandir(root))))"
+                  (str "it = os.scandir(root)\nn = 0\ntry:\n"
+                       "    while True:\n        it.__next__()\n        n += 1\n"
+                       "except StopIteration:\n    print(n)")
+                  (str "it = os.scandir(root)\nn = 0\ntry:\n"
+                       "    while True:\n        type(it).__next__(it)\n        n += 1\n"
+                       "except StopIteration:\n    print(n)")]]
       (let [answer (harness/block session code)]
-        (is (str/includes? (str (:error answer)) "10000") (pr-str answer))))))
+        (is (partial? answer) (pr-str answer))
+        (is (str/ends-with? (str (:stdout answer)) "\n10000\n") (pr-str answer))))))
 
 (harness/defbuilt-test
-  caught-exhaustion-does-not-reset-budget-test
+  spent-budget-stays-spent-test
   (let [session (harness/block-session)]
     (setup session)
-    (is (= {:stdout "closed exhausted\n" :error nil}
-           (harness/block
-             session
-             (str "it = os.scandir(root)\n" "try:\n    list(it)\n"
-                  "except RuntimeError as error:\n" "    assert not isinstance(error, OSError)\n"
-                  "    assert next(it, None) is None\n" "    print('closed', end=' ')\n"
-                  "try:\n    os.listdir(root)\n"
-                  "except RuntimeError:\n    print('exhausted')"))))))
+    (let [answer (harness/block session
+                                (str "it = os.scandir(root)\n" "first = len(list(it))\n"
+                                     "assert next(it, None) is None\n"
+                                     "print(first, len(os.listdir(root)))"))]
+      (is (partial? answer) (pr-str answer))
+      (is (str/ends-with? (str (:stdout answer)) "\n10000 0\n") (pr-str answer)))))
 
 (harness/defbuilt-test
   gather-shares-one-entry-budget-test
@@ -105,13 +119,12 @@
     (setup session)
     (runtime/exec! session
                    (str "import vis_runtime\n" "def scan_part():\n"
-                        "    count = 0\n" "    try:\n"
-                        "        with os.scandir(root) as scan:\n"
-                        "            for entry in scan:\n"
-                        "                count += 1\n" "                if count == 6000: break\n"
-                        "    except RuntimeError:\n        pass\n" "    return count\n"))
-    (is (= {:stdout "10000\n" :error nil}
-           (harness/block session "print(sum(vis_runtime.par([scan_part, scan_part])))")))
+                        "    count = 0\n" "    with os.scandir(root) as scan:\n"
+                        "        for entry in scan:\n" "            count += 1\n"
+                        "            if count == 6000: break\n" "    return count\n"))
+    (let [answer (harness/block session "print(sum(vis_runtime.par([scan_part, scan_part])))")]
+      (is (partial? answer) (pr-str answer))
+      (is (str/ends-with? (str (:stdout answer)) "\n10000\n") (pr-str answer)))
     (is (= {:stdout "6000\n" :error nil} (harness/block session "print(scan_part())")))))
 
 (harness/defbuilt-test
@@ -138,7 +151,7 @@
                                "print(os.path.exists("
                                (pr-str copy)
                                "), kept)"))))
-    (doseq [[module expected] [["_pytest.pathlib" "10001\n"] ["pytest" "10001\n"] ["shutilx" nil]]]
+    (doseq [[module exempt?] [["_pytest.pathlib" true] ["pytest" true] ["shutilx" false]]]
       (testing module
         (let [answer (harness/block
                        session
@@ -147,9 +160,10 @@
                             ", 'os': os}\n"
                             "exec('def visit(p):\\n    return len(os.listdir(p))', probe)\n"
                             "print(probe['visit'](root))"))]
-          (if expected
-            (is (= {:stdout expected :error nil} answer))
-            (is (str/includes? (str (:error answer)) "shutil.rmtree") (pr-str answer))))))))
+          (if exempt?
+            (is (= {:stdout "10001\n" :error nil} answer))
+            (do (is (partial? answer) (pr-str answer))
+                (is (str/ends-with? (str (:stdout answer)) "\n10000\n") (pr-str answer)))))))))
 
 (harness/defbuilt-test
   small-scans-and-exact-limit-test
@@ -185,9 +199,7 @@
                             (str "for _ in range(5000):\n    assert len(os.listdir(small)) == 2\n"
                                  "print('exact', end=' ')\n"
                                  "assert os.listdir(small + '/empty') == []\n" "print('empty')"))))
-      (is (str/includes? (str (:error (harness/block session
-                                                     (str "for _ in range(5001):\n"
-                                                          "    list(os.scandir(small))"))))
-                         "10000"))
+      (is (partial? (harness/block session
+                                   (str "for _ in range(5001):\n" "    list(os.scandir(small))"))))
       (finally (doseq [file (reverse (file-seq root))]
                  (io/delete-file file))))))

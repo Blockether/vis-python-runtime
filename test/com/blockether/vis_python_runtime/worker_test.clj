@@ -258,7 +258,7 @@
                 (value! worker "run-block" "session" session "code" "print(await echo('hi'))"))]
           (is (nil? (get answer "error")) (str (get answer "error")))
           (is (= "<hi>" (str/trim (str (get answer "stdout")))))))
-      (testing "directory exhaustion is recoverable across the worker wire (Vis #279)"
+      (testing "directory exhaustion returns partial results across the worker wire (Vis #279)"
         (value! worker
                 "exec"
                 "session" session
@@ -280,8 +280,10 @@
                                      "session" session
                                      "code" "print(scan_kept, len(os.listdir(scan_root)))"))]
 
-          (is (str/includes? (str (get answer "error")) "10000"))
-          (is (str/includes? (str (get answer "error")) "grep/ls"))
+          (is (nil? (get answer "error")) (pr-str answer))
+          (is (str/includes? (str (get answer "stdout"))
+                             "[vis] Directory walks stopped after 10000 entries")
+              (pr-str answer))
           (is (nil? (get recovered "error")) (pr-str recovered))
           (is (= "279 1\n" (get recovered "stdout")))))
       (testing "a library Future runs on a real asyncio Task beside a host call"

@@ -310,6 +310,7 @@ static void vis_py_record(int level, const char *event, const char *fields, ...)
 typedef struct {
     Py_ssize_t remaining;
     unsigned int references;
+    int noted; /* the block's output already says that its walks are partial */
 } vis_py_scan_budget;
 
 static _Thread_local vis_py_scan_budget *vis_py_scan_current = NULL;
@@ -1041,7 +1042,8 @@ static int vis_py_audit(const char *event, PyObject *args, void *userdata)
  * Directory traversal. Audit events see only the opening of a directory, not
  * its entries. Guard the native iterator slot AND its explicit __next__
  * descriptor, so pathlib, glob, walk and cached aliases all spend the same
- * budget. RuntimeError is deliberate: these walkers suppress OSError.
+ * budget. A spent budget ends each directory as if it had no more entries, so
+ * a walker returns what it found; one note in the block output says so.
  * ------------------------------------------------------------------------ */
 
 static iternextfunc vis_py_scandir_original_next;
@@ -1104,17 +1106,24 @@ static PyObject *vis_py_scandir_next(PyObject *iterator)
     }
     path = PyObject_GetAttrString(entry, "path");
     Py_DECREF(entry);
-    if (path == NULL) return NULL;
     closed = PyObject_CallMethod(iterator, "close", NULL);
     Py_XDECREF(closed);
     PyErr_Clear();
-    PyErr_Format(PyExc_RuntimeError,
-                 "directory traversal exceeded %d entries in this Python block "
-                 "while scanning the directory containing %R; "
-                 "narrow the path or use grep/ls for workspace searches; "
-                 "shutil.rmtree, shutil.copytree and pytest are not capped",
-                 VIS_PY_SCAN_ENTRIES, path);
-    Py_DECREF(path);
+    if (!vis_py_scan_current->noted) {
+        vis_py_scan_current->noted = 1;
+        if (path != NULL) {
+            PySys_FormatStdout("\n[vis] Directory walks stopped after %d entries in this block, "
+                               "at the directory that contains %R. The results are partial: "
+                               "narrow the path or use grep.\n",
+                               VIS_PY_SCAN_ENTRIES, path);
+        } else {
+            PySys_FormatStdout("\n[vis] Directory walks stopped after %d entries in this block. "
+                               "The results are partial: narrow the path or use grep.\n",
+                               VIS_PY_SCAN_ENTRIES);
+        }
+        PyErr_Clear();
+    }
+    Py_XDECREF(path);
     return NULL;
 }
 
