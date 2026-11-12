@@ -42,6 +42,12 @@ int visjail_poll(int fd, int timeout_ms);
 int visjail_wait(int pid, int nohang, int *exit_code);
 int visjail_kill(int pid, int signal_number);
 
+#if defined(__APPLE__)
+/* End every live process that a Seatbelt profile allowing the Mach name `service`
+ * confined, also a detached one, and return the count, or -EINVAL. */
+int visjail_end_confined(const char *service);
+#endif
+
 #if defined(_WIN32)
 /* Existing empty local directory, retained on close. No source object gets ACEs.
  * stage copies a regular file/tree under a new relative app path; all reparse

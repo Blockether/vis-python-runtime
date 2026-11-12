@@ -98,18 +98,17 @@
         :else JailPolicy$Egress/OFF))
 
 (defn jail-policy
-  "The confinement value `spawn-process!` compiles, from a map:
-   `:read-write`/`:read-only`/`:deny-read`/`:deny-write`/`:deny-exec` are path
-   lists (`~` allowed; a deny always wins; temp and the platform's own code are
-   the compiler's to add), `:network` is `:off` (default), `:open` or
-   `{:proxy <port>}` — the one loopback port sockets may reach; add `:loopback? true`
-   to also reach every other loopback port except `:loopback-deny` — `:unix-connect`
-   lists exact local control sockets, `:inbound` lists ports additionally exposed
-   on every interface (loopback listeners are always allowed), and `:keychain?`
-   opens the OS credential store. This path-policy contract is for macOS/Linux;
-   Windows uses [[windows-jail]] and private copies instead of host-path grants."
+  "The confinement value `spawn-process!` compiles, from a map: path lists
+   `:read-write`/`:read-only`/`:deny-read`/`:deny-write`/`:deny-exec` (`~` allowed; a deny
+   wins; temp and the platform's code are the compiler's to add); `:network` is `:off`
+   (default), `:open` or `{:proxy <port>}`, the one loopback port sockets may reach, and
+   `:loopback? true` adds every other loopback port except `:loopback-deny`;
+   `:unix-connect` lists exact local sockets; `:inbound` ports exposed on every interface
+   (loopback listeners always are); `:keychain?` opens the OS credential store; `:owner`
+   marks each confined process for [[end-confined-processes!]]. macOS/Linux only: Windows
+   uses [[windows-jail]] and private copies instead of host-path grants."
   [{:keys [read-write read-only deny-read deny-write deny-exec unix-connect network inbound
-           keychain?]}]
+           keychain? owner]}]
   (JailPolicy. (vec read-write)
                (vec read-only)
                (vec deny-read)
@@ -118,7 +117,16 @@
                (vec unix-connect)
                (egress network)
                (mapv int inbound)
-               (boolean keychain?)))
+               (boolean keychain?)
+               owner))
+
+(defn end-confined-processes!
+  "End every live process that a [[jail-policy]] with this `:owner` confined, also
+   one that left its spawner's process tree, and return how many. macOS finds
+   them through the kernel's sandbox; elsewhere no process carries an owner, so
+   this returns 0."
+  [owner]
+  (Jail/endConfined (str owner)))
 
 (defn jail-unsupported-reason
   "Why this host cannot confine a child — no Seatbelt or namespaces, WSL1, no

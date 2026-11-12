@@ -28,6 +28,14 @@ public final class Seatbelt {
 
   private Seatbelt() {}
 
+  /**
+   * The Mach service name a profile with this owner allows. No process registers it, so
+   * a lookup only fails; {@link Jail#endConfined} asks the kernel which processes may.
+   */
+  static String ownerService(String owner) {
+    return "com.blockether.vis.jail.owner." + owner;
+  }
+
   static String quote(String value) {
     return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
   }
@@ -151,6 +159,10 @@ public final class Seatbelt {
     // Each spawn enters its own sandbox, so this reaches the child's descendants only:
     // never the host, another session or a process that another spawn confined.
     out.append("(allow signal (target same-sandbox))");
+    if (policy.owner() != null) {
+      out.append("(allow mach-lookup (global-name ").append(quote(ownerService(policy.owner())))
+          .append("))");
+    }
     // GraalVM native images signal through a named POSIX semaphore at startup.
     out.append("(allow ipc-posix-sem)");
     // A pty slave (/dev/ttysNNN) is inherited already open; termios and window-size

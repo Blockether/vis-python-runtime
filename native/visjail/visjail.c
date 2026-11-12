@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #if defined(__APPLE__)
+#include <libproc.h>
 #include <sandbox.h>
 #include <util.h>
 #else
@@ -432,3 +433,96 @@ visjail_kill(int pid, int signal_number)
 {
   return kill((pid_t) -pid, signal_number) == 0 ? 0 : -errno;
 }
+
+#if defined(__APPLE__)
+/* Exported by libsystem_sandbox, but no public header declares it. */
+extern int sandbox_check(pid_t pid, const char *operation, int type, ...);
+#define VISJAIL_FILTER_GLOBAL_NAME 2
+#define VISJAIL_CHECK_NO_REPORT 0x40000000
+#define VISJAIL_SWEEP_PASSES 64
+
+/* A process that a profile with this owner confined: it is sandboxed, its profile
+   allows the owner's Mach name and denies a name that no profile allows. Another
+   sandbox gives the same answer for both names. */
+static int
+confined_by(pid_t pid, const char *service, const char *control)
+{
+  int type = VISJAIL_FILTER_GLOBAL_NAME | VISJAIL_CHECK_NO_REPORT;
+  return sandbox_check(pid, NULL, 0) == 1
+         && sandbox_check(pid, "mach-lookup", type, service) == 0
+         && sandbox_check(pid, "mach-lookup", type, control) == 1;
+}
+
+static int
+contains_pid(const pid_t *pids, int count, pid_t pid)
+{
+  for (int i = 0; i < count; i++)
+    if (pids[i] == pid)
+      return 1;
+  return 0;
+}
+
+int
+visjail_end_confined(const char *service)
+{
+  char control[512];
+  pid_t *stopped = NULL;
+  int count = 0;
+  int capacity = 0;
+  int changed = 1;
+  pid_t self = getpid();
+
+  if (service == NULL || service[0] == '\0'
+      || snprintf(control, sizeof control, "%s.control", service) >= (int) sizeof control)
+    return -EINVAL;
+  /* Stop first: a stopped process cannot fork, so a pass that finds no new
+     process has them all. The kill comes after the last pass. */
+  for (int pass = 0; changed && pass < VISJAIL_SWEEP_PASSES; pass++)
+    {
+      int room = proc_listallpids(NULL, 0);
+      pid_t *pids;
+      int n;
+      changed = 0;
+      if (room <= 0)
+        break;
+      room += 64;
+      pids = calloc((size_t) room, sizeof(pid_t));
+      if (pids == NULL)
+        break;
+      n = proc_listallpids(pids, room * (int) sizeof(pid_t));
+      for (int i = 0; i < n; i++)
+        {
+          pid_t pid = pids[i];
+          if (pid <= 1 || pid == self || contains_pid(stopped, count, pid))
+            continue;
+          if (!confined_by(pid, service, control) || kill(pid, SIGSTOP) != 0)
+            continue;
+          /* The pid can belong to another process after the check. */
+          if (!confined_by(pid, service, control))
+            {
+              kill(pid, SIGCONT);
+              continue;
+            }
+          if (count == capacity)
+            {
+              int grown = capacity == 0 ? 64 : capacity * 2;
+              pid_t *larger = realloc(stopped, (size_t) grown * sizeof(pid_t));
+              if (larger == NULL)
+                {
+                  kill(pid, SIGKILL);
+                  continue;
+                }
+              stopped = larger;
+              capacity = grown;
+            }
+          stopped[count++] = pid;
+          changed = 1;
+        }
+      free(pids);
+    }
+  for (int i = 0; i < count; i++)
+    kill(stopped[i], SIGKILL);
+  free(stopped);
+  return count;
+}
+#endif

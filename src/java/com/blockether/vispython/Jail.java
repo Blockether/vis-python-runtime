@@ -45,6 +45,9 @@ public final class Jail {
 
   private static Map<String, MethodHandle> handles;
 
+  /** Only the macOS library exports {@code visjail_end_confined}; linked on first use. */
+  private static MethodHandle endConfined;
+
   private Jail() {}
 
   private static FunctionDescriptor descriptor(MemoryLayout... arguments) {
@@ -285,6 +288,50 @@ public final class Jail {
 
   static int kill(int pid, int signal) {
     return invokeInts("visjail_kill", pid, signal, null);
+  }
+
+  private static synchronized MethodHandle endConfinedHandle() {
+    if (endConfined == null) {
+      MemorySegment address = libraryLookup().find("visjail_end_confined").orElseThrow(() ->
+          new VisPythonException("Process-jail library exports no visjail_end_confined",
+              Map.of("symbol", "visjail_end_confined")));
+      endConfined = Linker.nativeLinker().downcallHandle(address, descriptor(ValueLayout.ADDRESS));
+    }
+    return endConfined;
+  }
+
+  /**
+   * End every live process that a policy with {@code owner} confined, also one that left
+   * its spawner's process tree (a double fork, a crashed parent), and return how many.
+   * Each is stopped before any is killed, so none can fork past the sweep. On macOS the
+   * owner is a rule of the kernel's Seatbelt profile, which a process cannot remove.
+   * Bubblewrap policies carry no owner, so on other systems this ends nothing and returns 0.
+   */
+  public static int endConfined(String owner) {
+    String checked = JailPolicy.owner(owner);
+    if (checked == null) {
+      throw new IllegalArgumentException("owner is required");
+    }
+    if (!Native.platform().startsWith("darwin-")) {
+      return 0;
+    }
+    byte[] service = (Seatbelt.ownerService(checked) + "\0").getBytes(StandardCharsets.UTF_8);
+    int ended;
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment name = arena.allocate(service.length);
+      MemorySegment.copy(service, 0, name, ValueLayout.JAVA_BYTE, 0, service.length);
+      ended = (int) endConfinedHandle().invokeExact(name);
+    } catch (RuntimeException | Error exception) {
+      throw exception;
+    } catch (Throwable throwable) {
+      throw new VisPythonException("Could not invoke visjail_end_confined: " + throwable,
+          Map.of("symbol", "visjail_end_confined"), throwable);
+    }
+    if (ended < 0) {
+      throw new VisPythonException("Could not end confined processes: errno " + -ended,
+          Map.of("owner", checked, "errno", -ended));
+    }
+    return ended;
   }
 
   private static int invokeInts(String symbol, int first, int second, MemorySegment address) {

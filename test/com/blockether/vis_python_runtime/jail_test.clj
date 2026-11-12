@@ -466,6 +466,72 @@
                  "a process that the jail did not start stays out of reach")))
          (finally (.destroyForcibly outside) (delete-tree root)))))
 
+(defn- orphan-pid
+  "Spawn a confined shell under `owner` that leaves one detached sleeper and exits."
+  [root owner]
+  (let [file
+        (str "orphan-" owner)
+
+        {:keys [exit err]}
+        (run-process ["/bin/sh" "-c"
+                      (str "/bin/sleep 300 </dev/null >/dev/null 2>&1 & echo $! > " file)]
+                     (options root {:policy {:read-write [(str root)] :owner owner}}))]
+
+    (is (= 0 exit) err)
+    (parse-long (str/trim (slurp (str root "/" file))))))
+
+(defn- alive?
+  [pid]
+  (let [handle (java.lang.ProcessHandle/of (long pid))]
+    (boolean (and (.isPresent handle) (.isAlive ^java.lang.ProcessHandle (.get handle))))))
+
+(defn- ends?
+  [pid]
+  (loop [n 0]
+    (cond (not (alive? pid)) true
+          (= n 100) false
+          :else (do (Thread/sleep 50) (recur (inc n))))))
+
+(deftest a-sweep-ends-only-its-own-owner-detached-processes-test
+  ;; Vis #469: a jailed process that left its tree outlived the gateway and reached the
+  ;; next gateway's session ports, which the profile it started with did not deny.
+  (testing "the owner is a Mach name in the profile, and a bad owner is refused"
+    (is (str/includes? (Seatbelt/compile (runtime/jail-policy {:owner "run-1"}))
+                       "(allow mach-lookup (global-name \"com.blockether.vis.jail.owner.run-1\"))"))
+    (is (not (str/includes? (Seatbelt/compile (runtime/jail-policy {})) "jail.owner")))
+    (is (thrown? IllegalArgumentException (runtime/jail-policy {:owner "a b"}))))
+  (if-not (macos?)
+    (is (= 0 (runtime/end-confined-processes! "unused")))
+    (let [root
+          (temp-dir)
+
+          owner
+          (str "sweep-" (System/nanoTime))
+
+          other
+          (str owner "-other")
+
+          ^Process outside
+          (.start (ProcessBuilder. ["/bin/sleep" "30"]))]
+
+      (try (let [mine
+                 (orphan-pid root owner)
+
+                 theirs
+                 (orphan-pid root other)]
+
+             (is (alive? mine) "the sleeper outlived the process that started it")
+             (is (= 1 (runtime/end-confined-processes! owner)))
+             (is (ends? mine) "the detached process of the owner ends")
+             (is (alive? theirs) "a process of another owner keeps running")
+             (is (.isAlive outside) "a process that no jail started keeps running")
+             (is (= 0 (runtime/end-confined-processes! owner)) "a second sweep finds nothing")
+             (is (= 1 (runtime/end-confined-processes! other))))
+           (finally (runtime/end-confined-processes! owner)
+                    (runtime/end-confined-processes! other)
+                    (.destroyForcibly outside)
+                    (delete-tree root))))))
+
 (deftest direct-loopback-reaches-own-listeners-but-not-denied-ports-test
   ;; Vis #469: a test server in the jail could not be reached by its own client.
   (when-let [nc (some #(when (.canExecute (io/file %)) %) ["/usr/bin/nc" "/bin/nc"])]

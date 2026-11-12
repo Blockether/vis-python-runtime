@@ -10,6 +10,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * One confinement policy for a spawned child: the same value compiles to a
@@ -34,7 +35,10 @@ import java.util.Set;
  */
 public record JailPolicy(List<String> readWrite, List<String> readOnly, List<String> denyRead,
     List<String> denyWrite, List<String> denyExec, List<String> unixConnect, Egress egress,
-    List<Integer> inbound, boolean keychain) {
+    List<Integer> inbound, boolean keychain, String owner) {
+
+  /** What an owner may be: it becomes part of a Mach service name in the profile. */
+  private static final Pattern OWNER = Pattern.compile("[A-Za-z0-9._-]{1,64}");
 
   /**
    * Where a child's outbound sockets may go: nowhere, one loopback proxy port, or anywhere.
@@ -77,6 +81,26 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
     unixConnect = strings(unixConnect);
     egress = egress == null ? Egress.OFF : egress;
     inbound = ports(inbound);
+    owner = owner(owner);
+  }
+
+  /** A policy with no owner: nothing can find its processes later. */
+  public JailPolicy(List<String> readWrite, List<String> readOnly, List<String> denyRead,
+      List<String> denyWrite, List<String> denyExec, List<String> unixConnect, Egress egress,
+      List<Integer> inbound, boolean keychain) {
+    this(readWrite, readOnly, denyRead, denyWrite, denyExec, unixConnect, egress, inbound,
+        keychain, null);
+  }
+
+  /** A blank owner is none; any other value must be 1 to 64 of {@code A-Z a-z 0-9 . _ -}. */
+  static String owner(String value) {
+    if (value == null || value.isBlank()) {
+      return null;
+    }
+    if (!OWNER.matcher(value).matches()) {
+      throw new IllegalArgumentException("owner must be 1 to 64 of A-Z a-z 0-9 . _ -: " + value);
+    }
+    return value;
   }
 
   private static List<String> strings(List<String> values) {

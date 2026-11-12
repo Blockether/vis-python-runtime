@@ -124,7 +124,9 @@ thread and runtime-pool limits.
 
 **OS child-process policy:** `Jail.spawn` / `spawn-process!` uses Seatbelt on macOS
 and the bundled Linux namespace enforcer on Linux. Check `Jail.unsupportedReason`
-or `jail-unsupported-reason` before relying on that path-based policy.
+or `jail-unsupported-reason` before relying on that path-based policy. A policy
+`:owner` marks each confined process; on macOS `end-confined-processes!` ends
+every live process with that owner, also one that left its spawner's tree.
 
 On Windows, use [`WindowsJail` / `windows-jail`](windows-jail.md). This separate
 contract uses a low-privilege AppContainer, copied read-only application files
