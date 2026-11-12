@@ -91,7 +91,9 @@
 
 (defn- egress
   [network]
-  (cond (map? network) (JailPolicy$Egress/proxy (int (:proxy network)))
+  (cond (map? network) (JailPolicy$Egress/proxy (int (:proxy network)) (boolean (:loopback?
+                                                                                  network))
+                         (mapv int (:loopback-deny network)))
         (= :open network) JailPolicy$Egress/OPEN
         :else JailPolicy$Egress/OFF))
 
@@ -100,7 +102,8 @@
    `:read-write`/`:read-only`/`:deny-read`/`:deny-write`/`:deny-exec` are path
    lists (`~` allowed; a deny always wins; temp and the platform's own code are
    the compiler's to add), `:network` is `:off` (default), `:open` or
-   `{:proxy <port>}` — the one loopback port sockets may reach — `:unix-connect`
+   `{:proxy <port>}` — the one loopback port sockets may reach; add `:loopback? true`
+   to also reach every other loopback port except `:loopback-deny` — `:unix-connect`
    lists exact local control sockets, `:inbound` lists ports additionally exposed
    on every interface (loopback listeners are always allowed), and `:keychain?`
    opens the OS credential store. This path-policy contract is for macOS/Linux;

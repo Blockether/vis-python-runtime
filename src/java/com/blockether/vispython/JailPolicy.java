@@ -21,7 +21,8 @@ import java.util.Set;
  * directories and the platform read roots are the compiler's to add, so a
  * caller names only the session's directories. {@code unixConnect} contains exact
  * local control sockets a child may dial. {@code inbound} ports are additionally
- * reachable on every interface; loopback listeners are always allowed.
+ * reachable on every interface; loopback listeners are always allowed. A child may
+ * signal only the processes it started, and their descendants.
  * {@code keychain} opens the OS credential store: the Security services and
  * keychain databases on macOS, the D-Bus session bus on Linux.
  *
@@ -34,18 +35,34 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
     List<String> denyWrite, List<String> denyExec, List<String> unixConnect, Egress egress,
     List<Integer> inbound, boolean keychain) {
 
-  /** Where a child's outbound sockets may go: nowhere, one loopback proxy port, or anywhere. */
-  public record Egress(Kind kind, int proxyPort) {
+  /**
+   * Where a child's outbound sockets may go: nowhere, one loopback proxy port, or anywhere.
+   *
+   * <p>A proxy egress with {@code loopback} also lets the child connect directly to every
+   * loopback port except {@code loopbackDeny}; the proxy port itself stays reachable. On
+   * macOS the child shares the host's loopback, so this reaches its own listeners and the
+   * host's loopback services. On Linux the child has its own network namespace: its own
+   * listeners are always reachable, and host loopback services only through the proxy.
+   */
+  public record Egress(Kind kind, int proxyPort, boolean loopback, List<Integer> loopbackDeny) {
     public enum Kind { OFF, PROXY, OPEN }
 
-    public static final Egress OFF = new Egress(Kind.OFF, 0);
-    public static final Egress OPEN = new Egress(Kind.OPEN, 0);
+    public static final Egress OFF = new Egress(Kind.OFF, 0, false, List.of());
+    public static final Egress OPEN = new Egress(Kind.OPEN, 0, false, List.of());
+
+    public Egress {
+      loopbackDeny = loopback ? ports(loopbackDeny) : List.of();
+    }
 
     public static Egress proxy(int port) {
+      return proxy(port, false, List.of());
+    }
+
+    public static Egress proxy(int port, boolean loopback, List<Integer> loopbackDeny) {
       if (port < 1 || port > 65535) {
         throw new IllegalArgumentException("proxy port must be between 1 and 65535: " + port);
       }
-      return new Egress(Kind.PROXY, port);
+      return new Egress(Kind.PROXY, port, loopback, loopbackDeny);
     }
   }
 
@@ -80,7 +97,7 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
     Set<Integer> distinct = new LinkedHashSet<>();
     for (Integer port : values) {
       if (port == null || port < 1 || port > 65535) {
-        throw new IllegalArgumentException("inbound port must be between 1 and 65535: " + port);
+        throw new IllegalArgumentException("port must be between 1 and 65535: " + port);
       }
       distinct.add(port);
     }

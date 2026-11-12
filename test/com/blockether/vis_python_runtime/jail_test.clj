@@ -171,6 +171,23 @@
              (is (str/includes? proxied "(allow network-outbound (remote ip \"localhost:5555\"))"))
              (is (str/includes? proxied "(allow network-inbound (local ip \"*:4200\"))"))
              (is (str/includes? (compile {:network :open}) "(allow network*)"))))
+         (testing "direct loopback denies its reserved ports last, never the proxy port"
+           (let [p
+                 (compile {:network {:proxy 5555 :loopback? true :loopback-deny [5555 7000]}})
+
+                 allow-all
+                 (str/index-of p "(allow network-outbound (remote ip \"localhost:*\"))")
+
+                 deny
+                 (str/index-of p "(deny network-outbound (remote ip \"localhost:7000\"))")]
+
+             (is (and allow-all deny (< allow-all deny)) p)
+             (is (not (str/includes? p "(deny network-outbound (remote ip \"localhost:5555\"))")))
+             (is (not (str/includes? (compile {:network {:proxy 5555}})
+                                     "(allow network-outbound (remote ip \"localhost:*\"))"))
+                 "without the grant the proxy port stays the only door")))
+         (testing "a child may signal only its own sandbox"
+           (is (str/includes? (compile {}) "(allow signal (target same-sandbox))")))
          (testing "one exact Unix control socket is reachable after the network deny"
            (let [socket
                  (str root "/control.sock")
@@ -420,6 +437,71 @@
              (.destroyForcibly p)
              (.waitFor p 5 TimeUnit/SECONDS))
            (finally (delete-tree root))))))
+
+(deftest a-confined-process-signals-only-its-own-descendants-test
+  ;; Vis #470: Seatbelt refused every signal to a child, so no timeout could stop one.
+  (let [root
+        (temp-dir)
+
+        ^Process outside
+        (.start (ProcessBuilder. ["/bin/sleep" "30"]))
+
+        script
+        (str "/bin/sleep 5 >/dev/null 2>&1 & child=$!\n"
+             "/bin/sh -c '/bin/sleep 5 & echo $! > grand; wait' >/dev/null 2>&1 & shell=$!\n"
+             "while [ ! -s grand ]; do /bin/sleep 0.05; done; grand=$(cat grand)\n"
+             "kill -0 $child && kill -TERM $child; wait $child; echo \"child=$?\"\n"
+             "kill -TERM $grand && echo grandchild=ok\n"
+             "wait $shell\n"
+             "if kill -0 "
+             (.pid outside)
+             " 2>/dev/null; then echo outside=reached; else echo outside=blocked; fi\n")]
+
+    (try (let [{:keys [exit out err]} (run-process ["/bin/bash" "-c" script] (options root))]
+           (is (= 0 exit) err)
+           (is (str/includes? out "child=143") "TERM reaches a direct child and ends it")
+           (is (str/includes? out "grandchild=ok") "a descendant of a child is signalled too")
+           (when (macos?)
+             (is (str/includes? out "outside=blocked")
+                 "a process that the jail did not start stays out of reach")))
+         (finally (.destroyForcibly outside) (delete-tree root)))))
+
+(deftest direct-loopback-reaches-own-listeners-but-not-denied-ports-test
+  ;; Vis #469: a test server in the jail could not be reached by its own client.
+  (when-let [nc (some #(when (.canExecute (io/file %)) %) ["/usr/bin/nc" "/bin/nc"])]
+    (let [root (temp-dir)
+          proxy (loopback-server)
+          denied (loopback-server)
+          own-port (with-open [s (loopback-server)]
+                     (.getLocalPort s))
+          script (str nc
+                      " -l 127.0.0.1 "
+                      own-port
+                      " < /dev/null > got 2>/dev/null & server=$!\n"
+                      "for i in $(seq 50); do exec 3<>/dev/tcp/127.0.0.1/"
+                      own-port
+                      " 2>/dev/null && break; /bin/sleep 0.1; done\n"
+                      "printf 'hello\\n' >&3; exec 3>&-\n"
+                      "for i in $(seq 50); do [ -s got ] && break; /bin/sleep 0.1; done\n"
+                      "kill $server 2>/dev/null; echo \"own=$(cat got)\"\n"
+                      "exec 4<>/dev/tcp/127.0.0.1/"
+                      (.getLocalPort proxy)
+                      " && echo proxy=ok\n"
+                      "if exec 5<>/dev/tcp/127.0.0.1/"
+                      (.getLocalPort denied)
+                      " 2>/dev/null; then echo denied=escaped; else echo denied=blocked; fi\n")
+          policy {:read-write [(str root)]
+                  :network {:proxy (.getLocalPort proxy)
+                            :loopback? true
+                            :loopback-deny [(.getLocalPort proxy) (.getLocalPort denied)]}}]
+
+      (try (let [{:keys [exit out err]} (run-process ["/bin/bash" "-c" script]
+                                                     (options root {:policy policy}))]
+             (is (= 0 exit) err)
+             (is (str/includes? out "own=hello") "a client reaches the listener of its own jail")
+             (is (str/includes? out "proxy=ok") "a denied proxy port stays the policy door")
+             (is (str/includes? out "denied=blocked") "a reserved host port stays closed"))
+           (finally (.close proxy) (.close denied) (delete-tree root))))))
 
 (deftest process-on-exit-with-busy-common-pool-test
   ;; Codex handshakes stalled behind process waiters in the common pool.

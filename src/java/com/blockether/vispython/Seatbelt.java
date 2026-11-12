@@ -148,6 +148,9 @@ public final class Seatbelt {
     StringBuilder out = new StringBuilder();
     out.append("(version 1)(import \"system.sb\")(deny default)");
     out.append("(allow process-fork process-exec)(allow sysctl-read)");
+    // Each spawn enters its own sandbox, so this reaches the child's descendants only:
+    // never the host, another session or a process that another spawn confined.
+    out.append("(allow signal (target same-sandbox))");
     // GraalVM native images signal through a named POSIX semaphore at startup.
     out.append("(allow ipc-posix-sem)");
     // A pty slave (/dev/ttysNNN) is inherited already open; termios and window-size
@@ -197,6 +200,10 @@ public final class Seatbelt {
   /**
    * Binding is broad (any local address, any port); accepting is the gated
    * capability: every loopback port, plus each listed port on every interface.
+   *
+   * <p>Direct loopback egress puts its port denies after every {@code remote ip} allow:
+   * Seatbelt lets a later {@code remote ip} allow for another port reopen a denied port.
+   * The proxy port is never denied, so the child keeps its one policy door.
    */
   private static String network(JailPolicy policy) {
     StringBuilder inbound = new StringBuilder();
@@ -209,7 +216,20 @@ public final class Seatbelt {
       case OPEN -> "(allow network*)";
       case OFF -> "(deny network*)" + inbound;
       case PROXY -> "(deny network*)" + inbound + "(allow network-outbound (remote ip \"localhost:"
-          + policy.egress().proxyPort() + "\"))";
+          + policy.egress().proxyPort() + "\"))" + loopback(policy.egress());
     };
+  }
+
+  private static String loopback(JailPolicy.Egress egress) {
+    if (!egress.loopback()) {
+      return "";
+    }
+    StringBuilder out = new StringBuilder("(allow network-outbound (remote ip \"localhost:*\"))");
+    for (Integer port : egress.loopbackDeny()) {
+      if (port != egress.proxyPort()) {
+        out.append("(deny network-outbound (remote ip \"localhost:").append(port).append("\"))");
+      }
+    }
+    return out.toString();
   }
 }
