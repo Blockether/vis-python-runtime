@@ -46,6 +46,16 @@ int visjail_kill(int pid, int signal_number);
 /* End every live process that a Seatbelt profile allowing the Mach name `service`
  * confined, also a detached one, and return the count, or -EINVAL. */
 int visjail_end_confined(const char *service);
+/* 1 when a live process whose profile allows the Mach name `mark` holds a TCP
+ * connection from loopback peer_port to loopback server_port, else 0, or a negative
+ * errno. A process whose profile allows own_service does not count; NULL counts all. */
+int visjail_loopback_peer_confined(int server_port, int peer_port, const char *mark,
+                                   const char *own_service);
+#endif
+
+#if defined(__linux__)
+/* 1 when the kernel can keep a confined child from signalling outside its domain. */
+int visjail_signal_scoped(void);
 #endif
 
 #if defined(_WIN32)

@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>
 #if defined(__linux__)
 #include "network_bridge.h"
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #endif
 #include <sys/types.h>
@@ -21,6 +22,7 @@
 #include <unistd.h>
 
 #if defined(__APPLE__)
+#include <arpa/inet.h>
 #include <libproc.h>
 #include <sandbox.h>
 #include <util.h>
@@ -29,6 +31,53 @@
 #endif
 
 extern char **environ;
+
+#if defined(__linux__)
+/* Landlock ABI 6 (Linux 6.12) can keep a process from signalling outside its
+   domain. Older kernel headers lack these names. */
+#ifndef __NR_landlock_create_ruleset
+#define __NR_landlock_create_ruleset 444
+#endif
+#ifndef __NR_landlock_restrict_self
+#define __NR_landlock_restrict_self 446
+#endif
+#define VISJAIL_LANDLOCK_VERSION 1U
+#define VISJAIL_LANDLOCK_SCOPE_SIGNAL (1ULL << 1)
+
+struct visjail_landlock_ruleset
+{
+  uint64_t handled_access_fs;
+  uint64_t handled_access_net;
+  uint64_t scoped;
+};
+
+int
+visjail_signal_scoped(void)
+{
+  return syscall(__NR_landlock_create_ruleset, NULL, 0, VISJAIL_LANDLOCK_VERSION) >= 6;
+}
+
+/* The calling process and its descendants signal only inside their own domain.
+   Returns 0, also when the kernel has no signal scope, or -1 when it refuses. */
+static int
+scope_signals(void)
+{
+  struct visjail_landlock_ruleset ruleset = {0, 0, VISJAIL_LANDLOCK_SCOPE_SIGNAL};
+  long fd;
+  int result;
+
+  if (!visjail_signal_scoped())
+    return 0;
+  if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+    return -1;
+  fd = syscall(__NR_landlock_create_ruleset, &ruleset, sizeof ruleset, 0);
+  if (fd < 0)
+    return -1;
+  result = syscall(__NR_landlock_restrict_self, (int) fd, 0) == 0 ? 0 : -1;
+  close((int) fd);
+  return result;
+}
+#endif
 
 static int
 answer_error(char *out, int cap, const char *format, ...)
@@ -319,6 +368,8 @@ visjail_spawn(const char *argv_blob, int argv_len,
       }
 #else
       (void) profile;
+      if (scope_signals() != 0)
+        child_fail("Landlock signal scope");
       _exit(visjail_linux_bridge_run(argv, argc, proxy_port, inbound_port));
 #endif
     }
@@ -525,4 +576,96 @@ visjail_end_confined(const char *service)
   free(stopped);
   return count;
 }
+
+static int
+loopback_address(const struct in_sockinfo *in, int local)
+{
+  if (in->insi_vflag & INI_IPV4)
+    {
+      struct in_addr address = local ? in->insi_laddr.ina_46.i46a_addr4
+                                     : in->insi_faddr.ina_46.i46a_addr4;
+      return (ntohl(address.s_addr) >> 24) == 127;
+    }
+  if (in->insi_vflag & INI_IPV6)
+    {
+      const struct in6_addr *address = local ? &in->insi_laddr.ina_6 : &in->insi_faddr.ina_6;
+      return IN6_IS_ADDR_LOOPBACK(address)
+             || (IN6_IS_ADDR_V4MAPPED(address) && address->s6_addr[12] == 127);
+    }
+  return 0;
+}
+
+/* Whether pid holds a TCP socket from loopback peer_port to loopback server_port. */
+static int
+holds_connection(pid_t pid, int server_port, int peer_port)
+{
+  int size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, NULL, 0);
+  struct proc_fdinfo *fds;
+  int found = 0;
+  int n;
+
+  if (size <= 0)
+    return 0;
+  size += 16 * (int) sizeof *fds;
+  fds = malloc((size_t) size);
+  if (fds == NULL)
+    return -ENOMEM;
+  n = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, size) / (int) sizeof *fds;
+  for (int i = 0; i < n && !found; i++)
+    {
+      struct socket_fdinfo info;
+      const struct in_sockinfo *in;
+      if (fds[i].proc_fdtype != PROX_FDTYPE_SOCKET
+          || proc_pidfdinfo(pid, fds[i].proc_fd, PROC_PIDFDSOCKETINFO, &info, sizeof info)
+             != (int) sizeof info
+          || info.psi.soi_kind != SOCKINFO_TCP)
+        continue;
+      in = &info.psi.soi_proto.pri_tcp.tcpsi_ini;
+      found = ntohs((uint16_t) in->insi_lport) == peer_port
+              && ntohs((uint16_t) in->insi_fport) == server_port
+              && loopback_address(in, 1) && loopback_address(in, 0);
+    }
+  free(fds);
+  return found;
+}
+
+int
+visjail_loopback_peer_confined(int server_port, int peer_port, const char *mark,
+                               const char *own_service)
+{
+  char control[512];
+  int type = VISJAIL_FILTER_GLOBAL_NAME | VISJAIL_CHECK_NO_REPORT;
+  int room;
+  pid_t *pids;
+  int n;
+  int found = 0;
+
+  if (server_port < 1 || server_port > 65535 || peer_port < 1 || peer_port > 65535
+      || mark == NULL || mark[0] == '\0'
+      || snprintf(control, sizeof control, "%s.control", mark) >= (int) sizeof control)
+    return -EINVAL;
+  room = proc_listpids(PROC_UID_ONLY, getuid(), NULL, 0);
+  if (room <= 0)
+    return -errno;
+  room += 64 * (int) sizeof(pid_t);
+  pids = malloc((size_t) room);
+  if (pids == NULL)
+    return -ENOMEM;
+  n = proc_listpids(PROC_UID_ONLY, getuid(), pids, room) / (int) sizeof(pid_t);
+  for (int i = 0; i < n && found == 0; i++)
+    {
+      pid_t pid = pids[i];
+      /* The fd holder counts, not the process that opened the socket: a parent can
+         pass the connection to a child and exit. */
+      if (pid <= 1 || !confined_by(pid, mark, control))
+        continue;
+      if (own_service != NULL && own_service[0] != '\0'
+          && sandbox_check(pid, "mach-lookup", type, own_service) == 0)
+        continue;
+      found = holds_connection(pid, server_port, peer_port);
+    }
+  free(pids);
+  return found;
+}
 #endif
+

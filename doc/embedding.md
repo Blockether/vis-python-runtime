@@ -127,6 +127,10 @@ and the bundled Linux namespace enforcer on Linux. Check `Jail.unsupportedReason
 or `jail-unsupported-reason` before relying on that path-based policy. A policy
 `:owner` marks each confined process; on macOS `end-confined-processes!` ends
 every live process with that owner, also one that left its spawner's tree.
+On macOS, `loopback-peer-confined?` tells a server whether a confined process of
+another owner holds an accepted loopback connection. `jail-signal-scoped?` is true
+when a confined child can signal only its own descendants: always on macOS, and on
+Linux with Landlock ABI 6 (kernel 6.12).
 
 On Windows, use [`WindowsJail` / `windows-jail`](windows-jail.md). This separate
 contract uses a low-privilege AppContainer, copied read-only application files

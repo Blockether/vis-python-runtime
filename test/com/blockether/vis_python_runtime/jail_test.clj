@@ -204,7 +204,7 @@
            (let [p (compile {:keychain? true})]
              (is (str/includes? p "(allow mach-lookup(global-name \"com.apple.SecurityServer\")"))
              (is (str/includes? p "com.apple.trustd.agent")))
-           (is (not (str/includes? (compile {}) "mach-lookup"))))
+           (is (not (re-find #"com\.apple\.(SecurityServer|trustd)" (compile {})))))
          (testing "a link on the way to a granted path is a metadata literal"
            ;; Vis #394: SDKMAN runs `java/current/bin/java`; the real path alone left the
            ;; link `current` unreadable, so the exec failed.
@@ -461,7 +461,8 @@
            (is (= 0 exit) err)
            (is (str/includes? out "child=143") "TERM reaches a direct child and ends it")
            (is (str/includes? out "grandchild=ok") "a descendant of a child is signalled too")
-           (when (macos?)
+           ;; Vis #471: on Linux only Landlock (kernel 6.12) gives the same limit.
+           (when (runtime/jail-signal-scoped?)
              (is (str/includes? out "outside=blocked")
                  "a process that the jail did not start stays out of reach")))
          (finally (.destroyForcibly outside) (delete-tree root)))))
@@ -531,6 +532,61 @@
                     (runtime/end-confined-processes! other)
                     (.destroyForcibly outside)
                     (delete-tree root))))))
+
+(deftest a-server-tells-a-connection-from-a-process-of-another-owner-test
+  ;; Vis #473: a jailed child reached the doors and the API of another live gateway.
+  (is (str/includes? (Seatbelt/compile (runtime/jail-policy {}))
+                     "(allow mach-lookup (global-name \"com.blockether.vis.jail\"))")
+      "every profile carries the Vis mark")
+  (if-not (macos?)
+    (is (false? (runtime/loopback-peer-confined? 1 2 nil)))
+    (let [root
+          (temp-dir)
+
+          server
+          (loopback-server)
+
+          port
+          (.getLocalPort server)
+
+          owner
+          (str "peer-" (System/nanoTime))
+
+          ;; The shell opens the connection, hands it to a detached sleeper and exits:
+          ;; the holder of the socket counts, not the process that opened it.
+          script
+          (str "exec 3<>/dev/tcp/127.0.0.1/"
+               port
+               "\n"
+               "/bin/sleep 30 <&3 >/dev/null 2>&1 &\n"
+               "exit 0\n")]
+
+      (try (let [{:keys [exit err]}
+                 (run-process ["/bin/bash" "-c" script]
+                              (options root {:policy {:network {:proxy port} :owner owner}}))
+
+                 confined
+                 (.accept server)
+
+                 unconfined-client
+                 (java.net.Socket. (InetAddress/getLoopbackAddress) port)
+
+                 unconfined
+                 (.accept server)]
+
+             (is (= 0 exit) err)
+             (is (runtime/loopback-peer-confined? port (.getPort confined) nil)
+                 "a connection that a confined process holds counts for any owner")
+             (is (runtime/loopback-peer-confined? port (.getPort confined) (str owner "-other"))
+                 "it counts for another owner")
+             (is (false? (runtime/loopback-peer-confined? port (.getPort confined) owner))
+                 "it does not count for its own owner")
+             (is (false? (runtime/loopback-peer-confined? port (.getPort unconfined) nil))
+                 "a connection from a process that no jail started does not count")
+             (is (false? (runtime/loopback-peer-confined? (inc port) (.getPort confined) nil))
+                 "the server port must match")
+             (.close unconfined-client))
+           (finally (runtime/end-confined-processes! owner) (.close server) (delete-tree root))))))
 
 (deftest direct-loopback-reaches-own-listeners-but-not-denied-ports-test
   ;; Vis #469: a test server in the jail could not be reached by its own client.

@@ -128,6 +128,24 @@
   [owner]
   (Jail/endConfined (str owner)))
 
+(defn loopback-peer-confined?
+  "Whether a live process that a [[jail-policy]] confined, with an `:owner` other than
+   `owner` (nil: any owner), holds the TCP connection from loopback `peer-port` to
+   loopback `server-port`. A server asks this once for each accepted connection. macOS
+   only: on Linux a confined child reaches no host loopback port directly, so false."
+  [server-port peer-port owner]
+  (Jail/loopbackPeerConfined (int server-port)
+                             (int peer-port)
+                             (some-> owner
+                                     str)))
+
+(defn jail-signal-scoped?
+  "Whether a confined child can signal only its own descendants. Always on macOS; on
+   Linux only with Landlock ABI 6 (kernel 6.12), else it can signal every process of
+   its user."
+  []
+  (Jail/signalScoped))
+
 (defn jail-unsupported-reason
   "Why this host cannot confine a child — no Seatbelt or namespaces, WSL1, no
    `libvisjail` beside the runtime — or nil when it can. Windows has a separate

@@ -26,6 +26,12 @@ public final class Seatbelt {
   /** Characters a path may contain that a regex would otherwise read as syntax. */
   private static final String REGEX_METACHARACTERS = "\\.+^$|()";
 
+  /**
+   * The Mach service name that every profile allows, so {@link Jail#loopbackPeerConfined}
+   * can tell a process that any Vis profile confined. No process registers it.
+   */
+  static final String MARK = "com.blockether.vis.jail";
+
   private Seatbelt() {}
 
   /**
@@ -159,6 +165,7 @@ public final class Seatbelt {
     // Each spawn enters its own sandbox, so this reaches the child's descendants only:
     // never the host, another session or a process that another spawn confined.
     out.append("(allow signal (target same-sandbox))");
+    out.append("(allow mach-lookup (global-name ").append(quote(MARK)).append("))");
     if (policy.owner() != null) {
       out.append("(allow mach-lookup (global-name ").append(quote(ownerService(policy.owner())))
           .append("))");

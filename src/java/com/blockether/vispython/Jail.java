@@ -45,8 +45,8 @@ public final class Jail {
 
   private static Map<String, MethodHandle> handles;
 
-  /** Only the macOS library exports {@code visjail_end_confined}; linked on first use. */
-  private static MethodHandle endConfined;
+  /** Symbols that only some platform libraries export, linked on first use. */
+  private static final Map<String, MethodHandle> optional = new HashMap<>();
 
   private Jail() {}
 
@@ -290,14 +290,37 @@ public final class Jail {
     return invokeInts("visjail_kill", pid, signal, null);
   }
 
-  private static synchronized MethodHandle endConfinedHandle() {
-    if (endConfined == null) {
-      MemorySegment address = libraryLookup().find("visjail_end_confined").orElseThrow(() ->
-          new VisPythonException("Process-jail library exports no visjail_end_confined",
-              Map.of("symbol", "visjail_end_confined")));
-      endConfined = Linker.nativeLinker().downcallHandle(address, descriptor(ValueLayout.ADDRESS));
+  private static synchronized MethodHandle optionalHandle(String symbol, FunctionDescriptor type) {
+    MethodHandle handle = optional.get(symbol);
+    if (handle == null) {
+      MemorySegment address = libraryLookup().find(symbol).orElseThrow(() ->
+          new VisPythonException("Process-jail library exports no " + symbol,
+              Map.of("symbol", symbol)));
+      handle = Linker.nativeLinker().downcallHandle(address, type);
+      optional.put(symbol, handle);
     }
-    return endConfined;
+    return handle;
+  }
+
+  /** Call a symbol that only some platform libraries export; strings go as C strings. */
+  private static int callOptional(String symbol, Object... arguments) {
+    MemoryLayout[] layouts = new MemoryLayout[arguments.length];
+    for (int i = 0; i < arguments.length; i++) {
+      layouts[i] = arguments[i] instanceof Integer ? ValueLayout.JAVA_INT : ValueLayout.ADDRESS;
+    }
+    try (Arena arena = Arena.ofConfined()) {
+      Object[] values = new Object[arguments.length];
+      for (int i = 0; i < arguments.length; i++) {
+        values[i] = arguments[i] instanceof String text ? arena.allocateFrom(text)
+            : arguments[i] == null ? MemorySegment.NULL : arguments[i];
+      }
+      return (int) optionalHandle(symbol, descriptor(layouts)).invokeWithArguments(values);
+    } catch (RuntimeException | Error exception) {
+      throw exception;
+    } catch (Throwable throwable) {
+      throw new VisPythonException("Could not invoke " + symbol + ": " + throwable,
+          Map.of("symbol", symbol), throwable);
+    }
   }
 
   /**
@@ -315,23 +338,52 @@ public final class Jail {
     if (!Native.platform().startsWith("darwin-")) {
       return 0;
     }
-    byte[] service = (Seatbelt.ownerService(checked) + "\0").getBytes(StandardCharsets.UTF_8);
-    int ended;
-    try (Arena arena = Arena.ofConfined()) {
-      MemorySegment name = arena.allocate(service.length);
-      MemorySegment.copy(service, 0, name, ValueLayout.JAVA_BYTE, 0, service.length);
-      ended = (int) endConfinedHandle().invokeExact(name);
-    } catch (RuntimeException | Error exception) {
-      throw exception;
-    } catch (Throwable throwable) {
-      throw new VisPythonException("Could not invoke visjail_end_confined: " + throwable,
-          Map.of("symbol", "visjail_end_confined"), throwable);
-    }
+    int ended = callOptional("visjail_end_confined", Seatbelt.ownerService(checked));
     if (ended < 0) {
       throw new VisPythonException("Could not end confined processes: errno " + -ended,
           Map.of("owner", checked, "errno", -ended));
     }
     return ended;
+  }
+
+  /**
+   * Whether a live process that a Vis policy confined, with an owner other than
+   * {@code owner} (null: any owner), holds the TCP connection from loopback
+   * {@code peerPort} to loopback {@code serverPort}. A server calls this for an accepted
+   * connection. The holder of the socket counts, not the process that opened it. On
+   * macOS every profile carries a mark that the kernel reports. On Linux a confined
+   * child has its own network namespace and reaches no host loopback port directly,
+   * so this returns false.
+   */
+  public static boolean loopbackPeerConfined(int serverPort, int peerPort, String owner) {
+    if (serverPort < 1 || serverPort > 65535 || peerPort < 1 || peerPort > 65535) {
+      throw new IllegalArgumentException("ports must be between 1 and 65535");
+    }
+    String checked = JailPolicy.owner(owner);
+    if (!Native.platform().startsWith("darwin-")) {
+      return false;
+    }
+    int found = callOptional("visjail_loopback_peer_confined", serverPort, peerPort, Seatbelt.MARK,
+        checked == null ? null : Seatbelt.ownerService(checked));
+    if (found < 0) {
+      throw new VisPythonException("Could not check a loopback peer: errno " + -found,
+          Map.of("serverPort", serverPort, "peerPort", peerPort, "errno", -found));
+    }
+    return found == 1;
+  }
+
+  /**
+   * Whether a confined child can signal only its own processes: its children and their
+   * descendants. macOS always limits signals to the child's own sandbox. Linux needs
+   * Landlock ABI 6 (kernel 6.12); on an older kernel a child can signal every process
+   * of its user. Windows answers false: use {@link WindowsJail}.
+   */
+  public static boolean signalScoped() {
+    String platform = Native.platform();
+    if (platform.startsWith("darwin-")) {
+      return true;
+    }
+    return platform.startsWith("linux-") && callOptional("visjail_signal_scoped") == 1;
   }
 
   private static int invokeInts(String symbol, int first, int second, MemorySegment address) {
