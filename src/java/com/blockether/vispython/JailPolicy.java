@@ -21,8 +21,9 @@ import java.util.Set;
  * directories and the platform read roots are the compiler's to add, so a
  * caller names only the session's directories. {@code unixConnect} contains exact
  * local control sockets a child may dial. {@code inbound} ports are additionally
- * reachable on every interface; loopback listeners are always allowed. A child may
- * signal only the processes it started, and their descendants.
+ * reachable on every interface; loopback listeners are always allowed. On macOS, a
+ * child may signal only the processes it started, and their descendants. Bubblewrap on
+ * Linux has no PID namespace, so a child there can signal every process of its user.
  * {@code keychain} opens the OS credential store: the Security services and
  * keychain databases on macOS, the D-Bus session bus on Linux.
  *
@@ -41,7 +42,8 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
    * <p>A proxy egress with {@code loopback} also lets the child connect directly to every
    * loopback port except {@code loopbackDeny}; the proxy port itself stays reachable. On
    * macOS the child shares the host's loopback, so this reaches its own listeners and the
-   * host's loopback services. On Linux the child has its own network namespace: its own
+   * host's loopback services; Seatbelt's {@code localhost} also covers the host's other
+   * addresses. On Linux the child has its own network namespace: its own
    * listeners are always reachable, and host loopback services only through the proxy.
    */
   public record Egress(Kind kind, int proxyPort, boolean loopback, List<Integer> loopbackDeny) {
