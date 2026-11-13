@@ -415,14 +415,14 @@
 
              (is (= 0 exit) err)
              (is (= tmp (.getParent dir)) "a real path, under /tmp without a parent")
-             (is (re-matches (re-pattern (str "vis-run-" owner "@[0-9a-f]{8}"))
+             (is (re-matches (re-pattern (str "vis-" owner "@[0-9a-f]{6}"))
                              (str (.getFileName dir)))
                  "a short name: a socket path holds about 100 bytes")
              (is (gone? dir) (str dir " still exists after the child exited"))))
          (testing "the owner sweep deletes what a killed spawner left, and only its own"
            (let [left
                  (fn [of]
-                   (doto (Files/createDirectory (.resolve tmp (str "vis-run-" of "@left"))
+                   (doto (Files/createDirectory (.resolve tmp (str "vis-" of "@left"))
                                                 (make-array FileAttribute 0))
                      (-> (.resolve "control.sock")
                          str
@@ -510,7 +510,7 @@
            (spit (str outside "/k" i) ""))
          (testing "in the owner sweep"
            (let [dir
-                 (Files/createDirectory (.resolve tmp (str "vis-run-" owner "@left"))
+                 (Files/createDirectory (.resolve tmp (str "vis-" owner "@left"))
                                         (make-array FileAttribute 0))
 
                  swap

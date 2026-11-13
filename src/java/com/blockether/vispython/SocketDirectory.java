@@ -34,7 +34,7 @@ import java.util.concurrent.ThreadLocalRandom;
  * directory and follows no symbolic link: it removes nothing outside the directory.
  */
 public record SocketDirectory(String variable, String parent) {
-  private static final String PREFIX = "vis-run-";
+  private static final String PREFIX = "vis-";
   /** Not an owner character, so one owner is never the prefix of another. */
   private static final char OWNER_END = '@';
   private static final int NAME_ATTEMPTS = 100;
@@ -63,7 +63,7 @@ public record SocketDirectory(String variable, String parent) {
   }
 
   private static String prefix(String owner) {
-    return owner == null ? PREFIX : PREFIX + owner + OWNER_END;
+    return PREFIX + (owner == null ? "" : owner) + OWNER_END;
   }
 
   /** A new empty directory for one child of a policy with {@code owner} (null: no owner). */
@@ -73,9 +73,9 @@ public record SocketDirectory(String variable, String parent) {
       FileAttribute<?> mode =
           PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"));
       for (int attempt = 0; attempt < NAME_ATTEMPTS; attempt++) {
-        // Eight characters, not the 19 of a temporary name: the socket path has a limit.
+        // A short name, not the 19 digits of a temporary name: the socket path has a limit.
         Path dir = root.resolve(prefix(owner)
-            + String.format("%08x", ThreadLocalRandom.current().nextInt()));
+            + String.format("%06x", ThreadLocalRandom.current().nextInt(1 << 24)));
         try {
           Files.createDirectory(dir, mode);
           LIVE.add(dir);
