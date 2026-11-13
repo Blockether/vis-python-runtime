@@ -415,7 +415,9 @@
 
              (is (= 0 exit) err)
              (is (= tmp (.getParent dir)) "a real path, under /tmp without a parent")
-             (is (str/starts-with? (str (.getFileName dir)) (str "vis-run-" owner "@")))
+             (is (re-matches (re-pattern (str "vis-run-" owner "@[0-9a-f]{8}"))
+                             (str (.getFileName dir)))
+                 "a short name: a socket path holds about 100 bytes")
              (is (gone? dir) (str dir " still exists after the child exited"))))
          (testing "the owner sweep deletes what a killed spawner left, and only its own"
            (let [left
@@ -438,6 +440,117 @@
                       "a directory of another owner stays")
                   (finally (delete-tree mine) (delete-tree theirs)))))
          (finally (delete-tree root)))))
+
+(defn- swap-during-delete
+  "Fill `dir`/sub with the names of the files in `outside`. When a delete of `sub` starts,
+   swap `sub` for a link to `outside`, as a process that a child left can do. Returns a
+   future of `:swapped`."
+  [^Path dir ^Path outside]
+  (let [sub
+        (Files/createDirectory (.resolve dir "sub") (make-array FileAttribute 0))
+
+        none
+        (make-array java.nio.file.LinkOption 0)]
+
+    (doseq [^String name (.list (.toFile outside))]
+      (spit (str (.resolve sub name)) ""))
+    (let [before (Files/getLastModifiedTime sub none)]
+      (future (loop [n 0]
+                (when (and (< n 20000) (= before (Files/getLastModifiedTime sub none)))
+                  (Thread/sleep 1)
+                  (recur (inc n))))
+              (Files/move sub (.resolve dir "moved") (make-array java.nio.file.CopyOption 0))
+              (Files/createSymbolicLink sub outside (make-array FileAttribute 0))
+              :swapped))))
+
+(deftest a-delete-stays-in-the-socket-directory-test
+  ;; The host deletes with its own rights. A delete by path follows an entry that a
+  ;; process in the jail swaps for a link, and then deletes files outside the jail.
+  (let [root
+        (temp-dir)
+
+        outside
+        (temp-dir)
+
+        tmp
+        (.toRealPath (Path/of "/tmp" (make-array String 0)) (make-array java.nio.file.LinkOption 0))
+
+        owner
+        (str "swap-" (System/nanoTime))
+
+        sockets
+        {:variable "SOCKETS"}
+
+        kept
+        (fn []
+          (count (.list (.toFile outside))))]
+
+    (dotimes [i 3000]
+      (spit (str outside "/k" i) ""))
+    (try (testing "at the exit of the child"
+           (let [^Process p
+                 (runtime/spawn-process!
+                   ["/bin/sh" "-c" "printf '%s\\n' \"$SOCKETS\"; read line; exit 0"]
+                   (options root
+                            {:policy {:read-write [(str root)] :owner owner} :socket-dir sockets}))
+
+                 dir
+                 (Path/of (.readLine (io/reader (.getInputStream p))) (make-array String 0))
+
+                 swap
+                 (swap-during-delete dir outside)]
+
+             (try (.close (.getOutputStream p))
+                  (is (= 0 (.waitFor p)))
+                  (is (= :swapped (deref swap 30000 :no-delete-started)))
+                  (is (gone? dir))
+                  (is (= 3000 (kept)) "each file outside the directory stays")
+                  (finally (delete-tree dir)))))
+         (dotimes [i 3000]
+           (spit (str outside "/k" i) ""))
+         (testing "in the owner sweep"
+           (let [dir
+                 (Files/createDirectory (.resolve tmp (str "vis-run-" owner "@left"))
+                                        (make-array FileAttribute 0))
+
+                 swap
+                 (swap-during-delete dir outside)]
+
+             (try (runtime/end-confined-processes! owner sockets)
+                  (is (= :swapped (deref swap 30000 :no-delete-started)))
+                  (is (gone? dir))
+                  (is (= 3000 (kept)) "each file outside the directory stays")
+                  (finally (delete-tree dir)))))
+         (finally (delete-tree root) (delete-tree outside)))))
+
+(deftest a-sweep-leaves-the-directory-of-a-live-child-test
+  ;; A sweep ends processes only on macOS. A host also sweeps its own owner while it
+  ;; runs, and the directory of a child that still runs is not a leftover.
+  (let [root
+        (temp-dir)
+
+        owner
+        (str "live-" (System/nanoTime))
+
+        sockets
+        {:variable "SOCKETS"}
+
+        ^Process p
+        (runtime/spawn-process!
+          ["/bin/sh" "-c" "printf '%s\\n' \"$SOCKETS\"; exec /bin/sleep 30"]
+          (options root {:policy {:read-write [(str root)] :owner owner} :socket-dir sockets}))
+
+        dir
+        (Path/of (.readLine (io/reader (.getInputStream p))) (make-array String 0))]
+
+    (try (if (pos? (runtime/end-confined-processes! owner sockets))
+           (is (.waitFor p 5 TimeUnit/SECONDS) "macOS ends the child")
+           (do (is (.isAlive p))
+               (is (Files/exists dir (make-array java.nio.file.LinkOption 0))
+                   "a child that runs keeps its directory")
+               (.destroyForcibly p)))
+         (is (gone? dir) "the exit of the child deletes it")
+         (finally (.destroyForcibly p) (delete-tree root)))))
 
 (deftest seatbelt-enforces-a-pattern-deny-test
   ;; Vis #263: a deny rule may be a pattern. Enumerating its matches when the policy is

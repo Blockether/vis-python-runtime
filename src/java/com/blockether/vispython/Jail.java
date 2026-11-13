@@ -367,8 +367,9 @@ public final class Jail {
 
   /**
    * {@link #endConfined(String)}, and then delete each directory that {@code sockets} made
-   * for a child of {@code owner}: a spawner that was killed deleted none of them. On Linux
-   * a confined child dies with its spawner, so the directories of an ended spawner are free.
+   * for a child of {@code owner}: a spawner that was killed deleted none of them. The
+   * directory of a live child of this process stays, because its exit deletes it. Only
+   * macOS ends processes, so on Linux this is safe also for the owner of this process.
    */
   public static int endConfined(String owner, SocketDirectory sockets) {
     String checked = JailPolicy.owner(owner);
