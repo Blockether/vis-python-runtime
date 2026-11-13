@@ -101,6 +101,15 @@ public record SocketDirectory(String variable, String parent) {
     }
   }
 
+  /**
+   * {@link #delete} on its own thread. A process in the jail can block the delete, and a
+   * callback of the exit can run on the thread that waits for the child.
+   */
+  static void deleteLater(Path dir) {
+    Thread.ofPlatform().daemon().name("visjail-sockets-" + dir.getFileName())
+        .start(() -> delete(dir));
+  }
+
   /** Delete the directory of a child that ended, and return whether it is gone. */
   static boolean delete(Path dir) {
     try (DirectoryStream<Path> parent = Files.newDirectoryStream(dir.getParent())) {
@@ -206,7 +215,8 @@ public record SocketDirectory(String variable, String parent) {
         }
         for (Path name : left) {
           try {
-            if (isDirectory(secure, name)) {
+            // Again: a delete before this one can block, and a new child can take the name.
+            if (!LIVE.contains(root.resolve(name)) && isDirectory(secure, name)) {
               removeTree(secure, name);
               deleted.incrementAndGet();
             }

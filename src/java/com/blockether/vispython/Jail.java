@@ -198,7 +198,7 @@ public final class Jail {
     try {
       JailedProcess process = spawnCompiled(command, env, directory,
           policy.withUnixSocketDir(socketDir.toString()), true, pty, mergeError, rows, columns);
-      process.onExit().whenComplete((exited, failure) -> SocketDirectory.delete(socketDir));
+      process.onExit().whenComplete((exited, failure) -> SocketDirectory.deleteLater(socketDir));
       return process;
     } catch (RuntimeException | Error exception) {
       SocketDirectory.delete(socketDir);
