@@ -104,6 +104,14 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
         keychain, null);
   }
 
+  /** This policy with one more socket directory. */
+  JailPolicy withUnixSocketDir(String dir) {
+    List<String> dirs = new ArrayList<>(unixSocketDirs);
+    dirs.add(dir);
+    return new JailPolicy(readWrite, readOnly, denyRead, denyWrite, denyExec, unixConnect, dirs,
+        egress, inbound, keychain, owner);
+  }
+
   /** A blank owner is none; any other value must be 1 to 64 of {@code A-Z a-z 0-9 . _ -}. */
   static String owner(String value) {
     if (value == null || value.isBlank()) {

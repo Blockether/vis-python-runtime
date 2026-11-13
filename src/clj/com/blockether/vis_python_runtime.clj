@@ -22,7 +22,7 @@
    `.data` map contains available diagnostics such as symbol, status or path.
    Python errors from [[run-block]] instead appear in its JSON `error` field."
   (:import [com.blockether.vispython HostFunction Interpreter Jail JailPolicy JailPolicy$Egress
-            Locations Native Pip Trust WindowsJail]
+            Locations Native Pip SocketDirectory Trust WindowsJail]
            [java.nio.file Path]
            [java.util.function Consumer]))
 
@@ -120,13 +120,27 @@
                (boolean keychain?)
                owner))
 
+(defn- socket-directory
+  "The `:socket-dir` option `{:variable <name> :parent <dir>}` as the runtime's value: a
+   directory (mode 0700, under `:parent`, default `/tmp`) where ONE confined child may
+   bind and dial Unix sockets. Its path is in the child's environment variable
+   `:variable`, and the runtime deletes it when the child exits."
+  ^SocketDirectory [{:keys [variable parent]}]
+  (SocketDirectory. variable
+                    (some-> parent
+                            str)))
+
 (defn end-confined-processes!
   "End every live process that a [[jail-policy]] with this `:owner` confined, also
    one that left its spawner's process tree, and return how many. macOS finds
    them through the kernel's sandbox; elsewhere no process carries an owner, so
-   this returns 0."
-  [owner]
-  (Jail/endConfined (str owner)))
+   this returns 0. With the `socket-dir` that [[spawn-process!]] got, also delete
+   each socket directory of this owner that a killed spawner left."
+  ([owner] (end-confined-processes! owner nil))
+  ([owner socket-dir]
+   (Jail/endConfined (str owner)
+                     (some-> socket-dir
+                             socket-directory))))
 
 (defn loopback-peer-confined?
   "Whether a live process that a [[jail-policy]] confined, with an `:owner` other than
@@ -166,14 +180,17 @@
    the host cannot enforce throws instead of running the child unconfined; no
    policy keeps only the process group and stream handling. `:environment` is
    the COMPLETE child environment; a confined child also carries `Jail/MARKER`.
+   `:socket-dir` gives a child that this call confines its own Unix socket directory.
    On Windows use [[spawn-windows-process!]]; this function always refuses it."
   ([command] (spawn-process! command {}))
-  ([command {:keys [environment directory policy pty? merge-stderr? rows columns]}]
+  ([command {:keys [environment directory policy socket-dir pty? merge-stderr? rows columns]}]
    (Jail/spawn (vec command)
                (or environment {})
                directory
                (some-> policy
                        jail-policy)
+               (some-> socket-dir
+                       socket-directory)
                (boolean pty?)
                (boolean merge-stderr?)
                (int (or rows 0))

@@ -159,6 +159,17 @@ public final class Jail {
    */
   public static JailedProcess spawn(List<String> command, Map<String, String> environment,
       String directory, JailPolicy policy, boolean pty, boolean mergeError, int rows, int columns) {
+    return spawn(command, environment, directory, policy, null, pty, mergeError, rows, columns);
+  }
+
+  /**
+   * {@link #spawn(List, Map, String, JailPolicy, boolean, boolean, int, int)} with a
+   * {@link SocketDirectory}: a child that this call confines gets its own directory for
+   * Unix sockets until it exits. A child that this call does not confine gets none.
+   */
+  public static JailedProcess spawn(List<String> command, Map<String, String> environment,
+      String directory, JailPolicy policy, SocketDirectory sockets, boolean pty,
+      boolean mergeError, int rows, int columns) {
     if (command == null || command.isEmpty()) {
       throw new IllegalArgumentException("command must not be empty");
     }
@@ -178,6 +189,26 @@ public final class Jail {
     if (policy != null) {
       env.put(MARKER, "1");
     }
+    Path socketDir = confined && sockets != null ? sockets.create(policy.owner()) : null;
+    if (socketDir == null) {
+      return spawnCompiled(command, env, directory, policy, confined, pty, mergeError, rows,
+          columns);
+    }
+    env.put(sockets.variable(), socketDir.toString());
+    try {
+      JailedProcess process = spawnCompiled(command, env, directory,
+          policy.withUnixSocketDir(socketDir.toString()), true, pty, mergeError, rows, columns);
+      process.onExit().whenComplete((exited, failure) -> SocketDirectory.delete(socketDir));
+      return process;
+    } catch (RuntimeException | Error exception) {
+      SocketDirectory.delete(socketDir);
+      throw exception;
+    }
+  }
+
+  private static JailedProcess spawnCompiled(List<String> command, Map<String, String> env,
+      String directory, JailPolicy policy, boolean confined, boolean pty, boolean mergeError,
+      int rows, int columns) {
     boolean linux = confined && Native.platform().startsWith("linux-");
     String profile = null;
     List<String> actual = new ArrayList<>();
@@ -331,10 +362,27 @@ public final class Jail {
    * Bubblewrap policies carry no owner, so on other systems this ends nothing and returns 0.
    */
   public static int endConfined(String owner) {
+    return endConfined(owner, null);
+  }
+
+  /**
+   * {@link #endConfined(String)}, and then delete each directory that {@code sockets} made
+   * for a child of {@code owner}: a spawner that was killed deleted none of them. On Linux
+   * a confined child dies with its spawner, so the directories of an ended spawner are free.
+   */
+  public static int endConfined(String owner, SocketDirectory sockets) {
     String checked = JailPolicy.owner(owner);
     if (checked == null) {
       throw new IllegalArgumentException("owner is required");
     }
+    int ended = endProcesses(checked);
+    if (sockets != null) {
+      sockets.sweep(checked);
+    }
+    return ended;
+  }
+
+  private static int endProcesses(String checked) {
     if (!Native.platform().startsWith("darwin-")) {
       return 0;
     }

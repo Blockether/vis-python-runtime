@@ -127,6 +127,11 @@ and the bundled Linux namespace enforcer on Linux. Check `Jail.unsupportedReason
 or `jail-unsupported-reason` before relying on that path-based policy. A policy
 `:owner` marks each confined process; on macOS `end-confined-processes!` ends
 every live process with that owner, also one that left its spawner's tree.
+A `SocketDirectory` / `:socket-dir` gives each confined child its own directory
+where it can bind and dial Unix sockets, and puts its path in an environment
+variable that the host names. The runtime deletes the directory when the child
+exits; `end-confined-processes!` with the same value deletes what a killed
+spawner left.
 On macOS, `loopback-peer-confined?` tells a server whether a confined process of
 another owner holds an accepted loopback connection. `jail-signal-scoped?` is true
 when a confined child can signal only its own descendants: always on macOS, and on

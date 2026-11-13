@@ -366,6 +366,79 @@
                  (str "a socket outside the grant stays refused: " result)))
            (finally (delete-tree root))))))
 
+(defn- gone?
+  [^Path path]
+  (loop [n 0]
+    (cond (not (Files/exists path (make-array java.nio.file.LinkOption 0))) true
+          (= n 100) false
+          :else (do (Thread/sleep 50) (recur (inc n))))))
+
+(deftest a-confined-child-gets-its-own-socket-directory-test
+  ;; Vis #474: the runtime owns the directory, from the spawn to the owner sweep.
+  (let [root
+        (temp-dir)
+
+        tmp
+        (.toRealPath (Path/of "/tmp" (make-array String 0)) (make-array java.nio.file.LinkOption 0))
+
+        owner
+        (str "sockets-" (System/nanoTime))
+
+        sockets
+        {:variable "SOCKETS"}
+
+        ;; macOS refuses a bind that the profile does not grant; Linux needs only the write.
+        command
+        (if (macos?)
+          ["/usr/bin/perl" "-MIO::Socket::UNIX" "-e"
+           (str "my $d = $ENV{SOCKETS}; mkdir \"$d/w\" or die \"mkdir $!\";"
+                "IO::Socket::UNIX->new(Type => SOCK_STREAM(), Local => \"$d/w/control.sock\","
+                " Listen => 1) or die \"bind $!\"; print $d;")]
+          ["/bin/sh" "-c"
+           "mkdir \"$SOCKETS/w\" && : > \"$SOCKETS/w/file\" && printf %s \"$SOCKETS\""])]
+
+    (try (testing "a child that the call does not confine gets no directory"
+           (is (= "none"
+                  (:out (run-process ["/bin/sh" "-c" "printf %s \"${SOCKETS:-none}\""]
+                                     {:environment {"PATH" "/usr/bin:/bin"}
+                                      :directory (str root)
+                                      :socket-dir sockets})))))
+         (testing "a confined child uses its directory, and the directory goes at exit"
+           (let [{:keys [exit out err]}
+                 (run-process command
+                              (options root
+                                       {:policy {:read-write [(str root)] :owner owner}
+                                        :socket-dir sockets}))
+
+                 dir
+                 (Path/of out (make-array String 0))]
+
+             (is (= 0 exit) err)
+             (is (= tmp (.getParent dir)) "a real path, under /tmp without a parent")
+             (is (str/starts-with? (str (.getFileName dir)) (str "vis-run-" owner "@")))
+             (is (gone? dir) (str dir " still exists after the child exited"))))
+         (testing "the owner sweep deletes what a killed spawner left, and only its own"
+           (let [left
+                 (fn [of]
+                   (doto (Files/createDirectory (.resolve tmp (str "vis-run-" of "@left"))
+                                                (make-array FileAttribute 0))
+                     (-> (.resolve "control.sock")
+                         str
+                         (spit ""))))
+
+                 mine
+                 (left owner)
+
+                 theirs
+                 (left (str owner "-other"))]
+
+             (try (runtime/end-confined-processes! owner sockets)
+                  (is (gone? mine))
+                  (is (Files/exists theirs (make-array java.nio.file.LinkOption 0))
+                      "a directory of another owner stays")
+                  (finally (delete-tree mine) (delete-tree theirs)))))
+         (finally (delete-tree root)))))
+
 (deftest seatbelt-enforces-a-pattern-deny-test
   ;; Vis #263: a deny rule may be a pattern. Enumerating its matches when the policy is
   ;; built would miss every file that appears afterwards, so the pattern itself compiles
