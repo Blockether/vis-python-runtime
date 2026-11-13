@@ -21,7 +21,9 @@ import java.util.regex.Pattern;
  * platform's own code and configuration; a deny list always wins. The temp
  * directories and the platform read roots are the compiler's to add, so a
  * caller names only the session's directories. {@code unixConnect} contains exact
- * local control sockets a child may dial. {@code inbound} ports are additionally
+ * local control sockets a child may dial. Under each {@code unixSocketDirs} directory the
+ * child may write, bind local sockets and dial them, so a host program that the child
+ * starts can make its own control sockets there (Vis #474). {@code inbound} ports are additionally
  * reachable on every interface; loopback listeners are always allowed. On macOS, a
  * child may signal only the processes it started, and their descendants. Bubblewrap on
  * Linux has no PID namespace, so a child there can signal every process of its user.
@@ -34,8 +36,9 @@ import java.util.regex.Pattern;
  * what it cannot express, so a policy that must hold on Linux also names exact paths.
  */
 public record JailPolicy(List<String> readWrite, List<String> readOnly, List<String> denyRead,
-    List<String> denyWrite, List<String> denyExec, List<String> unixConnect, Egress egress,
-    List<Integer> inbound, boolean keychain, String owner) {
+    List<String> denyWrite, List<String> denyExec, List<String> unixConnect,
+    List<String> unixSocketDirs, Egress egress, List<Integer> inbound, boolean keychain,
+    String owner) {
 
   /** What an owner may be: it becomes part of a Mach service name in the profile. */
   private static final Pattern OWNER = Pattern.compile("[A-Za-z0-9._-]{1,64}");
@@ -79,9 +82,18 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
     denyWrite = strings(denyWrite);
     denyExec = strings(denyExec);
     unixConnect = strings(unixConnect);
+    unixSocketDirs = strings(unixSocketDirs);
     egress = egress == null ? Egress.OFF : egress;
     inbound = ports(inbound);
     owner = owner(owner);
+  }
+
+  /** A policy without socket directories. */
+  public JailPolicy(List<String> readWrite, List<String> readOnly, List<String> denyRead,
+      List<String> denyWrite, List<String> denyExec, List<String> unixConnect, Egress egress,
+      List<Integer> inbound, boolean keychain, String owner) {
+    this(readWrite, readOnly, denyRead, denyWrite, denyExec, unixConnect, List.of(), egress,
+        inbound, keychain, owner);
   }
 
   /** A policy with no owner: nothing can find its processes later. */
@@ -184,9 +196,10 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
     return dirs;
   }
 
-  /** The policy with every path resolved and the temp directories granted. */
+  /** The policy with every path resolved and the temp and socket directories granted. */
   Resolved resolve() {
     List<String> rw = new ArrayList<>(readWrite);
+    rw.addAll(unixSocketDirs);
     rw.addAll(tempDirs());
     List<String> granted = new ArrayList<>(rw);
     granted.addAll(readOnly);

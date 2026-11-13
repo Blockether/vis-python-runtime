@@ -200,6 +200,15 @@
 
              (is (str/includes? p (str "(remote unix-socket(path \"" socket "\"))")))
              (is (< (str/index-of p "(deny network*)") (str/index-of p "(remote unix-socket")))))
+         (testing "a socket directory allows bind and dial below it after the network deny"
+           (let [p (compile {:unix-socket-dirs [(str root)]})]
+             (is (str/includes?
+                   p
+                   (str "(allow network-bind (local unix-socket (subpath \"" root "\")))")))
+             (is (str/includes?
+                   p
+                   (str "(allow network-outbound (remote unix-socket (subpath \"" root "\")))")))
+             (is (< (str/index-of p "(deny network*)") (str/index-of p "(local unix-socket")))))
          (testing "keychain opens the Security services and the keychain databases"
            (let [p (compile {:keychain? true})]
              (is (str/includes? p "(allow mach-lookup(global-name \"com.apple.SecurityServer\")"))
@@ -321,6 +330,41 @@
              (is (.waitFor p 5 TimeUnit/SECONDS))
              (is (not (.isAlive p)))))
          (finally (when (.exists outside) (io/delete-file outside true)) (delete-tree root)))))
+
+(deftest a-child-binds-unix-sockets-only-in-its-socket-directory-test
+  ;; Vis #474: a jailed shell runs `vis-agent`, which binds its worker control socket.
+  ;; A writable path alone does not allow the bind on macOS: Seatbelt checks network-bind.
+  (when (macos?)
+    (let [;; Short: an AF_UNIX path holds at most 104 bytes.
+          root
+          (.toRealPath (Files/createTempDirectory (Path/of "/tmp" (make-array String 0))
+                                                  "vj-"
+                                                  (make-array FileAttribute 0))
+                       (make-array java.nio.file.LinkOption 0))
+
+          sockets
+          (Files/createDirectories (.resolve root "s") (make-array FileAttribute 0))
+
+          script
+          (str
+            "use IO::Socket::UNIX; use File::Basename; mkdir dirname($ARGV[0]);"
+            "my $s = IO::Socket::UNIX->new(Type => SOCK_STREAM(), Local => $ARGV[0], Listen => 1)"
+            " or die \"bind $!\";"
+            "IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $ARGV[0]) or die \"dial $!\";")
+
+          bind
+          (fn [^Path socket]
+            (run-process ["/usr/bin/perl" "-e" script (str socket)]
+                         (options root
+                                  {:policy {:read-write [(str root)]
+                                            :unix-socket-dirs [(str sockets)]}})))]
+
+      (try (let [result (bind (.resolve sockets "vis-py-1/control.sock"))]
+             (is (= 0 (:exit result)) (str "a socket below the grant binds and answers: " result)))
+           (let [result (bind (.resolve root "control.sock"))]
+             (is (str/includes? (:err result) "bind Operation not permitted")
+                 (str "a socket outside the grant stays refused: " result)))
+           (finally (delete-tree root))))))
 
 (deftest seatbelt-enforces-a-pattern-deny-test
   ;; Vis #263: a deny rule may be a pattern. Enumerating its matches when the policy is

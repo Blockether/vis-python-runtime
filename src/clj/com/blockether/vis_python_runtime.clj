@@ -98,23 +98,23 @@
         :else JailPolicy$Egress/OFF))
 
 (defn jail-policy
-  "The confinement value `spawn-process!` compiles, from a map: path lists
-   `:read-write`/`:read-only`/`:deny-read`/`:deny-write`/`:deny-exec` (`~` allowed; a deny
-   wins; temp and the platform's code are the compiler's to add); `:network` is `:off`
-   (default), `:open` or `{:proxy <port>}`, the one loopback port sockets may reach, and
-   `:loopback? true` adds every other loopback port except `:loopback-deny`;
-   `:unix-connect` lists exact local sockets; `:inbound` ports exposed on every interface
-   (loopback listeners always are); `:keychain?` opens the OS credential store; `:owner`
-   marks each confined process for [[end-confined-processes!]]. macOS/Linux only: Windows
-   uses [[windows-jail]] and private copies instead of host-path grants."
-  [{:keys [read-write read-only deny-read deny-write deny-exec unix-connect network inbound
-           keychain? owner]}]
+  "The confinement value `spawn-process!` compiles, from a map: path lists `:read-write`,
+   `:read-only`, `:deny-read`, `:deny-write`, `:deny-exec` (`~` allowed; a deny wins; temp
+   and platform code are the compiler's); `:network` is `:off` (default), `:open` or
+   `{:proxy <port>}` (`:loopback? true` adds other loopback ports but `:loopback-deny`);
+   `:unix-connect` exact local sockets; `:unix-socket-dirs` where a child may write, bind
+   and dial local sockets; `:inbound` ports on every interface; `:keychain?` the credential
+   store; `:owner` for [[end-confined-processes!]]. macOS/Linux only: Windows uses
+   [[windows-jail]] and private copies instead of host-path grants."
+  [{:keys [read-write read-only deny-read deny-write deny-exec unix-connect unix-socket-dirs network
+           inbound keychain? owner]}]
   (JailPolicy. (vec read-write)
                (vec read-only)
                (vec deny-read)
                (vec deny-write)
                (vec deny-exec)
                (vec unix-connect)
+               (vec unix-socket-dirs)
                (egress network)
                (mapv int inbound)
                (boolean keychain?)
