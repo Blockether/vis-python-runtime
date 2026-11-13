@@ -23,7 +23,8 @@ import java.util.regex.Pattern;
  * caller names only the session's directories. {@code unixConnect} contains exact
  * local control sockets a child may dial. Under each {@code unixSocketDirs} directory the
  * child may write, bind local sockets and dial them, so a host program that the child
- * starts can make its own control sockets there (Vis #474). {@code inbound} ports are additionally
+ * starts can make its own control sockets there (Vis #474). Such a directory is granted as
+ * written and not resolved: name its real path. {@code inbound} ports are additionally
  * reachable on every interface; loopback listeners are always allowed. On macOS, a
  * child may signal only the processes it started, and their descendants. Bubblewrap on
  * Linux has no PID namespace, so a child there can signal every process of its user.
@@ -204,14 +205,19 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
     return dirs;
   }
 
-  /** The policy with every path resolved and the temp and socket directories granted. */
+  /**
+   * The policy with every path resolved and the temp and socket directories granted. A
+   * socket directory is granted as written: every jail can write {@code /tmp}, so a process
+   * can put a link in the place of a new directory, and a resolved grant follows that link.
+   */
   Resolved resolve() {
     List<String> rw = new ArrayList<>(readWrite);
-    rw.addAll(unixSocketDirs);
     rw.addAll(tempDirs());
     List<String> granted = new ArrayList<>(rw);
     granted.addAll(readOnly);
-    return new Resolved(realPaths(rw), realPaths(readOnly), denyPaths(denyRead),
+    Set<String> writable = new LinkedHashSet<>(realPaths(rw));
+    writable.addAll(unixSocketDirs);
+    return new Resolved(List.copyOf(writable), realPaths(readOnly), denyPaths(denyRead),
         denyPaths(denyWrite), denyPaths(denyExec), links(granted));
   }
 

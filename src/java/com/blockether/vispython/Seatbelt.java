@@ -214,7 +214,7 @@ public final class Seatbelt {
       out.append("))");
     }
     // A Unix socket bind is a network operation, not a file write (Vis #474).
-    for (String dir : JailPolicy.realPaths(policy.unixSocketDirs())) {
+    for (String dir : policy.unixSocketDirs()) {
       out.append("(allow network-bind (local unix-socket (subpath ").append(quote(dir))
           .append(")))(allow network-outbound (remote unix-socket (subpath ")
           .append(quote(dir)).append(")))");

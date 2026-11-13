@@ -72,8 +72,14 @@ public final class Bubblewrap {
     for (String path : readOnly) {
       bind(args, "--ro-bind-try", path, path);
     }
+    Set<String> shared = new LinkedHashSet<>(resolved.readWrite());
+    shared.removeAll(policy.unixSocketDirs());
     for (String path : resolved.readWrite()) {
-      bind(args, "--bind-try", path, path);
+      // A socket directory in a bound tree is there already, and a bind follows a link
+      // that a process in another jail put in its place.
+      if (!(policy.unixSocketDirs().contains(path) && inside(path, shared))) {
+        bind(args, "--bind-try", path, path);
+      }
     }
     // Only bound paths exist in the child, so a link on the way to a grant must be made
     // again; one inside a bound tree is already there.

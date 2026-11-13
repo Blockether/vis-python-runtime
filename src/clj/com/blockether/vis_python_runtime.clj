@@ -102,10 +102,10 @@
    `:read-only`, `:deny-read`, `:deny-write`, `:deny-exec` (`~` allowed; a deny wins; temp
    and platform code are the compiler's); `:network` is `:off` (default), `:open` or
    `{:proxy <port>}` (`:loopback? true` adds other loopback ports but `:loopback-deny`);
-   `:unix-connect` exact local sockets; `:unix-socket-dirs` where a child may write, bind
-   and dial local sockets; `:inbound` ports on every interface; `:keychain?` the credential
-   store; `:owner` for [[end-confined-processes!]]. macOS/Linux only: Windows uses
-   [[windows-jail]] and private copies instead of host-path grants."
+   `:unix-connect` exact local sockets; `:unix-socket-dirs` real paths where a child may
+   write, bind and dial local sockets; `:inbound` ports on every interface; `:keychain?`
+   the credential store; `:owner` for [[end-confined-processes!]]. macOS/Linux only:
+   Windows uses [[windows-jail]] and private copies instead of host-path grants."
   [{:keys [read-write read-only deny-read deny-write deny-exec unix-connect unix-socket-dirs network
            inbound keychain? owner]}]
   (JailPolicy. (vec read-write)

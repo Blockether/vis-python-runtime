@@ -247,6 +247,17 @@
              (is (= 5555 (Bubblewrap/proxyPort p)))
              (is (= 4200 (Bubblewrap/inboundPort p)))
              (is (= 0 (Bubblewrap/proxyPort (runtime/jail-policy {:network :open}))))))
+         (testing "a socket directory in a bound tree gets no bind: a bind follows a swapped link"
+           (let [inside
+                 (str (Files/createDirectory (.resolve root "sockets")
+                                             (make-array FileAttribute 0)))
+
+                 args
+                 (compile {:unix-socket-dirs [inside "/run/task/sockets"]})]
+
+             (is (not-any? #{["--bind-try" inside inside]} (partition 3 1 args)))
+             (is (some #{["--bind-try" "/run/task/sockets" "/run/task/sockets"]}
+                       (partition 3 1 args)))))
          (testing "deny-read masks a directory with tmpfs and a file with /dev/null"
            (let [dir
                  (str (Files/createDirectory (.resolve root "hidden") (make-array FileAttribute 0)))
@@ -521,6 +532,48 @@
                   (is (gone? dir))
                   (is (= 3000 (kept)) "each file outside the directory stays")
                   (finally (delete-tree dir)))))
+         (finally (delete-tree root) (delete-tree outside)))))
+
+;; A sweep ran three passes at each level, so 33 nested directories held it for good.
+(deftest a-deep-tree-does-not-hold-a-sweep-test
+  (let [owner
+        (str "deep-" (System/nanoTime))
+
+        dir
+        (.resolve (.toRealPath (Path/of "/tmp" (make-array String 0))
+                               (make-array java.nio.file.LinkOption 0))
+                  (str "vis-" owner "@left"))]
+
+    (Files/createDirectories (reduce #(.resolve ^Path %1 ^String %2) dir (repeat 40 "d"))
+                             (make-array FileAttribute 0))
+    (try (is (not= :held
+                   (deref (future (runtime/end-confined-processes! owner {:variable "SOCKETS"}))
+                          20000
+                          :held)))
+         (finally (delete-tree dir)))))
+
+(deftest a-link-in-place-of-a-socket-directory-grants-nothing-test
+  ;; Every jail can write `/tmp`, so a process in another jail can swap a new socket
+  ;; directory for a link. A grant that resolves the path again gives the target away.
+  (let [root
+        (temp-dir)
+
+        outside
+        (.toRealPath (Files/createDirectories (.toPath (io/file (System/getProperty "user.home")
+                                                                (str ".visjail-swap-"
+                                                                     (System/nanoTime))))
+                                              (make-array FileAttribute 0))
+                     (make-array java.nio.file.LinkOption 0))
+
+        link
+        (Files/createSymbolicLink (.resolve root "sockets") outside (make-array FileAttribute 0))]
+
+    (try (let [result (run-process ["/bin/sh" "-c" ": > \"$1/taken\"" "sh" (str link)]
+                                   (options root
+                                            {:policy {:read-write [(str root)]
+                                                      :unix-socket-dirs [(str link)]}}))]
+           (is (not= 0 (:exit result)) (str result))
+           (is (not (.exists (io/file (str outside) "taken")))))
          (finally (delete-tree root) (delete-tree outside)))))
 
 (deftest a-sweep-leaves-the-directory-of-a-live-child-test

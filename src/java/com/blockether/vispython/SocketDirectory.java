@@ -6,6 +6,7 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.SecureDirectoryStream;
 import java.nio.file.attribute.BasicFileAttributeView;
@@ -17,6 +18,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A private directory for ONE confined child, where it may bind and dial Unix sockets
@@ -42,6 +44,8 @@ public record SocketDirectory(String variable, String parent) {
   private static final int MAX_DEPTH = 32;
   /** A process can add entries during the delete; the owner sweep takes what stays. */
   private static final int PASSES = 3;
+  /** A process in a jail can block one delete, so a sweep waits only this long for its deletes. */
+  private static final long SWEEP_MILLIS = 10_000;
   /** The directories of the live children of this process. Their exit deletes them; a sweep does not. */
   private static final Set<Path> LIVE = ConcurrentHashMap.newKeySet();
 
@@ -76,12 +80,18 @@ public record SocketDirectory(String variable, String parent) {
         // A short name, not the 19 digits of a temporary name: the socket path has a limit.
         Path dir = root.resolve(prefix(owner)
             + String.format("%06x", ThreadLocalRandom.current().nextInt(1 << 24)));
+        // Live before it exists: a sweep must never see it as a leftover.
+        if (!LIVE.add(dir)) {
+          continue;
+        }
         try {
           Files.createDirectory(dir, mode);
-          LIVE.add(dir);
           return dir;
         } catch (FileAlreadyExistsException taken) {
-          // Try another name.
+          LIVE.remove(dir);
+        } catch (IOException | RuntimeException failed) {
+          LIVE.remove(dir);
+          throw failed;
         }
       }
       throw new IOException("no free name under " + root);
@@ -95,7 +105,7 @@ public record SocketDirectory(String variable, String parent) {
   static boolean delete(Path dir) {
     try (DirectoryStream<Path> parent = Files.newDirectoryStream(dir.getParent())) {
       if (parent instanceof SecureDirectoryStream<Path> secure) {
-        remove(secure, dir.getFileName(), 0);
+        removeTree(secure, dir.getFileName());
       }
     } catch (IOException | RuntimeException exception) {
       // It stays until an owner sweep.
@@ -114,10 +124,27 @@ public record SocketDirectory(String variable, String parent) {
     }
   }
 
+  /** {@link #remove}, again while a process adds entries. The work is linear in the tree. */
+  private static void removeTree(SecureDirectoryStream<Path> parent, Path name)
+      throws IOException {
+    for (int pass = 1; ; pass++) {
+      try {
+        remove(parent, name, 0);
+        return;
+      } catch (NoSuchFileException gone) {
+        return;
+      } catch (IOException exception) {
+        if (pass == PASSES) {
+          throw exception;
+        }
+      }
+    }
+  }
+
   /**
    * Delete the entry {@code name} of the open directory {@code parent}: a directory with
    * its contents, any other entry as it is. An entry that cannot go stays, and then its
-   * directories stay too.
+   * directories stay too. The open of a directory that a process swaps for a FIFO blocks.
    */
   private static void remove(SecureDirectoryStream<Path> parent, Path name, int depth)
       throws IOException {
@@ -128,23 +155,18 @@ public record SocketDirectory(String variable, String parent) {
     if (depth > MAX_DEPTH) {
       throw new IOException("too deep: " + name);
     }
-    for (int pass = 0; pass < PASSES; pass++) {
-      try (SecureDirectoryStream<Path> dir =
-          parent.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS)) {
-        // Read the names first: a delete during the read can hide an entry.
-        List<Path> entries = new ArrayList<>();
-        for (Path entry : dir) {
-          entries.add(entry.getFileName());
-        }
-        if (entries.isEmpty()) {
-          break;
-        }
-        for (Path entry : entries) {
-          try {
-            remove(dir, entry, depth + 1);
-          } catch (IOException | RuntimeException exception) {
-            // It stays.
-          }
+    try (SecureDirectoryStream<Path> dir =
+        parent.newDirectoryStream(name, LinkOption.NOFOLLOW_LINKS)) {
+      // Read the names first: a delete during the read can hide an entry.
+      List<Path> entries = new ArrayList<>();
+      for (Path entry : dir) {
+        entries.add(entry.getFileName());
+      }
+      for (Path entry : entries) {
+        try {
+          remove(dir, entry, depth + 1);
+        } catch (IOException | RuntimeException exception) {
+          // It stays.
         }
       }
     }
@@ -153,15 +175,27 @@ public record SocketDirectory(String variable, String parent) {
 
   /**
    * Delete each directory that {@link #create} made for {@code owner} and that no live
-   * child of this process has; return how many.
+   * child of this process has; return how many. A delete that a process blocks does not
+   * hold the caller: the sweep then returns what it deleted, and the next sweep goes on.
    */
   int sweep(String owner) {
-    int deleted = 0;
+    AtomicInteger deleted = new AtomicInteger();
+    Thread worker = Thread.ofPlatform().daemon().name("visjail-sweep-" + owner)
+        .start(() -> sweep(owner, deleted));
+    try {
+      worker.join(SWEEP_MILLIS);
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+    }
+    return deleted.get();
+  }
+
+  private void sweep(String owner, AtomicInteger deleted) {
     try {
       Path root = root();
       try (DirectoryStream<Path> parent = Files.newDirectoryStream(root)) {
         if (!(parent instanceof SecureDirectoryStream<Path> secure)) {
-          return 0;
+          return;
         }
         List<Path> left = new ArrayList<>();
         for (Path entry : parent) {
@@ -173,8 +207,8 @@ public record SocketDirectory(String variable, String parent) {
         for (Path name : left) {
           try {
             if (isDirectory(secure, name)) {
-              remove(secure, name, 0);
-              deleted++;
+              removeTree(secure, name);
+              deleted.incrementAndGet();
             }
           } catch (IOException | RuntimeException exception) {
             // It stays.
@@ -184,6 +218,5 @@ public record SocketDirectory(String variable, String parent) {
     } catch (IOException | RuntimeException exception) {
       // No parent, no directories.
     }
-    return deleted;
   }
 }
