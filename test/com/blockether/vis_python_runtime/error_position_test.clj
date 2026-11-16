@@ -122,6 +122,23 @@
                    "repeats" 1}]
                  helpers)))))))
 
+(harness/defbuilt-test
+  block-stop-iteration-test
+  ;; A block runs as a coroutine, and Python turns a StopIteration that leaves a
+  ;; coroutine into `RuntimeError: coroutine raised StopIteration`, raised outside
+  ;; every frame of the block. The block wrote no coroutine: it is owed what the
+  ;; same lines raise in a script, at the line that raised it.
+  (let [session (harness/block-session)]
+    (testing "a `next` with nothing left reports StopIteration at its own line"
+      (let [source "rows = ['a']\ni = next(n for n, r in enumerate(rows) if r == 'z')"]
+        (is (= "StopIteration" (err session source)))
+        (is (= "next(n for n, r in enumerate(rows) if r == 'z')"
+               (caret source (position session))))))
+    (testing "a coroutine that the block wrote keeps the error Python gives it"
+      (let [source "async def first(rows):\n    return next(iter(rows))\n\nawait first([])"]
+        (is (= "RuntimeError: coroutine raised StopIteration" (err session source)))
+        (is (= "await first([])" (caret source (position session))))))))
+
 (defn- helper-caret
   "The source text one helper frame points at: its line, sliced by its columns."
   [{:strs [text col end_col]}]

@@ -1961,6 +1961,24 @@ def __vis_error_pos__(e, block=None):
     return (line, col, end_col, helpers)
 
 
+def __vis_block_stop__(e, block):
+    # The StopIteration that left the top level of `block`, or None. A block runs
+    # as the coroutine `__vis_main__`, so Python turns that StopIteration into
+    # `RuntimeError: coroutine raised StopIteration` and raises it outside every
+    # frame of the block. The block wrote no coroutine: it is owed the error that
+    # the same lines raise in a script, with the traceback that names the line.
+    # A coroutine that the block wrote keeps its RuntimeError: Python raises that
+    # one at the `await`, inside the block.
+    cause = e.__cause__
+    if type(e) is not RuntimeError or not isinstance(cause, StopIteration):
+        return None
+    tb = cause.__traceback__
+    frame = tb.tb_frame if tb is not None else None
+    if not __vis_is_block_frame__(frame) or frame.f_code.co_filename != block:
+        return None
+    return cause
+
+
 def __vis_err_pos_now__():
     # Compute the failed block's source position, then release its traceback.
     g = globals()
@@ -6121,8 +6139,11 @@ def __vis_run_async__(src):
     except BaseException as __vis_err__:
         # Keep the original failure, and the block it failed in, for the host's
         # separate position lookup.
-        g["__vis_err_obj__"] = __vis_err__
+        __vis_stop__ = __vis_block_stop__(__vis_err__, __vis_file__)
+        g["__vis_err_obj__"] = __vis_stop__ or __vis_err__
         g["__vis_err_block__"] = __vis_file__
+        if __vis_stop__ is not None:
+            raise __vis_stop__ from None
         raise
     finally:
         # The block is over: everything it wrote through a handle it still holds
