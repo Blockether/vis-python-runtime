@@ -5015,7 +5015,7 @@ def __vis_def_details__(name, fn):
     return "\n".join(rows)
 
 
-def defs(name=None, *, pattern=None, limit=20, offset=0, details=False):
+def __vis_defs__(name=None, *, pattern=None, limit=20, offset=0, details=False):
     """Find and refine the helpers and variables this session defined.
 
     `defs()` lists up to 20 entries: helpers sorted by name, then variables.
@@ -5030,6 +5030,7 @@ def defs(name=None, *, pattern=None, limit=20, offset=0, details=False):
     default types (`=<str>`), never values. They are hints, not executable code.
 
     `defs("name")` returns a helper's exact source, or a variable's row.
+    `defs["name"]` is the same lookup.
     `defs("name", details=True)` instead returns a helper's origin, source
     SHA-256 and up to 20 source-derived dependency names with types and
     presence, including captured names. No state values appear.
@@ -5135,6 +5136,29 @@ def defs(name=None, *, pattern=None, limit=20, offset=0, details=False):
     if offset + len(page) < len(matches):
         rows.append(f"More: offset={offset + len(page)}.")
     return "\n".join(rows)
+
+
+class __vis_Defs__:
+    # A function cannot take a subscript, so `defs` is this callable:
+    # `defs["name"]` reads like the mapping it lists. `__wrapped__` keeps the
+    # signature and the docstring that `inspect` and `doc` read.
+
+    def __init__(self, fn):
+        self.__wrapped__ = fn
+        self.__doc__ = fn.__doc__
+        self.__name__ = self.__qualname__ = "defs"
+
+    def __call__(self, *args, **kwargs):
+        return self.__wrapped__(*args, **kwargs)
+
+    def __getitem__(self, name):
+        return self.__wrapped__(name)
+
+    def __repr__(self):
+        return "<function defs>"
+
+
+defs = __vis_Defs__(__vis_defs__)
 
 
 def __vis_var_kind__(value):

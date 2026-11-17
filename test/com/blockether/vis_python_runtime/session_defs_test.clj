@@ -664,6 +664,9 @@
         source
         (ran session "print(defs(\"widen\"))")
 
+        subscripted
+        (ran session "print(defs[\"widen\"] == defs(\"widen\"))")
+
         missing
         (ran session
              (str "try:\n" "    defs(\"nope\")\n"
@@ -678,6 +681,8 @@
       (is (not (str/includes? listed "dumps"))))
     (testing "one name answers that helper's source"
       (is (str/includes? source "def widen(a, b=2):")))
+    (testing "a subscript is the same lookup as a call"
+      (is (= "True" subscripted)))
     (testing "a missing name suggests a bounded search instead of dumping the catalogue"
       (is (str/includes? missing "refused:"))
       (is (str/includes? missing "defs(pattern=")))))
