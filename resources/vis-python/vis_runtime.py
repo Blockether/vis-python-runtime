@@ -31,6 +31,7 @@ import _thread
 import threading
 import time
 import types
+import warnings
 
 import vis_code
 
@@ -971,15 +972,139 @@ class _BlockCapture(io.StringIO):
         return written
 
 
-def _capture_block(source, namespace, runner):
-    """Capture either block runner without changing its execution context."""
+_LATE_LIMIT = 65536
+_capture = None
+_block_thread = None
+_last_session = None
+_late_session = None
+_late = []
+_late_size = 0
+_late_dropped = 0
+_late_lock = threading.Lock()
+
+
+class _BlockStream(io.TextIOBase):
+    """`sys.stdout` and `sys.stderr` of the process: each write goes to the running block.
+
+    One object for the whole process, so a stream that an earlier block kept (a
+    logger, a console) still reaches the block that runs now. Errors, warnings and
+    logging write to stderr and come back with the block's output, in write order.
+    A thread that a block started and that writes after the block ended waits
+    for the next block of that session, which shows it with a note. The
+    interpreter's own writes between blocks (cleanup, collection) go to the
+    process stream as before.
+    """
+
+    def __init__(self, name, fallback):
+        super().__init__()
+        self._name = name
+        self._fallback = fallback
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def encoding(self):
+        return "utf-8"
+
+    def writable(self):
+        return True
+
+    def isatty(self):
+        return False
+
+    def close(self):
+        # Code that closes `sys.stdout` must not end the output of later blocks.
+        pass
+
+    def write(self, text):
+        global _late_size, _late_dropped, _late_session
+        if not isinstance(text, str):
+            raise TypeError(f"write() argument must be str, not {type(text).__name__}")
+        capture = _capture
+        if capture is not None:
+            capture.write(text)
+        elif threading.get_ident() == _block_thread:
+            if self._fallback is not None:
+                self._fallback.write(text)
+        elif text:
+            with _late_lock:
+                if _late_session != _last_session:
+                    _late.clear()
+                    _late_size = _late_dropped = 0
+                    _late_session = _last_session
+                room = _LATE_LIMIT - _late_size
+                if room > 0:
+                    _late.append(text[:room])
+                    _late_size += min(room, len(text))
+                _late_dropped += max(0, len(text) - max(room, 0))
+        return len(text)
+
+
+_STDOUT = _BlockStream("<stdout>", sys.stdout)
+_STDERR = _BlockStream("<stderr>", sys.stderr)
+
+# An interrupt that lands while `asyncio.Runner` closes leaves its own cleanup
+# coroutine unawaited; `loop.close()` still shuts the executor down. The warning
+# is the runtime's, not the block's, so it stays out of the block output. A
+# coroutine that a block forgot to await still warns.
+warnings.filterwarnings(
+    "ignore",
+    message=r"coroutine 'BaseEventLoop\.shutdown_(default_executor|asyncgens)' was never awaited",
+    category=RuntimeWarning,
+)
+
+
+def _drain_late(stream, session):
+    """Write what `session` printed between blocks into `stream`, once, with a note.
+
+    Late output of another session is dropped: it never reaches a stranger.
+    """
+    global _late_size, _late_dropped
+    with _late_lock:
+        text, dropped = "".join(_late), _late_dropped
+        if _late_session != session:
+            text, dropped = "", 0
+        _late.clear()
+        _late_size = _late_dropped = 0
+    if text or dropped:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        if dropped:
+            text += f"[Vis] {dropped} more characters were dropped.\n"
+        stream.write("[Vis] Printed after its block ended:\n" + text)
+
+
+def _capture_block(source, namespace, runner, is_sandbox=True):
+    """Capture either block runner without changing its execution context.
+
+    A sandbox block owns both process streams. A module run as a program keeps
+    the caller's stderr and gets only its stdout captured.
+    """
+    global _capture, _block_thread, _last_session
     stream = _BlockCapture(namespace.get("__vis_capture_stdout__"))
+    previous = _capture
+    _capture = stream
+    _block_thread = threading.get_ident()
+    session = namespace.get("__name__")
+    if is_sandbox:
+        sys.stdout, sys.stderr = _STDOUT, _STDERR
     error = None
-    with contextlib.redirect_stdout(stream):
-        try:
+    try:
+        with (
+            contextlib.nullcontext()
+            if is_sandbox
+            else contextlib.redirect_stdout(stream)
+        ):
+            if is_sandbox:
+                _drain_late(stream, session)
             runner(source)
-        except BaseException as exc:
-            error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    except BaseException as exc:
+        error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    finally:
+        _capture = previous
+        _last_session = session
     return {"stdout": stream.getvalue(), "error": error}
 
 
@@ -1027,7 +1152,7 @@ def run_sync_block(source, namespace):
         finally:
             flush()
 
-    return _capture_block(source, namespace, execute)
+    return _capture_block(source, namespace, execute, is_sandbox=False)
 
 
 def close_session(name):

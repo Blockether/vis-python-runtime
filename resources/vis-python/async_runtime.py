@@ -1783,6 +1783,17 @@ async def __vis_drive_async__(coro):
             close()
 
 
+def __vis_quiet_interrupts__(loop):
+    # The interrupt that stopped a block is that block's error already. The task it
+    # left unretrieved is not a second fault, and its log would land in the output.
+    def handle(loop, context):
+        if not isinstance(context.get("exception"), KeyboardInterrupt):
+            loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handle)
+    return loop
+
+
 def __vis_loop_factory__():
     # A POSIX pipe wakes the selector without creating any socket. Network-off
     # sessions still need timers and thread-safe callbacks; the C network policy
@@ -1835,7 +1846,7 @@ def __vis_loop_factory__():
                 self._csock = WakeupPipe(writer)
                 self._internal_fds += 1
 
-        return WindowsLoop()
+        return __vis_quiet_interrupts__(WindowsLoop())
 
     class Loop(std_asyncio.SelectorEventLoop):
         def _make_self_pipe(self):
@@ -1852,7 +1863,7 @@ def __vis_loop_factory__():
             self._internal_fds += 1
             self._add_reader(reader, self._read_from_self)
 
-    return Loop()
+    return __vis_quiet_interrupts__(Loop())
 
 
 def __vis_drive__(coro):
