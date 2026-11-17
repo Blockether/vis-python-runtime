@@ -1080,7 +1080,9 @@ def _capture_block(source, namespace, runner, is_sandbox=True):
     """Capture either block runner without changing its execution context.
 
     A sandbox block owns both process streams. A module run as a program keeps
-    the caller's stderr and gets only its stdout captured.
+    the caller's stderr and gets only its stdout captured. A session that sets
+    `__vis_keep_stderr__` (the `vis-agent python` terminal) keeps the process
+    stderr, so its errors go to the terminal and `fileno()` stays 2.
     """
     global _capture, _block_thread, _last_session
     stream = _BlockCapture(namespace.get("__vis_capture_stdout__"))
@@ -1089,7 +1091,10 @@ def _capture_block(source, namespace, runner, is_sandbox=True):
     _block_thread = threading.get_ident()
     session = namespace.get("__name__")
     if is_sandbox:
-        sys.stdout, sys.stderr = _STDOUT, _STDERR
+        sys.stdout = _STDOUT
+        sys.stderr = (
+            _STDERR._fallback if namespace.get("__vis_keep_stderr__") else _STDERR
+        )
     error = None
     try:
         with (

@@ -37,6 +37,13 @@
                "import sys\nprint('warned', file=sys.stderr)\nraise RuntimeError('after')"))))))
 
 (harness/defbuilt-test
+  terminal-session-keeps-process-stderr-test
+  (let [session (harness/block-session)]
+    (is (nil? (:error (block session "__vis_keep_stderr__ = True"))))
+    (is (= {:stdout "fd 2\n" :error nil}
+           (block session "import sys\nsys.stderr.write('to terminal\\n')\nprint('fd', sys.stderr.fileno())")))))
+
+(harness/defbuilt-test
   kept-stream-reaches-the-running-block-test
   (let [session (harness/block-session)]
     (is (nil? (:error (block session "import sys\nkept_out = sys.stdout\nkept_err = sys.stderr"))))
