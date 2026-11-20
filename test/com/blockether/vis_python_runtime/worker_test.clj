@@ -211,6 +211,20 @@
         (is (= runtime/version
                (value! worker "eval" "session" session "code" "VIS_PYTHON_RUNTIME_VERSION")))
         (is (= "2" (value! worker "run" "session" session "code" "1 + 1"))))
+      (testing "the install loads no network or package metadata module"
+        (is (= "[]"
+               (value! worker
+                       "eval"
+                       "session" session
+                       "code" (str "str([m for m in ('urllib.request', 'ssl', 'importlib.metadata')"
+                                   " if m in __import__('sys').modules])"))))
+        (is (= (str "vis-python/" runtime/version)
+               (value! worker
+                       "eval"
+                       "session" session
+                       "code" (str "dict(__import__('urllib.request').request"
+                                   ".build_opener().addheaders)['User-agent']")))
+            "the first import of urllib.request names the runtime"))
       ;; Vis #199: native and JVM workers must expose CPython, not their host launcher.
       (testing "executable identity names the bundled interpreter"
         (let [executable

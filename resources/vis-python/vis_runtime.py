@@ -625,6 +625,7 @@ def par(thunks):
 
 #: Prefix of the User-Agent that urllib sends when a request sets none.
 _STOCK_USER_AGENT = "Python-urllib/"
+_URLLIB_REQUEST = "urllib.request"
 
 
 def _default_user_agent(version):
@@ -635,31 +636,79 @@ def _default_user_agent(version):
     failed where a browser succeeds. A request that sets `User-Agent` keeps it:
     urllib adds an opener header only when the request has none. The change is
     process-wide, like urllib, and a second install only refreshes it.
+
+    The change waits for the import of `urllib.request`. That module brings
+    `http.client`, `ssl` and `email`: 35 modules and 2 MiB that a session
+    without a request must not pay for at install.
     """
-    import urllib.request
+    _user_agent.agent = "vis-python/" + version if version else "vis-python"
+    if _user_agent not in sys.meta_path:
+        sys.meta_path.insert(0, _user_agent)
+    if _URLLIB_REQUEST in sys.modules:
+        _user_agent.name(importlib.import_module(_URLLIB_REQUEST))
 
-    agent = "vis-python/" + version if version else "vis-python"
 
-    def replace(headers):
-        return [
-            (name, agent)
-            if name.lower() == "user-agent" and str(value).startswith(_STOCK_USER_AGENT)
-            else (name, value)
-            for name, value in headers
-        ]
+class _NamingLoader:
+    """Run the loader of `urllib.request`, then name the runtime in the module."""
 
-    director = urllib.request.OpenerDirector
-    init = getattr(director.__init__, "__wrapped__", director.__init__)
+    def __init__(self, loader, name):
+        self.loader = loader
+        self.name = name
 
-    @functools.wraps(init)
-    def __init__(self):
-        init(self)
-        self.addheaders = replace(self.addheaders)
+    def create_module(self, spec):
+        return self.loader.create_module(spec)
 
-    director.__init__ = __init__
-    opener = getattr(urllib.request, "_opener", None)
-    if opener is not None:
-        opener.addheaders = replace(opener.addheaders)
+    def exec_module(self, module):
+        # The module keeps its own loader: `inspect` and `linecache` read it.
+        module.__spec__.loader = module.__loader__ = self.loader
+        self.loader.exec_module(module)
+        self.name(module)
+
+
+class _UserAgentFinder:
+    """Find `urllib.request` with the later finders and wrap its loader."""
+
+    agent = "vis-python"
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != _URLLIB_REQUEST:
+            return None
+        finders = tuple(sys.meta_path)
+        for finder in finders[finders.index(self) + 1 :]:
+            spec = finder.find_spec(fullname, path, target)
+            if spec is not None:
+                spec.loader = _NamingLoader(spec.loader, self.name)
+                return spec
+        return None
+
+    def name(self, request):
+        """Replace the stock agent in `request`, the `urllib.request` module."""
+        agent = self.agent
+
+        def replace(headers):
+            return [
+                (name, agent)
+                if name.lower() == "user-agent"
+                and str(value).startswith(_STOCK_USER_AGENT)
+                else (name, value)
+                for name, value in headers
+            ]
+
+        director = request.OpenerDirector
+        init = getattr(director.__init__, "__wrapped__", director.__init__)
+
+        @functools.wraps(init)
+        def __init__(self):
+            init(self)
+            self.addheaders = replace(self.addheaders)
+
+        director.__init__ = __init__
+        opener = getattr(request, "_opener", None)
+        if opener is not None:
+            opener.addheaders = replace(opener.addheaders)
+
+
+_user_agent = _UserAgentFinder()
 
 
 def install(namespace, session=None):

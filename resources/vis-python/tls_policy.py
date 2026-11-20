@@ -11,13 +11,15 @@ first. It calls configure() after startup instead, before guest code makes conte
 """
 
 import os
-import ssl
 
-_STRICT_FLAGS = ssl.SSLContext.verify_flags
+#: The stdlib property, kept from the first change. None: `ssl` has its own.
+_strict_flags = None
 
 
 def _lenient_flags(context, value):
-    _STRICT_FLAGS.fset(context, value & ~int(ssl.VERIFY_X509_STRICT))
+    import ssl
+
+    _strict_flags.fset(context, value & ~int(ssl.VERIFY_X509_STRICT))
 
 
 def configure(strict):
@@ -27,10 +29,18 @@ def configure(strict):
     """
     if not isinstance(strict, bool):
         raise TypeError("strict must be a bool")
+    global _strict_flags
+    if strict and _strict_flags is None:
+        # The default must not import ssl: a session without TLS does not need it.
+        return
+    import ssl
+
+    if _strict_flags is None:
+        _strict_flags = ssl.SSLContext.verify_flags
     if strict:
-        ssl.SSLContext.verify_flags = _STRICT_FLAGS
+        ssl.SSLContext.verify_flags = _strict_flags
     else:
-        ssl.SSLContext.verify_flags = _STRICT_FLAGS.setter(_lenient_flags)
+        ssl.SSLContext.verify_flags = _strict_flags.setter(_lenient_flags)
 
 
 def _configure():

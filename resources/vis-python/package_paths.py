@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import site
 import sys
-from urllib.parse import unquote, urlsplit
 
 _sites = {}
 _roots = set()
@@ -63,6 +62,29 @@ class _EditableFinder:
 
 
 _finder = _EditableFinder()
+
+
+def _invalidate_caches():
+    """Do `importlib.invalidate_caches()` without `importlib.metadata`.
+
+    CPython 3.14 `PathFinder.invalidate_caches` imports `importlib.metadata` to
+    clear its cache: 26 modules and 1.9 MiB for each interpreter. Before the
+    first import, that module has no cache. Then this function does the other
+    steps of `PathFinder.invalidate_caches` itself.
+    """
+    if "importlib.metadata" in sys.modules:
+        importlib.invalidate_caches()
+        return
+    for finder in tuple(sys.meta_path):
+        if finder is importlib.machinery.PathFinder:
+            for path, entry in list(sys.path_importer_cache.items()):
+                if entry is None or not os.path.isabs(path):
+                    sys.path_importer_cache.pop(path, None)
+                elif hasattr(entry, "invalidate_caches"):
+                    entry.invalidate_caches()
+            importlib._bootstrap_external._NamespacePath._epoch += 1
+        elif hasattr(finder, "invalidate_caches"):
+            finder.invalidate_caches()
 
 
 def _path_lines(packages, names):
@@ -139,6 +161,9 @@ def refresh(packages, *, reload=False, at=None):
         }
         for name, body in stamp:
             if name.endswith("/direct_url.json"):
+                # Only an editable install pays for urllib.parse (0.4 MiB).
+                from urllib.parse import unquote, urlsplit
+
                 try:
                     data = json.loads(body)
                     url = urlsplit(data.get("url", ""))
@@ -152,7 +177,7 @@ def refresh(packages, *, reload=False, at=None):
         _sites[packages] = (stamp, added, roots)
         _roots.clear()
         _roots.update(root for _, _, roots in _sites.values() for root in roots)
-        importlib.invalidate_caches()
+        _invalidate_caches()
     if at is not None:
         site_paths = [os.path.abspath(packages)]
         site_paths += [p for p in _path_lines(packages, names) if p not in site_paths]
@@ -168,7 +193,7 @@ def refresh(packages, *, reload=False, at=None):
                 len(rest),
             )
             sys.meta_path[:] = rest[:spot] + hooks + rest[spot:]
-        importlib.invalidate_caches()
+        _invalidate_caches()
     if _roots and _finder not in sys.meta_path:
         sys.meta_path.insert(0, _finder)
     if reload:
@@ -187,4 +212,4 @@ def refresh(packages, *, reload=False, at=None):
                 owner = sys.modules.get(parent)
                 if owner is not None and getattr(owner, child, None) is module:
                     delattr(owner, child)
-        importlib.invalidate_caches()
+        _invalidate_caches()
