@@ -700,7 +700,7 @@ class __VisShell__(__VisResult__):
         )
     )
 
-    # The transports of a handle that does not live in `python_execution`: a
+    # The transports of a handle that does not live in `py3`: a
     # function of the op name and its options. An extension worker sets it, because
     # the module of an extension shares these globals and can hold its own
     # `_shell_wait`. Without a route, the session names of the op list answer.
@@ -6113,7 +6113,7 @@ def __vis_run_async__(src):
     __vis_prot__ = set(g.get("__vis_protected_names__") or [])
     __vis_shadow__ = [n for n in assigned if n in __vis_prot__ and n in g]
     assigned = [n for n in assigned if n not in __vis_shadow__]
-    # The block's own value is NOT collected. `python_execution` has ONE success
+    # The block's own value is NOT collected. `py3` has ONE success
     # channel — what the block PRINTED — so a trailing bare expression is left an
     # `Expr` statement: it still EVALUATES (a bare tool call runs, auto-settled
     # above), and its value is discarded exactly like every other statement's.

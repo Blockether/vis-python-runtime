@@ -1163,7 +1163,7 @@ def _capture_block(source, namespace, runner, is_sandbox=True):
 
 
 def run_block(source, namespace):
-    """Run `source` the way `python_execution` runs a BLOCK.
+    """Run `source` the way `py3` runs a BLOCK.
 
     A block has ONE success channel — what it PRINTED — so what comes back is
     the captured stdout, plus the error text when it raised. The optional host
