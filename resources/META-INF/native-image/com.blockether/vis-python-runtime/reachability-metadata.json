@@ -1,5 +1,5 @@
 {
-  "comment": "FFM registrations for the one C boundary (com.blockether.vispython.Interpreter) and the resources the runtime reads at run time. Every downcall in SIGNATURES and the host upcall stub must be declared here: a native image links no descriptor it was not told about, and the failure is a MissingForeignRegistrationError in a user's terminal, never in the JVM suite. The Python is addressed from vis-python-runtime/SOURCES, so that manifest ships with the files it names.",
+  "comment": "FFM registrations for the one C boundary (com.blockether.vispython.Interpreter) and the resources the runtime reads at run time. Every downcall in SIGNATURES and OPTIONAL_SIGNATURES and the host upcall stub must be declared here: a native image links no descriptor it was not told about, and the failure is a MissingForeignRegistrationError in a user's terminal, never in the JVM suite. The Python is addressed from vis-python-runtime/SOURCES, so that manifest ships with the files it names.",
   "foreign": {
     "downcalls": [
       {
@@ -68,6 +68,15 @@
         "parameterTypes": [
           "jint",
           "jint",
+          "void*"
+        ]
+      },
+      {
+        "returnType": "jint",
+        "parameterTypes": [
+          "jint",
+          "jint",
+          "void*",
           "void*"
         ]
       },

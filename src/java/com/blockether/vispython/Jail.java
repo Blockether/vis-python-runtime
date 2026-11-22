@@ -45,7 +45,16 @@ public final class Jail {
 
   private static Map<String, MethodHandle> handles;
 
-  /** Symbols that only some platform libraries export, linked on first use. */
+  /**
+   * Symbols that only some platform libraries export, linked on first use. A native image
+   * links only a declared descriptor, so each one is here and not made from its arguments.
+   */
+  private static final Map<String, FunctionDescriptor> OPTIONAL_SIGNATURES = Map.of(
+      "visjail_end_confined", descriptor(ValueLayout.ADDRESS),
+      "visjail_signal_scoped", descriptor(),
+      "visjail_loopback_peer_confined", descriptor(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
+          ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+
   private static final Map<String, MethodHandle> optional = new HashMap<>();
 
   private Jail() {}
@@ -321,9 +330,13 @@ public final class Jail {
     return invokeInts("visjail_kill", pid, signal, null);
   }
 
-  private static synchronized MethodHandle optionalHandle(String symbol, FunctionDescriptor type) {
+  private static synchronized MethodHandle optionalHandle(String symbol) {
     MethodHandle handle = optional.get(symbol);
     if (handle == null) {
+      FunctionDescriptor type = OPTIONAL_SIGNATURES.get(symbol);
+      if (type == null) {
+        throw new IllegalArgumentException(symbol);
+      }
       MemorySegment address = libraryLookup().find(symbol).orElseThrow(() ->
           new VisPythonException("Process-jail library exports no " + symbol,
               Map.of("symbol", symbol)));
@@ -335,17 +348,13 @@ public final class Jail {
 
   /** Call a symbol that only some platform libraries export; strings go as C strings. */
   private static int callOptional(String symbol, Object... arguments) {
-    MemoryLayout[] layouts = new MemoryLayout[arguments.length];
-    for (int i = 0; i < arguments.length; i++) {
-      layouts[i] = arguments[i] instanceof Integer ? ValueLayout.JAVA_INT : ValueLayout.ADDRESS;
-    }
     try (Arena arena = Arena.ofConfined()) {
       Object[] values = new Object[arguments.length];
       for (int i = 0; i < arguments.length; i++) {
         values[i] = arguments[i] instanceof String text ? arena.allocateFrom(text)
             : arguments[i] == null ? MemorySegment.NULL : arguments[i];
       }
-      return (int) optionalHandle(symbol, descriptor(layouts)).invokeWithArguments(values);
+      return (int) optionalHandle(symbol).invokeWithArguments(values);
     } catch (RuntimeException | Error exception) {
       throw exception;
     } catch (Throwable throwable) {

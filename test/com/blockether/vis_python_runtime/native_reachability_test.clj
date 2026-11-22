@@ -61,6 +61,7 @@
                 (map (comp pr-str shape))
                 (concat (vals (boundary Interpreter "SIGNATURES"))
                         (vals (boundary Jail "SIGNATURES"))
+                        (vals (boundary Jail "OPTIONAL_SIGNATURES"))
                         (vals (boundary WindowsJail "SIGNATURES"))
                         (vals (boundary (Class/forName "com.blockether.vispython.WindowsLibrary")
                                         "SIGNATURES"))))
