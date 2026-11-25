@@ -795,6 +795,24 @@ def host_call(name, payload):
     return _vis_host.call(name, payload)
 
 
+def _council_task_refs(tasks, handle_type):
+    """Encode only child references in a Council launch."""
+    def ref(value):
+        return value.session_id if isinstance(value, handle_type) else value
+
+    def spec(value):
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        if "child" in value:
+            value["child"] = ref(value["child"])
+        if isinstance(value.get("after"), (list, tuple)):
+            value["after"] = [ref(item) for item in value["after"]]
+        return value
+
+    return [spec(value) for value in tasks] if isinstance(tasks, (list, tuple)) else spec(tasks)
+
+
 def _tool_arg(value):
     """One argument JSON cannot carry, as data or text the host can use.
 

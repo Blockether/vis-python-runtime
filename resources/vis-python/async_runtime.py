@@ -1289,6 +1289,9 @@ def __vis_as_result__(__vis_v__, __vis_paging__=None):
     # value: a PAGED search answers text that can continue itself (see __VisGrep__),
     # and only the call knows the options map to continue WITH.
     if isinstance(__vis_v__, dict):
+        children = __vis_v__.get("__vis_subagent_tasks__")
+        if isinstance(children, list):
+            return [__vis_task_handle__(row) for row in children]
         process = __vis_v__.get("__vis_shell_task__")
         if isinstance(process, dict):
             return __vis_task_handle__(process)
@@ -2293,6 +2296,55 @@ class HostTask:
         pass
 
 
+class SubagentTask(HostTask):
+    __slots__ = ()
+
+    def __init__(self, row):
+        super().__init__(row["id"], row["name"])
+        self._child_id = row["child_id"]
+        self._child_session_id = row["child_session_id"]
+
+    @property
+    def id(self):
+        return self._child_id
+
+    @property
+    def session_id(self):
+        return self._child_session_id
+
+    @property
+    def task_id(self):
+        return self._id
+
+    def record(self):
+        """Read this attempt's record without consuming the result."""
+        if self._outcome is not None and "value" in self._outcome:
+            return self._outcome["value"]
+        fields = __vis_task_rpc__("_task_snapshot", self._id)
+        if fields is None:
+            raise LookupError("This subagent Task no longer belongs to the session")
+        return __vis_record__("SubagentRecord", fields)
+
+    def wait(self, seconds):
+        """Wait up to seconds and return a snapshot, without cancelling the Task."""
+        import math
+
+        seconds = float(seconds)
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("seconds must be finite and nonnegative")
+        deadline = __vis_time__.monotonic() + seconds
+        token = next(__vis_wait_serial__)
+        try:
+            while True:
+                remaining = max(0, int((deadline - __vis_time__.monotonic()) * 1000))
+                outcome = self._request(token=token, timeout_ms=min(250, remaining), observation=True)
+                if outcome["state"] != "running" or not remaining:
+                    break
+        finally:
+            __vis_task_rpc__("_task_await", self._id, {"token": token, "leave": True})
+        return self.record()
+
+
 class ShellTask(HostTask):
     __slots__ = ()
 
@@ -2353,7 +2405,12 @@ class ShellTask(HostTask):
         if aliases:
             raise TypeError("wait: unknown keyword " + repr(sorted(aliases)[0]))
         options = {"seconds": seconds}
-        limit = __vis_settle__(self._shell_op("__vis_shell_snapshot__", {**options, "budget": True}))
+        budget = __vis_settle__(self._shell_op("__vis_shell_snapshot__", {**options, "budget": True, "sample_cpu": True}))
+        if isinstance(budget, dict):
+            limit = budget["seconds"]
+            options["cpu_start_ms"] = budget["cpu_ms"]
+        else:
+            limit = budget
         started = time.monotonic()
         deadline = started + limit
         token = next(__vis_wait_serial__)
@@ -2394,12 +2451,12 @@ def __vis_task_handle__(row):
     ident = row["id"]
     task = __vis_host_tasks__.get(ident)
     if task is None:
-        base = ShellTask if row.get("kind") == "shell" else HostTask
+        base = {"shell": ShellTask, "subagent": SubagentTask}.get(row.get("kind"), HostTask)
         cls = __vis_host_task_types__.get(base)
         if cls is None:
             cls = type(base.__name__, (base, std_asyncio.Task), {})
             __vis_host_task_types__[base] = cls
-        task = cls(row) if base is ShellTask else cls(ident, row["name"])
+        task = cls(ident, row["name"]) if base is HostTask else cls(row)
         __vis_host_tasks__[ident] = task
     elif isinstance(task, ShellTask) and "token" in row and not task.done():
         task._set_snapshot(row["snapshot"])
@@ -3855,6 +3912,13 @@ def __vis_deferred__(realfn, nm="tool"):
     def __vis_tool__(*a, **k):
         if (globals().get("__vis_task_tools__") or {}).get(nm):
             return __vis_start_host_task__(nm, a, k)
+        if nm == "council.run":
+            from vis_runtime import _council_task_refs
+
+            if a:
+                a = (_council_task_refs(a[0], SubagentTask), *a[1:])
+            elif "tasks" in k:
+                k = {**k, "tasks": _council_task_refs(k["tasks"], SubagentTask)}
         c = __vis_Call__(realfn, a, k, nm)
         # An EAGER tool changes state, so it runs where it is called. Deferred, a call
         # that a holder only stored (`results.append(patch(p, edits, v))`) ran nothing,
