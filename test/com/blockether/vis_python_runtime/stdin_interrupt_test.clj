@@ -469,3 +469,23 @@
                         (if (and (= ::hung r) (< n 50)) (recur (inc n)) r)))]
         (is (str/includes? (str (:error settled)) "KeyboardInterrupt") label)
         (is (= (second check) (ran session (first check))) label)))))
+
+(harness/defbuilt-test
+  interrupt-during-selector-close-test
+  (when-not (str/starts-with? (System/getProperty "os.name") "Windows")
+    (let [session (harness/block-session)]
+      (is (= "caught True -1 -1 True"
+             (ran session
+                  (str "loop = __vis_loop_factory__()\n"
+                       "reader, writer = loop._ssock, loop._csock\n"
+                       "selector = loop._selector\n"
+                       "close_reader = reader.close\n"
+                       "def interrupted_close():\n"
+                       "    reader.close = close_reader\n"
+                       "    close_reader()\n"
+                       "    raise KeyboardInterrupt('during close')\n"
+                       "reader.close = interrupted_close\n"
+                       "try:\n"
+                       "    loop.close()\n"
+                       "except KeyboardInterrupt:\n"
+                       "    print('caught', loop.is_closed(), reader.fileno(), writer.fileno(), selector.get_map() is None)\n")))))))

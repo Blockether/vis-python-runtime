@@ -682,42 +682,19 @@ class __VisShellLogs__:
 
 
 class __VisShell__(__VisResult__):
-    # A SHELL RESULT IS A LIVE HANDLE. Every answer from the shell family (`shell`
-    # itself, and each handle op) comes back as this dict-with-METHODS, so a process
-    # is driven on the object the call already returned instead of by re-typing its id
-    # into three loose verbs: `sh.logs(offset=0)`, `sh.wait(30)`, `sh.type("y")`,
-    # `sh.stop()`. It IS a dict — `sh["exit"]`, `json.dumps(sh)`, `{**sh}` behave — so
-    # nothing about reading a result changed; only driving it got shorter. The
-    # underlying `_shell_*` transports stay private (underscore = absent from
-    # `apropos`), and re-issuing a live `id` through `shell` hands the SAME handle back,
-    # which is how a later block re-acquires one.
-    __vis_shell_ops__ = frozenset(
-        (
-            "shell",
-            "_shell_logs",
-            "_shell_wait",
-            "_shell_type",
-            "_shell_stop",
-        )
-    )
-
-    # The transports of a handle that does not live in `py3`: a
-    # function of the op name and its options. An extension worker sets it, because
-    # the module of an extension shares these globals and can hold its own
-    # `_shell_wait`. Without a route, the session names of the op list answer.
+    # Result and log pages are data. This optional function keeps paging on the
+    # same process generation without placing private transport keys in the map.
+    __vis_shell_ops__ = frozenset(("shell", "_shell_logs", "_shell_type"))
     __vis_shell_route__ = None
 
-    def __vis_op__(self, __vis_name__, __vis_args__):
-        __vis_route__ = type(self).__vis_shell_route__
-        if __vis_route__ is not None:
-            return __vis_settle__(__vis_route__(__vis_name__, __vis_args__))
-        fn = globals().get(__vis_name__)
+    def __vis_op__(self, name, args):
+        route = self.__vis_shell_route__
+        if route is not None:
+            return __vis_settle__(route(name, args))
+        fn = globals().get(name)
         if fn is None:
-            # The host's ONE wording for a sandbox with no process surface
-            # (`env_python/PROCESS_SURFACE`), the same sentence `subprocess` and
-            # the prompt block say — a handle is just where it is met next.
             raise RuntimeError(globals()["__vis_process_surface__"]["off"])
-        return __vis_settle__(fn(__vis_args__))
+        return __vis_settle__(fn(args))
 
     @property
     def stdout(self):
@@ -786,9 +763,7 @@ class __VisShell__(__VisResult__):
     def __radd__(self, other):
         return self.__vis_log_text_concat__(other, True)
 
-    __vis_attr_methods__ = (
-        " Methods: logs(offset, lines), wait(secs), type(text), stop()."
-    )
+    __vis_attr_methods__ = " Method: logs(offset, lines)."
     # Each stage answers `exit`, so each hint of a handle shows the same example.
     __vis_attr_example__ = "exit"
 
@@ -816,6 +791,8 @@ class __VisShell__(__VisResult__):
     def __vis_log_page__(self, __vis_args__):
         __vis_page__ = self.__vis_op__("_shell_logs", __vis_args__)
         __vis_page__.__vis_logs_spec__ = dict(__vis_args__)
+        if "__vis_shell_route__" in self.__dict__:
+            __vis_page__.__vis_shell_route__ = self.__vis_shell_route__
         return __vis_page__
 
     def __vis_log_spec__(self):
@@ -896,47 +873,6 @@ class __VisShell__(__VisResult__):
             if __vis_seen__ >= __vis_cap__:
                 break
             __vis_page__ = next(__vis_page__, None)
-
-    def __vis_drive__(self, __vis_name__, __vis_args__):
-        # A stage that DRIVES the process (`wait`, `type`, `stop`) writes its answer
-        # into THIS handle and returns it: `sh.wait(30)` without an assignment leaves
-        # `sh` current, so no stale handle reads `running` after the process ended.
-        # A log page stays its own object, because paging needs one object per page.
-        __vis_answer__ = self.__vis_op__(__vis_name__, __vis_args__)
-        if not isinstance(__vis_answer__, __VisShell__):
-            return __vis_answer__
-        dict.clear(self)
-        dict.update(self, __vis_answer__)
-        self.__dict__.pop("__vis_logs_spec__", None)
-        return self
-
-    def type(self, text, is_enter=True):
-        return self.__vis_drive__(
-            "_shell_type",
-            {"id": self["id"], "text": str(text), "is_enter": bool(is_enter)},
-        )
-
-    def stop(self):
-        return self.__vis_drive__("_shell_stop", {"id": self["id"]})
-
-    def wait(self, seconds=120, **aliases):
-        # ONE wait, and it does NOT live here: the bounded poll loop is host code
-        # (`_shell_wait`), so the sandbox handle, an extension's handle and the tests
-        # all wait the same way instead of each re-typing a loop that can disagree
-        # about the deadline. `timed_out` means the WAIT expired, not the process.
-        # `secs=`/`timeout=` mean `seconds`: the docs say `sh.wait(secs)`, so the
-        # word a reader carries over must not silently do nothing.
-        for key in ("secs", "timeout"):
-            if key in aliases:
-                seconds = aliases.pop(key)
-        if aliases:
-            raise TypeError(
-                "wait: no keyword '%s'. Keywords: seconds (secs/timeout mean it)."
-                % sorted(aliases)[0]
-            )
-        return self.__vis_drive__(
-            "_shell_wait", {"id": self["id"], "seconds": int(seconds)}
-        )
 
 
 class __VisResultList__(list):
@@ -1353,6 +1289,9 @@ def __vis_as_result__(__vis_v__, __vis_paging__=None):
     # value: a PAGED search answers text that can continue itself (see __VisGrep__),
     # and only the call knows the options map to continue WITH.
     if isinstance(__vis_v__, dict):
+        process = __vis_v__.get("__vis_shell_task__")
+        if isinstance(process, dict):
+            return __vis_task_handle__(process)
         return __vis_typed_result__(__vis_v__)
     if isinstance(__vis_v__, (__VisResultList__, __VisResultStr__)):
         return __vis_v__
@@ -1875,7 +1814,44 @@ def __vis_loop_factory__():
 
         return __vis_quiet_interrupts__(WindowsLoop())
 
+    import io
+
+    class PosixWakeupPipe(io.FileIO):
+        def fileno(self):
+            return -1 if self.closed else super().fileno()
+
+        recv = io.FileIO.read
+        send = io.FileIO.write
+
     class Loop(std_asyncio.SelectorEventLoop):
+        def _close_self_pipe(self):
+            reader = self._ssock
+            if reader is not None:
+                fd = reader.fileno()
+                if fd >= 0:
+                    self._remove_reader(fd)
+                reader.close()
+                self._ssock = None
+            writer = self._csock
+            if writer is not None:
+                writer.close()
+                self._csock = None
+            self._internal_fds = 0
+
+        def close(self):
+            try:
+                super().close()
+            except (KeyboardInterrupt, std_asyncio.CancelledError):
+                if not self.is_running():
+                    # SelectorEventLoop.close marks the loop closed before it
+                    # closes the selector. Finish that step even if a retry
+                    # skips the already closed loop.
+                    super().close()
+                    if self._selector is not None:
+                        self._selector.close()
+                        self._selector = None
+                raise
+
         def _make_self_pipe(self):
             reader, writer = os.pipe()
             try:
@@ -1885,8 +1861,8 @@ def __vis_loop_factory__():
                 os.close(reader)
                 os.close(writer)
                 raise
-            self._ssock = WakeupPipe(reader)
-            self._csock = WakeupPipe(writer)
+            self._ssock = PosixWakeupPipe(reader, "rb")
+            self._csock = PosixWakeupPipe(writer, "wb")
             self._internal_fds += 1
             self._add_reader(reader, self._read_from_self)
 
@@ -2203,11 +2179,16 @@ class HostTask:
                 outcome = {"state": "cancelled"}
             if options.get("read"):
                 if "value" in outcome:
-                    outcome["value"] = __vis_typed_value__(outcome["value"])
+                    outcome["value"] = self._decode(outcome["value"])
                 self._outcome = outcome
                 __vis_task_rpc__("_task_ack", self._id)
             self._notify()
         return outcome
+
+    def _decode(self, value):
+        if isinstance(value, dict) and isinstance(value.get("__vis_shell_task__"), dict):
+            return __vis_task_handle__(value["__vis_shell_task__"])
+        return __vis_typed_value__(value)
 
     def _notify(self):
         if self._fired:
@@ -2312,21 +2293,116 @@ class HostTask:
         pass
 
 
-__vis_host_task_type__ = None
+class ShellTask(HostTask):
+    __slots__ = ()
+
+    def __init__(self, row):
+        super().__init__(row["id"], row["name"])
+        self._generation = row.get("token", row.get("generation"))
+        self._set_snapshot(row["snapshot"])
+
+    def _set_snapshot(self, value):
+        self._snapshot = __VisShell__({"op": "shell", **value})
+        self._snapshot.__vis_shell_route__ = self._shell_op
+
+    def _decode(self, value):
+        self._set_snapshot(value)
+        return self._snapshot
+
+    def _shell_op(self, name, args):
+        value = __vis_task_rpc__(name, {**args, "id": self.id, "token": self._generation})
+        return __vis_typed_value__(value)
+
+    @property
+    def task_id(self):
+        return self._id
+
+    @property
+    def id(self):
+        return self._snapshot["id"]
+
+    @property
+    def logs(self):
+        return self._snapshot.logs
+
+    def type(self, text, is_enter=True):
+        result = __vis_settle__(self._shell_op("_shell_type", {
+            "text": str(text), "is_enter": bool(is_enter),
+        }))
+        self._set_snapshot(result)
+        return self
+
+    def __getattr__(self, name):
+        if not name.startswith("_") and name in self._snapshot:
+            return self._snapshot[name]
+        return super().__getattr__(name)
+
+    def __getitem__(self, key):
+        return self._snapshot[key]
+
+    def get(self, key, default=None):
+        return self._snapshot.get(key, default)
+
+    def wait(self, seconds=None, **aliases):
+        """Wait up to seconds and refresh this handle without cancelling it."""
+        import time
+
+        for key in ("secs", "timeout"):
+            if key in aliases:
+                seconds = aliases.pop(key)
+        if aliases:
+            raise TypeError("wait: unknown keyword " + repr(sorted(aliases)[0]))
+        options = {"seconds": seconds}
+        limit = __vis_settle__(self._shell_op("__vis_shell_snapshot__", {**options, "budget": True}))
+        started = time.monotonic()
+        deadline = started + limit
+        token = next(__vis_wait_serial__)
+        reader = None
+        waiting_for_input = False
+        state = "running"
+        try:
+            while True:
+                remaining = max(0, int((deadline - time.monotonic()) * 1000))
+                outcome = self._request(token=token, timeout_ms=min(250, remaining), observation=True)
+                state = outcome["state"]
+                if state != "running" or not remaining or time.monotonic() >= deadline:
+                    break
+                seen = __vis_settle__(self._shell_op("__vis_shell_snapshot__", {"probe": True}))
+                if seen is not None and reader == seen:
+                    waiting_for_input = True
+                    break
+                reader = seen
+        finally:
+            __vis_task_rpc__("_task_await", self._id, {"token": token, "leave": True})
+        snapshot = outcome.get("value")
+        if snapshot is not None:
+            snapshot = {**snapshot, "stage": "wait", "timeout_secs": limit}
+        else:
+            snapshot = self._shell_op("__vis_shell_snapshot__", {**options, "elapsed_ms": int((time.monotonic() - started) * 1000)})
+        self._set_snapshot({**snapshot, "waiting_for_input": waiting_for_input,
+                            "timed_out": state == "running" and not waiting_for_input,
+                            "duration_ms": int((time.monotonic() - started) * 1000)})
+        return self
+
+
+__vis_host_task_types__ = {}
 
 
 def __vis_task_handle__(row):
-    global __vis_host_task_type__
+    import asyncio as std_asyncio
+
     ident = row["id"]
     task = __vis_host_tasks__.get(ident)
     if task is None:
-        if __vis_host_task_type__ is None:
-            import asyncio as std_asyncio
-
-            # HostTask owns the outcome, not a coroutine scheduled on this block's loop.
-            __vis_host_task_type__ = type("HostTask", (HostTask, std_asyncio.Task), {})
-        task = __vis_host_task_type__(ident, row["name"])
+        base = ShellTask if row.get("kind") == "shell" else HostTask
+        cls = __vis_host_task_types__.get(base)
+        if cls is None:
+            cls = type(base.__name__, (base, std_asyncio.Task), {})
+            __vis_host_task_types__[base] = cls
+        task = cls(row) if base is ShellTask else cls(ident, row["name"])
         __vis_host_tasks__[ident] = task
+    elif isinstance(task, ShellTask) and "token" in row and not task.done():
+        task._set_snapshot(row["snapshot"])
     return task
 
 

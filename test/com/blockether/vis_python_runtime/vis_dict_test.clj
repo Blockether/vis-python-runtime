@@ -218,64 +218,29 @@
       (is (str/includes? (said "MISS")
                          ": r['exit'] is r.exit. Keys: 'op', 'id', 'status', 'out', 'exit'"))
       (is (str/includes? (said "MISS") "Did you mean 'out'?"))
-      (is (str/includes? (said "MISS") "Methods: logs(offset, lines), wait(secs)")))))
-
-(harness/defbuilt-test
-  shell-drive-refreshes-held-handle-test
-  ;; User report: `sh.wait(10)` without an assignment left `sh` at `running` with an
-  ;; empty `out` after the process had ended, so finished tests read as still running.
-  (let [stage
-        (fn [op status out]
-          (fn [_]
-            (array-map "op" op "id" "sh-1" "stage" status "status" status "out" out)))
-
-        session
-        (harness/tool-session {"shell_result" (stage "shell" "running" "")
-                               "_shell_wait" (stage "_shell_wait" "exited" "done")
-                               "_shell_logs" (stage "_shell_logs" "exited" "log")
-                               "_shell_stop" (stage "_shell_stop" "stopped" "")})
-
-        said
-        (->> (ran session
-                  (str "h = await shell_result()\n"
-                       "r = h.wait(5)\n" "print('WAIT', r is h, h.status, h.out)\n"
-                       "page = h.logs(0, lines=1)\n"
-                       "print('LOGS', page is h, page.out, h.status, h.out)\n"
-                       "h.stop()\n" "print('STOP', h.status, sorted(dict(h)) == sorted(dict(r)))"))
-             str/split-lines
-             (map #(str/split % #" " 2))
-             (into {}))]
-
-    (testing "a wait writes its answer into the handle that the caller holds"
-      (is (= "True exited done" (said "WAIT"))))
-    (testing "a log page is its own object and leaves the handle as it was"
-      (is (= "False log exited done" (said "LOGS"))))
-    (testing "a stop refreshes the same handle again" (is (= "stopped True" (said "STOP"))))))
+      (is (str/includes? (said "MISS") "Method: logs(offset, lines).")))))
 
 (harness/defbuilt-test
   shell-route-owns-the-transports-test
-  ;; An extension runs in the globals of the handle. Its own `_shell_wait` took the
-  ;; place of the transport, and `sh.wait` answered that function.
-  (let [stage
-        (fn [status out]
-          (fn [_]
-            (array-map "op" "_shell_wait" "id" "sh-1" "stage" status "status" status "out" out)))
-
-        session
-        (harness/tool-session
-          {"shell_result"
-           (fn [_]
-             (array-map "op" "shell" "id" "sh-1" "stage" "running" "status" "running" "out" ""))
-           "_shell_wait" (stage "exited" "session name")
-           "routed" (stage "exited" "route")})]
-
-    (testing "a handle with a route calls the route, not the session name"
-      (is (= "_shell_wait exited route"
-             (str/trim (ran session
-                            (str "h = await shell_result()\n" "seen = []\n"
-                                 "def route(name, spec):\n" "    seen.append(name)\n"
-                                 "    return routed(spec)\n" "type(h).__vis_shell_route__ = route\n"
-                                 "h.wait(5)\n" "print(seen[0], h.status, h.out)"))))))))
+  (let [stage (fn [out]
+                (fn [_]
+                  (array-map "op" "_shell_logs" "id" "sh-1" "stage" "logs"
+                             "status" "exited" "out" out)))
+        session (harness/tool-session
+                  {"shell_result" (fn [_]
+                                    (array-map "op" "shell" "id" "sh-1" "stage" "run"
+                                               "status" "exited" "out" "final"))
+                   "_shell_logs" (stage "session name")
+                   "routed" (stage "route")})]
+    (is (= "_shell_logs route final"
+           (str/trim (ran session
+                          (str "h = await shell_result()\n"
+                               "seen = []\n"
+                               "def route(name, spec):\n"
+                               "    seen.append(name)\n"
+                               "    return routed(spec)\n"
+                               "h.__vis_shell_route__ = route\n"
+                               "print(h.logs().get('op'), h.logs().out, h.out)")))))))
 
 (harness/defbuilt-test
   non-string-op-key-rebuilds-test
