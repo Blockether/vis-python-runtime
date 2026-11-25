@@ -620,7 +620,22 @@ def par(thunks):
     """
     import _vis_host
 
-    return _vis_host.par(list(thunks))
+    output = getattr(_output, "call", None)
+    if output is None:
+        return _vis_host.par(list(thunks))
+
+    def with_output(thunk):
+        def run_thunk():
+            previous = getattr(_output, "call", None)
+            _output.call = output
+            try:
+                return thunk()
+            finally:
+                _output.call = previous
+
+        return run_thunk
+
+    return _vis_host.par([with_output(thunk) for thunk in thunks])
 
 
 #: Prefix of the User-Agent that urllib sends when a request sets none.
@@ -1015,21 +1030,50 @@ class _BlockCapture(io.StringIO):
         if self._sink is not None and text:
             try:
                 self._sink(text)
-            except BaseException:
-                # Capturing stdout must never make a user block fail.
+            except Exception:
+                # A sink failure must not abort the block. Let interrupts through.
                 pass
         return written
 
 
 _LATE_LIMIT = 65536
-_capture = None
-_block_thread = None
-_last_session = None
+_output = threading.local()
 _late_session = None
 _late = []
 _late_size = 0
 _late_dropped = 0
 _late_lock = threading.Lock()
+
+
+class _CallOutput:
+    """Output of one call, shared with its child threads until the call exits."""
+
+    def __init__(self, session, stream=None, keep_stderr=False):
+        self.session = session
+        self.stream = stream
+        self.keep_stderr = keep_stderr
+
+
+_thread_start = threading.Thread.start
+_thread_bootstrap = threading.Thread._bootstrap_inner
+
+
+@functools.wraps(_thread_start)
+def _start_with_output(thread):
+    # Transfer only the output route; Python still owns the thread's context.
+    thread._vis_output = getattr(_output, "call", None)
+    return _thread_start(thread)
+
+
+@functools.wraps(_thread_bootstrap)
+def _bootstrap_with_output(thread):
+    _output.call = thread._vis_output
+    del thread._vis_output
+    return _thread_bootstrap(thread)
+
+
+threading.Thread.start = _start_with_output
+threading.Thread._bootstrap_inner = _bootstrap_with_output
 
 
 class _BlockStream(io.TextIOBase):
@@ -1060,8 +1104,30 @@ class _BlockStream(io.TextIOBase):
     def writable(self):
         return True
 
+    def _uses_fallback(self, output):
+        return output is None or (self is _STDERR and output.keep_stderr)
+
     def isatty(self):
-        return False
+        return bool(
+            self._fallback
+            and self._uses_fallback(getattr(_output, "call", None))
+            and self._fallback.isatty()
+        )
+
+    def fileno(self):
+        if self._fallback is not None and self._uses_fallback(getattr(_output, "call", None)):
+            return self._fallback.fileno()
+        return super().fileno()
+
+    @property
+    def buffer(self):
+        if self._uses_fallback(getattr(_output, "call", None)):
+            return self._fallback.buffer
+        raise AttributeError("buffer")
+
+    def flush(self):
+        if self._fallback is not None and self._uses_fallback(getattr(_output, "call", None)):
+            self._fallback.flush()
 
     def close(self):
         # Code that closes `sys.stdout` must not end the output of later blocks.
@@ -1071,18 +1137,19 @@ class _BlockStream(io.TextIOBase):
         global _late_size, _late_dropped, _late_session
         if not isinstance(text, str):
             raise TypeError(f"write() argument must be str, not {type(text).__name__}")
-        capture = _capture
-        if capture is not None:
-            capture.write(text)
-        elif threading.get_ident() == _block_thread:
+        output = getattr(_output, "call", None)
+        stream = output.stream if output is not None else None
+        if self._uses_fallback(output):
             if self._fallback is not None:
                 self._fallback.write(text)
-        elif text:
+        elif stream is not None:
+            stream.write(text)
+        elif text and output.session is not None:
             with _late_lock:
-                if _late_session != _last_session:
+                if _late_session != output.session:
                     _late.clear()
                     _late_size = _late_dropped = 0
-                    _late_session = _last_session
+                    _late_session = output.session
                 room = _LATE_LIMIT - _late_size
                 if room > 0:
                     _late.append(text[:room])
@@ -1133,32 +1200,25 @@ def _capture_block(source, namespace, runner, is_sandbox=True):
     `__vis_keep_stderr__` (the `vis-agent python` terminal) keeps the process
     stderr, so its errors go to the terminal and `fileno()` stays 2.
     """
-    global _capture, _block_thread, _last_session
     stream = _BlockCapture(namespace.get("__vis_capture_stdout__"))
-    previous = _capture
-    _capture = stream
-    _block_thread = threading.get_ident()
     session = namespace.get("__name__")
-    if is_sandbox:
-        sys.stdout = _STDOUT
-        sys.stderr = (
-            _STDERR._fallback if namespace.get("__vis_keep_stderr__") else _STDERR
-        )
+    output = _CallOutput(
+        session, stream, not is_sandbox or namespace.get("__vis_keep_stderr__")
+    )
     error = None
+    previous = getattr(_output, "call", None)
+    _output.call = output
     try:
-        with (
-            contextlib.nullcontext()
-            if is_sandbox
-            else contextlib.redirect_stdout(stream)
-        ):
-            if is_sandbox:
-                _drain_late(stream, session)
-            runner(source)
+        sys.stdout = _STDOUT
+        if is_sandbox:
+            sys.stderr = _STDERR
+            _drain_late(stream, session)
+        runner(source)
     except BaseException as exc:
         error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
     finally:
-        _capture = previous
-        _last_session = session
+        output.stream = None
+        _output.call = previous
     return {"stdout": stream.getvalue(), "error": error}
 
 
@@ -1251,7 +1311,14 @@ def run_block_json(source, namespace):
 
 def run_json(source, namespace):
     """`run` the source and render the value as JSON. What the C ABI calls."""
-    return to_json(run(source, namespace))
+    # Plain run returns a value, not an output envelope. Its writes use the
+    # process streams even when it runs inside a block's host callback.
+    previous = getattr(_output, "call", None)
+    _output.call = None
+    try:
+        return to_json(run(source, namespace))
+    finally:
+        _output.call = previous
 
 
 def sys_path_snapshot():

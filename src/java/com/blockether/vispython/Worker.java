@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 /**
  * The process that HOLDS an interpreter for one host session: a program of its
@@ -60,6 +61,11 @@ public final class Worker {
   /** The executable name a platform archive ships this program under. */
   public static final String EXECUTABLE = Native.platform().startsWith("windows-")
       ? "vis-python-worker.exe" : "vis-python-worker";
+
+  private record CallKey(String session, String id) {}
+
+  /** The interpreter thread of each running call. */
+  private static final Map<CallKey, String> CALLS = new ConcurrentHashMap<>();
 
   private Worker() {}
 
@@ -113,12 +119,15 @@ public final class Worker {
       // The caller is the interpreter's answer, forwarded whole: the parent
       // authorizes against it, and a payload naming something else is the
       // guest's word, not the interpreter's.
-      Interpreter.bindHost((session, tool, payload) -> {
+      Interpreter.bindHostWithCall((session, call, tool, payload) -> {
         Map<String, Object> ask = new LinkedHashMap<>();
         ask.put("op", "host");
         ask.put("session", session);
         ask.put("tool", tool);
         ask.put("payload", payload);
+        if (!call.isEmpty()) {
+          ask.put("call", call);
+        }
         return peer.request(ask);
       });
       try {
@@ -134,18 +143,19 @@ public final class Worker {
     String op = String.valueOf(message.get("op"));
     String session = text(message.get("session"));
     String code = text(message.get("code"));
+    String call = text(message.get("call"));
     return switch (op) {
       case "install-runtime" -> Interpreter.installRuntime(session);
       case "install-sync-tool" -> Interpreter.installSyncTool(session, code);
       case "install-tool" -> Interpreter.installTool(session, code);
       case "install-module" -> Interpreter.installModule(session, code);
-      case "exec" -> {
+      case "exec" -> runCall(session, call, () -> {
         Interpreter.exec(session, code);
-        yield null;
-      }
-      case "run" -> Interpreter.run(session, code);
-      case "run-block" -> Interpreter.runBlock(session, code);
-      case "eval" -> Interpreter.eval(session, code);
+        return null;
+      });
+      case "run" -> runCall(session, call, () -> Interpreter.run(session, code));
+      case "run-block" -> runCall(session, call, () -> Interpreter.runBlock(session, code));
+      case "eval" -> runCall(session, call, () -> Interpreter.eval(session, code));
       // Policy is the PROCESS's, and this process is one session's, which is
       // the whole reason the worker exists.
       case "confine" -> {
@@ -168,7 +178,16 @@ public final class Worker {
         Interpreter.stdin(code);
         yield null;
       }
-      case "interrupt" -> Interpreter.interrupt();
+      case "interrupt" -> {
+        Object rawKind = message.get("kind");
+        String kind = rawKind == null ? "interrupt" : text(rawKind);
+        if ("cancel".equals(kind) ? call.isEmpty() : !"interrupt".equals(kind)) {
+          throw new VisPythonException("interrupt needs kind interrupt, or kind cancel with a call",
+              Map.of("kind", kind));
+        }
+        yield call.isEmpty() ? Interpreter.interrupt()
+            : interruptCall(new CallKey(session, call), kind);
+      }
       case "stack-diagnostics" -> Interpreter.stackDiagnostics(code);
       case "dump-stacks" -> Interpreter.dumpStacks();
       case "close" -> {
@@ -177,6 +196,38 @@ public final class Worker {
       }
       default -> throw new VisPythonException("no worker op named " + op, Map.of("op", op));
     };
+  }
+
+  /**
+   * Run {@code body} as call {@code call}: its host requests carry the call id,
+   * and {@code interrupt} with that id stops only this call. A request without
+   * a call id runs as before.
+   */
+  private static String runCall(String session, String call, Supplier<String> body) {
+    if (call.isEmpty()) {
+      return body.get();
+    }
+    CallKey key = new CallKey(session, call);
+    if (CALLS.putIfAbsent(key, Interpreter.thread()) != null) {
+      throw new VisPythonException("call " + call + " already runs", Map.of("call", call));
+    }
+    try {
+      return Interpreter.withCall(call, body);
+    } finally {
+      // Under the lock of interruptCall: the thread starts no other request
+      // while an interrupt that aims at this call is still being raised.
+      synchronized (CALLS) {
+        CALLS.remove(key);
+      }
+    }
+  }
+
+  /** Interrupt only call {@code call}, answering whether a thread state took it. */
+  private static boolean interruptCall(CallKey call, String kind) {
+    synchronized (CALLS) {
+      String ident = CALLS.get(call);
+      return ident != null && Interpreter.interruptThread(ident, kind);
+    }
   }
 
   private static String text(Object value) {

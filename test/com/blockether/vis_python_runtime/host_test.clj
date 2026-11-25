@@ -153,6 +153,22 @@
                                   (is (= [["whose" one] ["whose" two]] @seen))))
                               (finally (harness/bind-tools! {"echo" echo})))))
 
+(harness/defbuilt-test host-pool-keeps-call-scope-test
+                       (let [session (harness/block-session)
+                             code (str "from _vis_host import par, call\n"
+                                       "par([lambda: call('whose', '{}'), "
+                                       "lambda: call('whose', '{}')])")
+                             run #(harness/ev session code)]
+                         (try (runtime/bind-host-with-call!
+                                (fn [caller call-id tool _payload]
+                                  (json/write-str [caller call-id tool])))
+                              (let [scoped (runtime/with-call "gather-1" run)]
+                                (is (= (repeat 2 [session "gather-1" "whose"])
+                                       (map json/read-str scoped))))
+                              (is (= (repeat 2 [session nil "whose"])
+                                     (map json/read-str (run))))
+                              (finally (harness/bind-tools! {})))))
+
 (harness/defbuilt-test
   gathered-host-tools-keep-session-and-options-test
   ;; Regression, issue #166: pool workers lost the calling session, so `gather`

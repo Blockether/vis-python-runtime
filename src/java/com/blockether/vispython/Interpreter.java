@@ -21,6 +21,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Embed CPython in a JVM application, with persistent session globals and host callbacks.
@@ -71,7 +72,7 @@ public final class Interpreter {
 
   private static final FunctionDescriptor HOST_DESCRIPTOR =
       FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
-          ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT);
+          ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT);
 
   /**
    * C symbol to its FFM descriptor. This map IS the registration surface: a
@@ -81,10 +82,10 @@ public final class Interpreter {
   private static final Map<String, FunctionDescriptor> SIGNATURES = Map.ofEntries(
       Map.entry("vispython_initialize", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_version", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
-      Map.entry("vispython_eval", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
-      Map.entry("vispython_exec", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
-      Map.entry("vispython_run", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
-      Map.entry("vispython_run_block", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_eval", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_exec", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_run", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_run_block", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_confine", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_network", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_trust", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
@@ -95,7 +96,9 @@ public final class Interpreter {
       Map.entry("vispython_stack_diagnostics", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_dump_stacks", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
       Map.entry("vispython_take_result", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
-      Map.entry("vispython_interrupt", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)));
+      Map.entry("vispython_interrupt", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_thread", descriptor(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)),
+      Map.entry("vispython_interrupt_thread", descriptor(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)));
 
   private static final ExecutorService THREAD = Executors.newSingleThreadExecutor(runnable -> {
     Thread thread = new Thread(runnable, "vis-python-runtime");
@@ -110,11 +113,17 @@ public final class Interpreter {
    * instead of running the host again.
    */
   private static final ThreadLocal<Object[]> PENDING = new ThreadLocal<>();
+  private static final ThreadLocal<String> CALL = new ThreadLocal<>();
 
   private static Map<String, MethodHandle> handles;
   private static Native.Library library;
   private static MemorySegment hostStub;
-  private static volatile HostFunction host;
+  private static volatile CallHostFunction host;
+
+  @FunctionalInterface
+  public interface CallHostFunction {
+    String call(String session, String call, String tool, String payload) throws Exception;
+  }
 
   private Interpreter() {}
 
@@ -281,7 +290,7 @@ public final class Interpreter {
         wiring.append("    sys.path.append(").append(literal(target)).append(")\n");
       }
       wiring.append("import tls_policy\n");
-      invoke("vispython_exec", DEFAULT_SESSION, wiring.toString());
+      invoke("vispython_exec", DEFAULT_SESSION, wiring.toString(), "");
     }
     packageDirectory = target;
     return new Startup(library().path(), roots, home, cache, target);
@@ -417,6 +426,24 @@ public final class Interpreter {
   }
 
   /**
+   * The interpreter thread ident of the calling thread. A host that runs several
+   * calls at once keeps it per call, to stop ONE of them with
+   * {@link #interruptThread(String, String)}.
+   */
+  public static String thread() {
+    return invoke("vispython_thread").trim();
+  }
+
+  /**
+   * {@link #interrupt()} for the one thread {@code ident} from {@link #thread()}.
+   * Use {@code cancel} for CancelledError or {@code interrupt} for KeyboardInterrupt.
+   * The caller makes sure that the thread still runs the call it means to stop.
+   */
+  public static boolean interruptThread(String ident, String kind) {
+    return "1".equals(invoke("vispython_interrupt_thread", ident, kind).trim());
+  }
+
+  /**
    * Open a private stack artifact before confinement, or close it with an empty path.
    * The path must be absolute and not already exist. No guest access is granted.
    * Frames contain file/function names, definition lines and bytecode offsets, not
@@ -540,7 +567,7 @@ public final class Interpreter {
    * @see #run(String, String)
    */
   public static String eval(String session, String code) {
-    return invoke("vispython_eval", session, code);
+    return invoke("vispython_eval", session, code, callId());
   }
 
   /**
@@ -551,7 +578,7 @@ public final class Interpreter {
    * @see #runBlock(String, String)
    */
   public static void exec(String session, String code) {
-    invoke("vispython_exec", session, code);
+    invoke("vispython_exec", session, code, callId());
   }
 
   /**
@@ -563,7 +590,7 @@ public final class Interpreter {
    * @see #runBlock(String, String)
    */
   public static String run(String session, String code) {
-    return invoke("vispython_run", session, code);
+    return invoke("vispython_run", session, code, callId());
   }
 
   /**
@@ -578,7 +605,7 @@ public final class Interpreter {
    *         Python failures are represented in the returned JSON
    */
   public static String runBlock(String session, String code) {
-    return invoke("vispython_run_block", session, code);
+    return invoke("vispython_run_block", session, code, callId());
   }
 
   /**
@@ -659,32 +686,33 @@ public final class Interpreter {
   }
 
   /**
-   * The callback C invokes: read the two strings, run the bound host, write the
+   * The callback C invokes: read the request strings, run the bound host, write the
    * reply. Never throws across the boundary - an exception escaping an upcall
    * takes the process down, so a failure comes back as a negative status with
    * its reason in the buffer, exactly like a failure on the way in.
    */
-  private static int hostUpcall(MemorySegment session, MemorySegment name, MemorySegment payload,
-      MemorySegment out, int capacity) {
+  private static int hostUpcall(MemorySegment session, MemorySegment call,
+      MemorySegment name, MemorySegment payload, MemorySegment out, int capacity) {
     try {
       String caller = cString(session);
+      String callId = cString(call);
       String tool = cString(name);
       String body = cString(payload);
       Object[] pending = PENDING.get();
       String text;
-      if (pending != null && pending[0].equals(caller) && pending[1].equals(tool)
-          && pending[2].equals(body)) {
-        text = (String) pending[3];
+      if (pending != null && pending[0].equals(caller) && pending[1].equals(callId)
+          && pending[2].equals(tool) && pending[3].equals(body)) {
+        text = (String) pending[4];
       } else {
-        HostFunction bound = host;
+        CallHostFunction bound = host;
         if (bound == null) {
           throw new IllegalStateException("no host is bound to this interpreter");
         }
-        text = String.valueOf(bound.call(caller, tool, body));
+        text = String.valueOf(bound.call(caller, callId, tool, body));
       }
       int needed = writeReply(text, out, capacity);
       if (needed >= capacity) {
-        PENDING.set(new Object[] {caller, tool, body, text});
+        PENDING.set(new Object[] {caller, callId, tool, body, text});
       } else {
         PENDING.remove();
       }
@@ -698,12 +726,32 @@ public final class Interpreter {
     }
   }
 
+  /** Attach the id to Python invocations in this host scope. */
+  public static <T> T withCall(String call, Supplier<T> body) {
+    String previous = CALL.get();
+    CALL.set(call);
+    try {
+      return body.get();
+    } finally {
+      if (previous == null) {
+        CALL.remove();
+      } else {
+        CALL.set(previous);
+      }
+    }
+  }
+
+  private static String callId() {
+    String call = CALL.get();
+    return call == null ? "" : call;
+  }
+
   private static synchronized MemorySegment hostStub() {
     if (hostStub == null) {
       try {
         MethodHandle target = MethodHandles.lookup().findStatic(Interpreter.class, "hostUpcall",
             MethodType.methodType(int.class, MemorySegment.class, MemorySegment.class,
-                MemorySegment.class, MemorySegment.class, int.class));
+                MemorySegment.class, MemorySegment.class, MemorySegment.class, int.class));
         hostStub = Linker.nativeLinker().upcallStub(target, HOST_DESCRIPTOR, Arena.global());
       } catch (ReflectiveOperationException e) {
         throw new VisPythonException("could not build the host upcall stub", Map.of(), e);
@@ -718,6 +766,12 @@ public final class Interpreter {
    * stub.
    */
   public static void bindHost(HostFunction function) {
+    bindHostWithCall(function == null ? null : (session, call, tool, payload) ->
+        function.call(session, tool, payload));
+  }
+
+  /** Bind a host that also receives the call id, or an empty string if absent. */
+  public static void bindHostWithCall(CallHostFunction function) {
     host = function;
     MethodHandle handle = handles().get("vispython_host");
     MemorySegment stub = hostStub();

@@ -21,10 +21,10 @@
    Bridge failures throw `com.blockether.vispython.VisPythonException`; its
    `.data` map contains available diagnostics such as symbol, status or path.
    Python errors from [[run-block]] instead appear in its JSON `error` field."
-  (:import [com.blockether.vispython HostFunction Interpreter Jail JailPolicy JailPolicy$Egress
+  (:import [com.blockether.vispython HostFunction Interpreter Interpreter$CallHostFunction Jail JailPolicy JailPolicy$Egress
             Locations Native Pip SocketDirectory Trust WindowsJail]
            [java.nio.file Path]
-           [java.util.function Consumer]))
+           [java.util.function Consumer Supplier]))
 
 (def native-path-env
   "Name of the environment variable that overrides library resolution."
@@ -361,6 +361,20 @@
   []
   (Interpreter/interrupt))
 
+(defn thread-ident
+  "The interpreter thread ident of the calling thread. A host that runs several
+   calls at once keeps it per call, to stop ONE of them with [[interrupt-thread!]]."
+  []
+  (Interpreter/thread))
+
+(defn interrupt-thread!
+  "[[interrupt!]] for the one thread `ident` from [[thread-ident]], answering
+   whether a thread state took the exception. `:cancel` raises `CancelledError`;
+   `:interrupt` (the default) raises `KeyboardInterrupt`. The caller makes sure
+   that the thread still runs the call it means to stop."
+  ([ident] (interrupt-thread! ident :interrupt))
+  ([ident kind] (Interpreter/interruptThread (str ident) (name kind))))
+
 (defn logging!
   "Set what the runtime records, answering `{:level … :mirror? …}` in force.
    Levels are `:off` — the default, because a library records nothing until its
@@ -414,6 +428,12 @@
    failures throw `VisPythonException`. Use [[run-block]] for output capture."
   ([code] (exec! default-session code))
   ([session code] (Interpreter/exec session code)))
+
+(defn with-call
+  "Run `f` on the current thread with a host-assigned string `call-id`.
+   Native pool callbacks inherit the id. A nil id means no call scope."
+  [call-id f]
+  (Interpreter/withCall call-id (reify Supplier (get [_] (f)))))
 
 (defn run
   "Execute statements and return the trailing expression's value as JSON text.
@@ -490,6 +510,17 @@
                           (reify
                             HostFunction
                               (call [_ session name payload] (str (f session name payload))))))
+  nil)
+
+(defn bind-host-with-call!
+  "Like [[bind-host!]], but `f` takes session, call id, name and payload.
+   The call id comes from [[with-call]] and is nil if absent. Nil `f` unbinds."
+  [f]
+  (Interpreter/bindHostWithCall
+    (when f
+      (reify Interpreter$CallHostFunction
+        (call [_ session call-id name payload]
+          (str (f session (when-not (.isEmpty ^String call-id) call-id) name payload))))))
   nil)
 
 (defn packages-dir

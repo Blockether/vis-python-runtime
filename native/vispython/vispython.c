@@ -320,7 +320,8 @@ static void vis_py_scan_release(vis_py_scan_budget *budget)
     if (budget != NULL && --budget->references == 0) free(budget);
 }
 
-static void vis_py_run_push(const char *session);
+static void vis_py_run_push(const char *session, const char *call);
+static const char *vis_py_current_call(void);
 static void vis_py_run_pop(void);
 static const char *vis_py_current_session(void);
 
@@ -357,12 +358,13 @@ struct vis_py_batch {
     PyObject *thunks; /* the sequence every thunk is borrowed from */
     vis_py_task *task;
     char session[VIS_PY_SESSION_NAME];
+    const char *call; /* borrowed until all of this batch's thunks have returned */
     vis_py_scan_budget *scan_budget;
     int count;
     int done;        /* tasks finished, run or stopped */
     int outstanding; /* tasks queued or running, still touching this batch */
     int stopped;     /* interrupted: no other task of it starts */
-    int interrupted; /* by the host, through the thread waiting on it */
+    PyObject *interrupt; /* exception class sent by the host to the batch owner */
     unsigned long owner; /* the thread whose `par` this is */
     vis_py_batch *next;  /* the next batch a `par` still waits on */
 };
@@ -378,6 +380,7 @@ static void vis_py_batch_free(vis_py_batch *batch)
         Py_XDECREF(batch->task[i].error);
     }
     Py_XDECREF(batch->thunks);
+    Py_XDECREF(batch->interrupt);
     vis_py_scan_release(batch->scan_budget);
     free(batch->task);
     free(batch);
@@ -508,7 +511,7 @@ static void vis_py_task_run(vis_py_task *task)
     pthread_mutex_unlock(&vis_py_pool.lock);
     if (!stopped) {
         vis_py_scan_current = batch->scan_budget;
-        vis_py_run_push(batch->session);
+        vis_py_run_push(batch->session, batch->call);
         value = PyObject_CallNoArgs(task->thunk);
         error = (value == NULL) ? PyErr_GetRaisedException() : NULL;
         vis_py_run_pop();
@@ -1313,7 +1316,7 @@ static const char *vis_py_install_windows_console_guard(void)
 
 #define VIS_PY_HOST_BUFFER 65536
 
-typedef int (*vis_py_host_fn)(const char *session, const char *name, const char *payload,
+typedef int (*vis_py_host_fn)(const char *session, const char *call, const char *name, const char *payload,
                               char *out, int cap);
 
 static vis_py_host_fn vis_py_host = NULL;
@@ -1353,6 +1356,7 @@ static vis_py_host_fn vis_py_host = NULL;
 
 typedef struct {
     char name[VIS_PY_SESSION_NAME];
+    const char *call;
 } vis_py_run_entry;
 
 static _Thread_local vis_py_run_entry vis_py_run_stack[VIS_PY_RUN_DEPTH];
@@ -1364,7 +1368,7 @@ static _Thread_local int vis_py_run_depth = 0;
 static char vis_py_trusted[VIS_PY_TRUSTED_MAX][VIS_PY_SESSION_NAME];
 static pthread_mutex_t vis_py_trust_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static void vis_py_run_push(const char *session)
+static void vis_py_run_push(const char *session, const char *call)
 {
     if (vis_py_run_depth >= VIS_PY_RUN_DEPTH) {
         vis_py_run_depth++; /* counted, so the pop stays balanced */
@@ -1372,6 +1376,7 @@ static void vis_py_run_push(const char *session)
     }
     snprintf(vis_py_run_stack[vis_py_run_depth].name, VIS_PY_SESSION_NAME, "%s",
              session == NULL ? "" : session);
+    vis_py_run_stack[vis_py_run_depth].call = call;
     vis_py_run_depth++;
 }
 
@@ -1394,6 +1399,12 @@ static const char *vis_py_current_session(void)
     return vis_py_run_stack[top].name[0] == '\0' ? NULL : vis_py_run_stack[top].name;
 }
 
+static const char *vis_py_current_call(void)
+{
+    int top = vis_py_run_depth - 1;
+    return top >= 0 && top < VIS_PY_RUN_DEPTH ? vis_py_run_stack[top].call : NULL;
+}
+
 static int vis_py_session_trusted(const char *session)
 {
     int trusted = 0;
@@ -1413,12 +1424,31 @@ static int vis_py_session_trusted(const char *session)
     return trusted;
 }
 
+/* An interrupted callback can return an error from the host. Deliver the
+   pending interrupt HERE, before the reply becomes a Python RuntimeError.
+   Otherwise Python starts unwinding for the wrong exception, then the async
+   exception can land inside the caller's except or finally suite. */
+static int vis_py_raise_callback_interrupt(PyThreadState *state)
+{
+    PyObject *exception = state->async_exc;
+
+    if (exception == NULL) {
+        return 0;
+    }
+    Py_INCREF(exception);
+    PyThreadState_SetAsyncExc(PyThread_get_thread_ident(), NULL);
+    PyErr_SetNone(exception);
+    Py_DECREF(exception);
+    return 1;
+}
+
 /* `_vis_host.call(name, payload)` -> the host's reply as `str`. */
 static PyObject *vis_py_host_call(PyObject *self, PyObject *args)
 {
     const char *name = NULL;
     const char *payload = NULL;
     const char *session = NULL;
+    const char *call;
     vis_py_host_fn host = vis_py_host;
     PyThreadState *save;
     char *buffer;
@@ -1443,9 +1473,17 @@ static PyObject *vis_py_host_call(PyObject *self, PyObject *args)
     if (session == NULL) {
         session = "";
     }
+    call = vis_py_current_call();
+    if (call == NULL) {
+        call = "";
+    }
     save = PyEval_SaveThread();
-    needed = host(session, name, payload, buffer, cap);
+    needed = host(session, call, name, payload, buffer, cap);
     PyEval_RestoreThread(save);
+    if (vis_py_raise_callback_interrupt(save)) {
+        free(buffer);
+        return NULL;
+    }
     if (needed >= cap) {
         grown = (char *)realloc(buffer, (size_t)needed + 1);
         if (grown == NULL) {
@@ -1455,8 +1493,12 @@ static PyObject *vis_py_host_call(PyObject *self, PyObject *args)
         buffer = grown;
         cap = needed + 1;
         save = PyEval_SaveThread();
-        needed = host(session, name, payload, buffer, cap);
+        needed = host(session, call, name, payload, buffer, cap);
         PyEval_RestoreThread(save);
+        if (vis_py_raise_callback_interrupt(save)) {
+            free(buffer);
+            return NULL;
+        }
         if (needed >= cap) {
             free(buffer);
             PyErr_SetString(PyExc_RuntimeError, "host reply grew between calls");
@@ -1611,6 +1653,7 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
     }
     batch->thunks = thunks; /* the batch owns the sequence from here on */
     batch->scan_budget = vis_py_scan_current;
+    batch->call = vis_py_current_call();
     if (batch->scan_budget != NULL) batch->scan_budget->references++;
     session = vis_py_current_session();
     snprintf(batch->session, sizeof batch->session, "%s", session == NULL ? "" : session);
@@ -1721,7 +1764,7 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
             break;
         }
     }
-    interrupted = batch->interrupted;
+    interrupted = batch->interrupt != NULL;
     pthread_mutex_unlock(&vis_py_pool.lock);
 
     /* The first interrupt wins outright, because the block it landed in is
@@ -1753,7 +1796,7 @@ static PyObject *vis_py_par(PyObject *self, PyObject *args)
         failure = batch->task[chosen].error;
         batch->task[chosen].error = NULL; /* raised below, no longer the batch's */
     } else if (interrupted) {
-        PyErr_SetNone(PyExc_KeyboardInterrupt);
+        PyErr_SetNone(batch->interrupt);
         failure = PyErr_GetRaisedException();
     } else {
         values = PyList_New(count);
@@ -2979,20 +3022,45 @@ static int vis_py_exec_locked(const char *module_name, const char *code, char *o
     return 0;
 }
 
-/* The interpreter thread ident of whatever the HOST is running right now, and 0
-   between calls. A block that spins holds the interpreter thread, so the only
-   way to reach it is from another thread - which needs to know WHICH thread to
-   raise in. Written under the GIL by the runner, read by `vispython_interrupt`
-   with the GIL held, so the value a caller acts on is a thread that was running
-   when it looked. */
-static volatile unsigned long vis_py_running_thread = 0;
+/* Active run and run-block calls, most recent first, under the GIL. An
+   interrupt that reaches the interpreter after a call leaves must not arm its
+   thread for the next call. Entries live on the calling C stack. */
+typedef struct vis_py_active_call {
+    unsigned long ident;
+    int legacy; /* eligible for an interrupt without a target */
+    struct vis_py_active_call *next;
+} vis_py_active_call;
+
+static vis_py_active_call *vis_py_calls = NULL;
+
+static void vis_py_call_enter(vis_py_active_call *call, int legacy)
+{
+    call->ident = PyThread_get_thread_ident();
+    call->legacy = legacy;
+    call->next = vis_py_calls;
+    vis_py_calls = call;
+}
+
+static void vis_py_call_leave(vis_py_active_call *call)
+{
+    vis_py_active_call **link;
+
+    for (link = &vis_py_calls; *link != NULL; link = &(*link)->next) {
+        if (*link == call) {
+            *link = call->next;
+            break;
+        }
+    }
+    PyThreadState_SetAsyncExc(call->ident, NULL);
+}
 
 /* Stop every batch `owner` waits on and name the threads running its thunks,
    `owner` aside. Needs the GIL, which a thunk holds when it starts, so each
    thunk is either named here or finds its batch stopped and never starts. The
    broadcast wakes the `par` waiting on the batch: it runs no Python while it
    waits, so it would not see the exception raised in its own thread. */
-static int vis_py_interrupt_batches(unsigned long owner, unsigned long *runner, int cap)
+static int vis_py_interrupt_batches(unsigned long owner, PyObject *exc,
+                                    unsigned long *runner, int cap)
 {
     vis_py_batch *batch;
     unsigned long thread;
@@ -3005,7 +3073,9 @@ static int vis_py_interrupt_batches(unsigned long owner, unsigned long *runner, 
             continue;
         }
         batch->stopped = 1;
-        batch->interrupted = 1;
+        if (batch->interrupt == NULL) {
+            batch->interrupt = Py_NewRef(exc);
+        }
         for (i = 0; i < batch->count; i++) {
             thread = batch->task[i].runner;
             if (thread != 0 && thread != owner && named < cap) {
@@ -3016,6 +3086,54 @@ static int vis_py_interrupt_batches(unsigned long owner, unsigned long *runner, 
     pthread_cond_broadcast(&vis_py_pool.finished);
     pthread_mutex_unlock(&vis_py_pool.lock);
     return named;
+}
+
+/* Raise in thread `target` and in each thread that runs a thunk of a batch
+   it waits on. A legacy interrupt selects the most recent active call. */
+static int vis_py_interrupt_target(unsigned long target, int latest, int cancel,
+                                   char *out, int cap)
+{
+    PyGILState_STATE gil = PyGILState_Ensure();
+    vis_py_active_call *call;
+    PyObject *module;
+    PyObject *exc;
+    unsigned long runner[VIS_PY_WORKERS_MAX];
+    int runners = 0;
+    int landed = 0;
+    int i;
+
+    if (cancel) {
+        module = PyImport_ImportModule("asyncio.exceptions");
+        exc = module == NULL ? NULL : PyObject_GetAttrString(module, "CancelledError");
+        Py_XDECREF(module);
+        if (exc == NULL) {
+            vis_py_take_error(out, cap);
+            PyGILState_Release(gil);
+            return VIS_PY_ERR_PYTHON;
+        }
+        if (!PyExceptionClass_Check(exc)) {
+            Py_DECREF(exc);
+            vis_py_copy_out("asyncio.CancelledError is not an exception class", out, cap);
+            PyGILState_Release(gil);
+            return VIS_PY_ERR_PYTHON;
+        }
+    } else {
+        exc = Py_NewRef(PyExc_KeyboardInterrupt);
+    }
+    for (call = vis_py_calls; call != NULL; call = call->next) {
+        if (latest ? call->legacy : call->ident == target) {
+            landed = PyThreadState_SetAsyncExc(call->ident, exc);
+            runners = vis_py_interrupt_batches(call->ident, exc, runner, VIS_PY_WORKERS_MAX);
+            for (i = 0; i < runners; i++) {
+                PyThreadState_SetAsyncExc(runner[i], exc);
+            }
+            break;
+        }
+    }
+    Py_DECREF(exc);
+    PyGILState_Release(gil);
+    vis_py_record(VIS_PY_LOG_WARN, "interrupt", "\"threads\":%d,\"thunks\":%d", landed, runners);
+    return vis_py_copy_out(landed > 0 ? "1" : "0", out, cap);
 }
 
 /* Raise `KeyboardInterrupt` in the thread running guest code, answering "1" when
@@ -3039,29 +3157,40 @@ static int vis_py_interrupt_batches(unsigned long owner, unsigned long *runner, 
    the running block keeps dropping at its switch interval. */
 VIS_PY_EXPORT int vispython_interrupt(char *out, int cap)
 {
-    PyGILState_STATE gil;
-    unsigned long target;
-    unsigned long runner[VIS_PY_WORKERS_MAX];
-    int runners;
-    int landed;
-    int i;
-
     if (!vis_py_started) {
         return VIS_PY_ERR_INIT;
     }
-    target = vis_py_running_thread;
-    if (target == 0) {
-        return vis_py_copy_out("0", out, cap);
+    return vis_py_interrupt_target(0, 1, 0, out, cap);
+}
+
+/* The interpreter thread ident of the CALLING thread, as decimal text. A host
+   that runs several calls at once keeps it per call, so it can later stop ONE
+   call with `vispython_interrupt_thread`. It needs no GIL. */
+VIS_PY_EXPORT int vispython_thread(char *out, int cap)
+{
+    char text[32];
+
+    snprintf(text, sizeof text, "%lu", PyThread_get_thread_ident());
+    return vis_py_copy_out(text, out, cap);
+}
+
+/* `vispython_interrupt` for the ONE thread `ident` (from `vispython_thread`),
+   not for the last thread that started a run. `cancel` raises CancelledError;
+   `interrupt` raises KeyboardInterrupt. Answers "1" when a thread state took
+   the exception. The caller must make sure that `ident` still runs the call
+   it means to stop. */
+VIS_PY_EXPORT int vispython_interrupt_thread(const char *ident, const char *kind,
+                                            char *out, int cap)
+{
+    if (!vis_py_started) {
+        return VIS_PY_ERR_INIT;
     }
-    gil = PyGILState_Ensure();
-    landed = PyThreadState_SetAsyncExc(target, PyExc_KeyboardInterrupt);
-    runners = vis_py_interrupt_batches(target, runner, VIS_PY_WORKERS_MAX);
-    for (i = 0; i < runners; i++) {
-        PyThreadState_SetAsyncExc(runner[i], PyExc_KeyboardInterrupt);
+    if (strcmp(kind, "cancel") != 0 && strcmp(kind, "interrupt") != 0) {
+        vis_py_copy_out("interrupt kind must be cancel or interrupt", out, cap);
+        return VIS_PY_ERR_PYTHON;
     }
-    PyGILState_Release(gil);
-    vis_py_record(VIS_PY_LOG_WARN, "interrupt", "\"threads\":%d,\"thunks\":%d", landed, runners);
-    return vis_py_copy_out(landed > 0 ? "1" : "0", out, cap);
+    return vis_py_interrupt_target(strtoul(ident, NULL, 10), 0,
+                                   strcmp(kind, "cancel") == 0, out, cap);
 }
 
 /* Run `code` the way the sandbox does: statements execute, and the value of a
@@ -3071,6 +3200,7 @@ VIS_PY_EXPORT int vispython_interrupt(char *out, int cap)
    only hands the source over as a Python string, never as interpolated text. */
 static int vis_py_run_locked(const char *module_name, const char *code, char *out, int cap)
 {
+    vis_py_active_call call;
     PyObject *globals, *runtime, *result, *text;
     const char *utf8;
     long long began;
@@ -3085,9 +3215,9 @@ static int vis_py_run_locked(const char *module_name, const char *code, char *ou
         vis_py_take_error(out, cap);
         return VIS_PY_ERR_PYTHON;
     }
-    vis_py_running_thread = PyThread_get_thread_ident();
+    vis_py_call_enter(&call, 1);
     result = PyObject_CallMethod(runtime, "run_json", "sO", code, globals);
-    vis_py_running_thread = 0;
+    vis_py_call_leave(&call);
     Py_DECREF(runtime);
     if (result == NULL) {
         vis_py_take_error(out, cap);
@@ -3111,6 +3241,7 @@ static int vis_py_run_locked(const char *module_name, const char *code, char *ou
    JSON object — stdout and error — back. */
 static int vis_py_run_block_locked(const char *module_name, const char *code, char *out, int cap)
 {
+    vis_py_active_call call;
     PyObject *globals, *runtime, *result, *text;
     const char *utf8;
     long long began;
@@ -3125,9 +3256,9 @@ static int vis_py_run_block_locked(const char *module_name, const char *code, ch
         vis_py_take_error(out, cap);
         return VIS_PY_ERR_PYTHON;
     }
-    vis_py_running_thread = PyThread_get_thread_ident();
+    vis_py_call_enter(&call, 1);
     result = PyObject_CallMethod(runtime, "run_block_json", "sO", code, globals);
-    vis_py_running_thread = 0;
+    vis_py_call_leave(&call);
     Py_DECREF(runtime);
     if (result == NULL) {
         vis_py_take_error(out, cap);
@@ -3146,15 +3277,13 @@ static int vis_py_run_block_locked(const char *module_name, const char *code, ch
     return written;
 }
 
-/* The four entry points that RUN Python code. Each takes the GIL for its own
-   caller and gives it back, so ANY host thread may enter and no session waits
-   behind another's upcall. `PyGILState_Ensure` is per thread and re-entrant: a
-   thread that already holds the GIL pays nothing, which is what makes a host
-   tool calling back INTO the interpreter - while the block that called it sits
-   parked in `vis_py_host_call` - a nested acquire instead of a deadlock. The
-   `_locked` bodies above assume the GIL is already held. */
-VIS_PY_EXPORT int vispython_eval(const char *module_name, const char *code, char *out, int cap)
+/* The four entry points that RUN Python code. Each takes and releases the
+   GIL on its caller. The call id is borrowed for this downcall only: all pool
+   thunks finish before it returns. The `_locked` bodies need the GIL. */
+VIS_PY_EXPORT int vispython_eval(const char *module_name, const char *code, const char *call_id,
+                                  char *out, int cap)
 {
+    vis_py_active_call call;
     PyGILState_STATE gil;
     int status;
 
@@ -3162,15 +3291,19 @@ VIS_PY_EXPORT int vispython_eval(const char *module_name, const char *code, char
         return VIS_PY_ERR_INIT;
     }
     gil = PyGILState_Ensure();
-    vis_py_run_push(module_name);
+    vis_py_run_push(module_name, call_id);
+    vis_py_call_enter(&call, 0);
     status = vis_py_eval_locked(module_name, code, out, cap);
+    vis_py_call_leave(&call);
     vis_py_run_pop();
     PyGILState_Release(gil);
     return status;
 }
 
-VIS_PY_EXPORT int vispython_exec(const char *module_name, const char *code, char *out, int cap)
+VIS_PY_EXPORT int vispython_exec(const char *module_name, const char *code, const char *call_id,
+                                  char *out, int cap)
 {
+    vis_py_active_call call;
     PyGILState_STATE gil;
     int status;
 
@@ -3178,14 +3311,17 @@ VIS_PY_EXPORT int vispython_exec(const char *module_name, const char *code, char
         return VIS_PY_ERR_INIT;
     }
     gil = PyGILState_Ensure();
-    vis_py_run_push(module_name);
+    vis_py_run_push(module_name, call_id);
+    vis_py_call_enter(&call, 0);
     status = vis_py_exec_locked(module_name, code, out, cap);
+    vis_py_call_leave(&call);
     vis_py_run_pop();
     PyGILState_Release(gil);
     return status;
 }
 
-VIS_PY_EXPORT int vispython_run(const char *module_name, const char *code, char *out, int cap)
+VIS_PY_EXPORT int vispython_run(const char *module_name, const char *code, const char *call_id,
+                                 char *out, int cap)
 {
     PyGILState_STATE gil;
     int status;
@@ -3194,14 +3330,15 @@ VIS_PY_EXPORT int vispython_run(const char *module_name, const char *code, char 
         return VIS_PY_ERR_INIT;
     }
     gil = PyGILState_Ensure();
-    vis_py_run_push(module_name);
+    vis_py_run_push(module_name, call_id);
     status = vis_py_run_locked(module_name, code, out, cap);
     vis_py_run_pop();
     PyGILState_Release(gil);
     return status;
 }
 
-VIS_PY_EXPORT int vispython_run_block(const char *module_name, const char *code, char *out, int cap)
+VIS_PY_EXPORT int vispython_run_block(const char *module_name, const char *code, const char *call_id,
+                                       char *out, int cap)
 {
     PyGILState_STATE gil;
     int status;
@@ -3223,7 +3360,7 @@ VIS_PY_EXPORT int vispython_run_block(const char *module_name, const char *code,
         vis_py_scan_current->remaining = VIS_PY_SCAN_ENTRIES;
         vis_py_scan_current->references = 1;
     }
-    vis_py_run_push(module_name);
+    vis_py_run_push(module_name, call_id);
     status = vis_py_run_block_locked(module_name, code, out, cap);
     vis_py_run_pop();
     if (previous == NULL) vis_py_scan_release(vis_py_scan_current);

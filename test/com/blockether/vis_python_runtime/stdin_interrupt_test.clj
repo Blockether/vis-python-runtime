@@ -153,6 +153,60 @@
     (testing "the session survives its interrupted block"
       (is (= "2" (ran session "print(1 + 1)"))))))
 
+(defn- spinning-block
+  "Start a spinning block of a new session on its own thread. Answer
+   `[ident answer]`: the interpreter thread of the block and its future."
+  []
+  (let [spinning
+        (promise)
+
+        ident
+        (promise)
+
+        session
+        (harness/tool-session {"ready" (fn [_]
+                                         (deliver spinning true)
+                                         "go")})
+
+        answer
+        (future (deliver ident (runtime/thread-ident))
+                (block session
+                       (str "try:\n" "    await ready()\n"
+                            "    while True:\n" "        pass\n"
+                            "finally:\n" "    print('cleanup')")))]
+
+    (is (true? (deref spinning 30000 false)) "the tool never ran; nothing to interrupt")
+    [(deref ident 1000 nil) answer]))
+
+(defn- interrupt-until-settled
+  "Interrupt thread `ident` until a thread state takes it, for at most 50 tries,
+   then wait for `answer`. One interrupt only, so the block's `finally` runs."
+  [ident answer kind]
+  (loop [n 0]
+    (when-not (or (runtime/interrupt-thread! ident kind) (>= n 50))
+      (Thread/sleep 100)
+      (recur (inc n))))
+  (deref answer 30000 ::hung))
+
+;; Vis Task design: a host that runs several calls at once must stop ONE of them.
+;; The process-wide interrupt aims only at the last thread that started a run.
+(harness/defbuilt-test
+  interrupt-thread-stops-only-its-block-test
+  (let [[first-ident first-answer] (spinning-block)
+        [second-ident second-answer] (spinning-block)
+        first-settled (interrupt-until-settled first-ident first-answer :interrupt)]
+
+    (testing "the interrupted block unwinds with a KeyboardInterrupt"
+      (is (not= ::hung first-settled) "the block was still running after 50 interrupts")
+      (is (str/includes? (str (:error first-settled)) "KeyboardInterrupt")
+          (pr-str first-settled))
+      (is (= "cleanup\n" (:stdout first-settled))))
+    (testing "the other block still runs"
+      (is (= ::hung (deref second-answer 300 ::hung))))
+    (testing "cancellation raises a different exception and runs the same cleanup"
+      (is (= {:stdout "cleanup\n" :error "CancelledError"}
+             (interrupt-until-settled second-ident second-answer :cancel))))))
+
 ;; Vis session 32bcc713: a long asyncio sleep outlived the host's block wall and
 ;; retired Python instead of yielding to the interrupt, ending the active turn.
 ;; A native `time.sleep` held the interpreter in C the same way.

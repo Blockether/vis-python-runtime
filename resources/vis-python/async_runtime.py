@@ -3,8 +3,10 @@ import builtins as __vis_builtins__
 import collections as __vis_collections__
 import errno as __vis_errno__
 import io as __vis_io__
+import json as __vis_json__
 import linecache as __vis_linecache__
 import _thread as __vis_thread__
+import sys as __vis_sys__
 import time as __vis_time__
 import weakref as __vis_weakref__
 
@@ -300,10 +302,8 @@ def __vis_is_interrupt__(exc):
     # An interrupt stops the block instead of reporting a failure: the host's
     # KeyboardInterrupt, SystemExit and cancellation. Every settle path lets it
     # through as itself, so an `except Exception:` cannot swallow it.
-    import asyncio as std_asyncio
-
-    return isinstance(
-        exc, (KeyboardInterrupt, SystemExit, CancelledError, std_asyncio.CancelledError)
+    return isinstance(exc, (KeyboardInterrupt, SystemExit)) or (
+        type(exc).__name__ == "CancelledError" and isinstance(exc, __vis_cancelled_type__())
     )
 
 
@@ -318,9 +318,10 @@ def __vis_wrap_tool_exc__(exc):
 
 
 class __vis_Call__:
-    __slots__ = ("fn", "a", "k", "nm", "ran", "failed", "res")
+    __slots__ = ("fn", "a", "k", "nm", "ran", "failed", "res", "resolve_host_task")
 
-    def __init__(self, fn, a, k, nm="tool"):
+    def __init__(self, fn, a, k, nm="tool", *, resolve_host_task=False):
+        self.resolve_host_task = resolve_host_task
         self.fn = fn
         self.a = a
         self.k = k
@@ -1379,9 +1380,29 @@ def __vis_settle_call__(__vis_c__):
     # as soon as it has an answer, so anything the answer needs to know about its OWN
     # call has to be taken while the call is still holding it.
     __vis_paging__ = __vis_paged_spec__(__vis_c__.nm, __vis_c__.a, __vis_c__.k)
-    return __vis_as_result__(
-        __vis_pyify__(__vis_exec_call__(__vis_c__)), __vis_paging__
-    )
+    result = __vis_exec_call__(__vis_c__)
+    if __vis_c__.resolve_host_task and isinstance(result, HostTask):
+        result = __vis_drive__(__vis_wait_thread_task__(result))
+    return __vis_as_result__(__vis_pyify__(result), __vis_paging__)
+
+
+async def __vis_wait_thread_task__(task):
+    try:
+        return await task
+    except __vis_cancelled_type__():
+        if not task.done():
+            task.cancel()
+        raise
+
+
+async def __vis_settle_call_async__(call):
+    if not call.resolve_host_task:
+        return __vis_settle_call__(call)
+    paging = __vis_paged_spec__(call.nm, call.a, call.k)
+    result = __vis_exec_call__(call)
+    if isinstance(result, HostTask):
+        result = await __vis_wait_thread_task__(result)
+    return __vis_as_result__(__vis_pyify__(result), paging)
 
 
 def __vis_pyify__(x):
@@ -1481,7 +1502,7 @@ def __vis_settle_gather__(v):
                     # The block's interrupt is no slot's result: it stops the
                     # gather here, as it would stop asyncio's.
                     raise
-                except CancelledError as exc:
+                except __vis_cancelled_type__() as exc:
                     # An `asyncio.timeout` deadline cancels the whole gather,
                     # not one slot, as asyncio cancels the task that awaits it.
                     if __vis_scopes_fired__() > fired:
@@ -1551,6 +1572,8 @@ def __vis_is_awaitable__(v):
 
 
 def __vis_settle__(v):
+    if isinstance(v, HostTask) or __vis_std_future__(v):
+        return v
     if isinstance(v, __vis_Call__):
         # TOP-LEVEL tool result: re-type a list/str payload to the probeable
         # subclass. Without this a
@@ -1577,7 +1600,7 @@ def __vis_settle_child__(v):
     # GATHER-child settle. A `gather` slot is work by definition, so the one
     # awaitable the top-level settle refuses to drive - a Future - is exactly the
     # thing a sibling slot is expected to complete here.
-    if isinstance(v, __vis_Future__):
+    if isinstance(v, (__vis_Future__, HostTask)) or __vis_std_future__(v):
         return __vis_pyify__(__vis_drive__(v))
     return __vis_settle__(v)
 
@@ -1664,8 +1687,12 @@ def __vis_library_awaitable__(aw):
     # Sandbox coroutines and synchronization primitives use the bounded worker
     # pool. Imported awaitables instead belong to their caller's selector loop;
     # moving them to a worker closes shared HTTP transports before client exit.
-    if isinstance(aw, __vis_Task__):
-        return __vis_library_awaitable__(aw._aw)
+    if isinstance(aw, HostTask):
+        return True
+    if isinstance(aw, __vis_Call__):
+        return aw.resolve_host_task
+    if isinstance(aw, LocalTask):
+        return __vis_library_awaitable__(aw.get_coro())
     if isinstance(aw, __vis_Gather__):
         return any(__vis_library_awaitable__(child) for child in aw.aws)
     if not __vis_is_awaitable__(aw):
@@ -1760,7 +1787,7 @@ async def __vis_drive_async__(coro):
                 return done.value
             try:
                 if isinstance(yielded, __vis_Call__):
-                    send = __vis_settle_call__(yielded)
+                    send = await __vis_settle_call_async__(yielded)
                 elif isinstance(yielded, __vis_Gather__):
                     send = await __vis_gather_async__(yielded)
                 elif yielded is None:
@@ -1866,6 +1893,20 @@ def __vis_loop_factory__():
     return __vis_quiet_interrupts__(Loop())
 
 
+__vis_runners__ = __vis_weakref__.WeakSet()
+
+
+async def __vis_run_block_coro__(coro):
+    import asyncio as std_asyncio
+
+    task = std_asyncio.current_task()
+    __vis_runners__.add(task)
+    try:
+        return await __vis_drive_async__(coro)
+    finally:
+        __vis_runners__.discard(task)
+
+
 def __vis_drive__(coro):
     import asyncio as std_asyncio
 
@@ -1879,7 +1920,7 @@ def __vis_drive__(coro):
     try:
         std_asyncio.events._set_running_loop(None)
         with std_asyncio.Runner(loop_factory=__vis_loop_factory__) as runner:
-            return runner.run(__vis_drive_async__(coro))
+            return runner.run(__vis_run_block_coro__(coro))
     finally:
         std_asyncio.events._set_running_loop(previous)
         if previous_task is not None:
@@ -2011,8 +2052,22 @@ def __vis_err_host_data__():
     return getattr(e, "vis_data", None) if e is not None else None
 
 
-class CancelledError(BaseException):
-    pass
+def __vis_cancelled_type__():
+    from asyncio import CancelledError
+
+    return CancelledError
+
+
+def __vis_cancelled__(msg=None):
+    kind = __vis_cancelled_type__()
+    return kind() if msg is None else kind(msg)
+
+
+def __vis_std_future__(value):
+    # Do not import asyncio or ssl in a context that has not used its event loop.
+    module = __vis_sys__.modules.get("asyncio")
+    future = getattr(module, "Future", None)
+    return future is not None and isinstance(value, future)
 
 
 class InvalidStateError(Exception):
@@ -2083,12 +2138,216 @@ def __vis_clone_exception__(exc):
         return RuntimeError(str(exc))
 
 
-class __vis_Task__:
+def __vis_task_rpc__(op, *args, **fields):
+    from vis_runtime import host_call, VisToolError, _tool_arg, _tool_records
+
+    payload = {"session": globals().get("__vis_session__"), "args": args, **fields}
+    reply = __vis_json__.loads(
+        host_call(op, __vis_json__.dumps(_tool_records(payload), default=_tool_arg))
+    )
+    if "error" in reply:
+        raise VisToolError(reply["error"], reply.get("error_data"))
+    return reply.get("value")
+
+
+__vis_host_tasks__ = __import__("weakref").WeakValueDictionary()
+__vis_task_callbacks__ = {}
+__vis_wait_serial__ = __import__("itertools").count(1)
+
+
+class HostTask:
+    __slots__ = ()
+
+    def __init__(self, ident, name):
+        self._id = ident
+        self._host_name = name
+        self._outcome = None
+        self._host_callbacks = []
+        self._fired = False
+
+    def __repr__(self):
+        return "<Task " + self._host_name + ">"
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise AttributeError(self._host_name + " is a Task: await it for the tool result")
+
+    def __await__(self):
+        return self._wait(read=True).__await__()
+
+    async def _wait(self, *, read, observe=False):
+        import asyncio as std_asyncio
+
+        if self._outcome is not None:
+            return self._value() if read else self._outcome["state"]
+        token = next(__vis_wait_serial__)
+        try:
+            while True:
+                outcome = self._request(token=token, read=read)
+                state = outcome["state"]
+                if state == "detached":
+                    return "detached" if observe else self
+                if state != "running":
+                    return self._value() if read else state
+                await std_asyncio.sleep(0.02)
+        finally:
+            __vis_task_rpc__("_task_await", self._id, {"token": token, "leave": True})
+
+    def _request(self, **options):
+        outcome = __vis_task_rpc__("_task_await", self._id, options)
+        if self._outcome is not None:
+            return self._outcome
+        if outcome["state"] not in ("running", "detached"):
+            if outcome["state"] == "missing":
+                outcome = {"state": "cancelled"}
+            if options.get("read"):
+                if "value" in outcome:
+                    outcome["value"] = __vis_typed_value__(outcome["value"])
+                self._outcome = outcome
+                __vis_task_rpc__("_task_ack", self._id)
+            self._notify()
+        return outcome
+
+    def _notify(self):
+        if self._fired:
+            return
+        self._fired = True
+        callbacks, self._host_callbacks = self._host_callbacks, []
+        __vis_task_callbacks__.pop(self._id, None)
+        for fn, context in callbacks:
+            self._schedule(fn, context)
+
+    def _schedule(self, fn, context):
+        import asyncio as std_asyncio
+
+        std_asyncio.get_running_loop().call_soon(fn, self, context=context)
+
+    def _value(self):
+        exc = self._error()
+        if exc is not None:
+            raise exc
+        return self._outcome.get("value")
+
+    def _error(self):
+        from vis_runtime import VisToolError
+
+        outcome = self._outcome
+        if outcome["state"] == "cancelled":
+            raise __vis_cancelled__(outcome.get("message"))
+        if outcome["state"] == "failed":
+            return VisToolError(outcome["error"], outcome.get("error_data"))
+        return None
+
+    def done(self):
+        return self._outcome is not None or self._request()["state"] != "running"
+
+    def cancelled(self):
+        if self._outcome is not None:
+            return self._outcome["state"] == "cancelled"
+        return self._request()["state"] in ("cancelled", "missing")
+
+    def result(self):
+        if self._outcome is None and self._request(read=True)["state"] == "running":
+            raise InvalidStateError("Result is not ready.")
+        return self._value()
+
+    def exception(self):
+        if self._outcome is None and self._request(read=True)["state"] == "running":
+            raise InvalidStateError("Exception is not set.")
+        return self._error()
+
+    def cancel(self, msg=None):
+        return __vis_task_rpc__("_task_cancel", self._id, msg)
+
+    def cancelling(self):
+        if self._outcome is not None:
+            return self._outcome.get("cancelling", 0)
+        return __vis_task_rpc__("_task_cancelling", self._id)
+
+    def uncancel(self):
+        if self._outcome is not None:
+            count = max(0, self._outcome.get("cancelling", 0) - 1)
+            self._outcome["cancelling"] = count
+            return count
+        return __vis_task_rpc__("_task_uncancel", self._id)
+
+    def get_name(self):
+        return self._host_name
+
+    def set_name(self, name):
+        self._host_name = str(name)
+        __vis_task_rpc__("_task_rename", self._id, self._host_name)
+
+    def add_done_callback(self, fn, *, context=None):
+        if self.done():
+            self._schedule(fn, context)
+        else:
+            if context is None:
+                import contextvars
+
+                context = contextvars.copy_context()
+            self._host_callbacks.append((fn, context))
+            __vis_task_callbacks__[self._id] = self
+
+    def remove_done_callback(self, fn):
+        before = len(self._host_callbacks)
+        self._host_callbacks = [(cb, ctx) for cb, ctx in self._host_callbacks if cb != fn]
+        if not self._host_callbacks:
+            __vis_task_callbacks__.pop(self._id, None)
+        return before - len(self._host_callbacks)
+
+    def get_coro(self):
+        return None
+
+    def get_loop(self):
+        import asyncio as std_asyncio
+
+        return std_asyncio.get_running_loop()
+
+    def get_stack(self, *, limit=None):
+        return []
+
+    def print_stack(self, *, limit=None, file=None):
+        pass
+
+
+__vis_host_task_type__ = None
+
+
+def __vis_task_handle__(row):
+    global __vis_host_task_type__
+    ident = row["id"]
+    task = __vis_host_tasks__.get(ident)
+    if task is None:
+        if __vis_host_task_type__ is None:
+            import asyncio as std_asyncio
+
+            # HostTask owns the outcome, not a coroutine scheduled on this block's loop.
+            __vis_host_task_type__ = type("HostTask", (HostTask, std_asyncio.Task), {})
+        task = __vis_host_task_type__(ident, row["name"])
+        __vis_host_tasks__[ident] = task
+    return task
+
+
+def __vis_start_host_task__(name, args, kwargs):
+    __vis_flush_writes__()
+    import reprlib
+
+    display = [reprlib.repr(value) for value in args]
+    display.extend(f"{key}={reprlib.repr(value)}" for key, value in kwargs.items())
+    return __vis_task_handle__(__vis_task_rpc__(
+        "_task_start", name, tool_args=args, kwargs=kwargs,
+        call_display="(" + ", ".join(display) + ")",
+    ))
+
+
+class LocalTask:
     # A lazy Task-compatible awaitable. It intentionally has NO global task
     # registry or scheduler thread. Completion/cancellation clears the coroutine
     # reference, preventing finished frames and tool arguments from accumulating
     # in a long-lived sandbox Context.
-    __slots__ = ("_aw", "_done", "_cancelled", "_result", "_exception", "_name")
+    __slots__ = ("_aw", "_done", "_cancelled", "_result", "_exception", "_name", "_cancel_message")
 
     def __init__(self, aw, name=None):
         self._aw = aw
@@ -2097,10 +2356,11 @@ class __vis_Task__:
         self._result = None
         self._exception = None
         self._name = name
+        self._cancel_message = None
 
     def __await__(self):
         if self._cancelled:
-            raise CancelledError()
+            raise __vis_cancelled__(self._cancel_message)
         if not self._done:
             try:
                 self._result = yield from __vis_awaitable__(self._aw).__await__()
@@ -2115,7 +2375,7 @@ class __vis_Task__:
                 # the finished coroutine/driver frames alive on a retained Task.
                 self._exception = __vis_clean_exception__(self._exception)
         if self._cancelled:
-            raise CancelledError()
+            raise __vis_cancelled__(self._cancel_message)
         if self._exception is not None:
             raise __vis_clone_exception__(self._exception) from None
         return self._result
@@ -2123,6 +2383,7 @@ class __vis_Task__:
     def cancel(self, msg=None):
         if self._done:
             return False
+        self._cancel_message = msg
         self._cancelled = True
         self._done = True
         aw = self._aw
@@ -2141,7 +2402,7 @@ class __vis_Task__:
         if not self._done:
             raise InvalidStateError("Result is not ready.")
         if self._cancelled:
-            raise CancelledError()
+            raise __vis_cancelled__(self._cancel_message)
         if self._exception is not None:
             raise __vis_clone_exception__(self._exception) from None
         return self._result
@@ -2150,7 +2411,7 @@ class __vis_Task__:
         if not self._done:
             raise InvalidStateError("Exception is not set.")
         if self._cancelled:
-            raise CancelledError()
+            raise __vis_cancelled__(self._cancel_message)
         return self._exception
 
     def get_name(self):
@@ -2168,9 +2429,10 @@ def __vis_dispose_awaitable__(aw):
     # deliberately no registry: ownership follows only explicit Task/Gather links.
     if aw is None:
         return
-    if isinstance(aw, __vis_Task__):
-        if not aw.done():
-            aw.cancel()
+    if isinstance(aw, HostTask):
+        return
+    if isinstance(aw, LocalTask):
+        aw.cancel()
         return
     if isinstance(aw, __vis_Call__):
         if not aw.ran:
@@ -2193,78 +2455,193 @@ def __vis_dispose_awaitable__(aw):
         pass
 
 
-class __vis_TaskGroup__:
-    __slots__ = ("_tasks", "_entered")
+class __vis_TaskMeta__(type):
+    def __instancecheck__(cls, value):
+        import asyncio as std_asyncio
 
-    def __init__(self):
-        self._tasks = []
-        self._entered = False
+        return isinstance(value, (HostTask, LocalTask, std_asyncio.Task))
 
-    async def __aenter__(self):
-        self._entered = True
-        return self
 
-    def create_task(self, coro, *, name=None, context=None):
-        if not self._entered:
-            raise RuntimeError("TaskGroup has not been entered")
-        task = __vis_Task__(coro, name)
-        self._tasks.append(task)
-        return task
-
-    async def __aexit__(self, typ, val, tb):
-        try:
-            if typ is not None:
-                for task in self._tasks:
-                    task.cancel()
-                return False
-            if self._tasks:
-                await gather(*self._tasks)
-            return False
-        finally:
-            self._tasks.clear()
-            self._entered = False
+class __vis_TaskType__(metaclass=__vis_TaskMeta__):
+    def __new__(cls, coro, *, loop=None, name=None, context=None):
+        return __vis_create_task__(coro, name=name, context=context)
 
 
 def __vis_create_task__(coro, *, name=None, context=None):
-    return coro if isinstance(coro, __vis_Task__) else __vis_Task__(coro, name)
+    import asyncio as std_asyncio
+
+    if isinstance(coro, (HostTask, LocalTask, std_asyncio.Future)):
+        return coro
+    return LocalTask(coro, name)
+
+
+class __vis_TaskGroup__:
+    async def __aenter__(self):
+        import asyncio as std_asyncio
+
+        self.group = std_asyncio.TaskGroup()
+        await self.group.__aenter__()
+        return self
+
+    def create_task(self, coro, *, name=None, context=None):
+        async def run_host():
+            try:
+                return await coro
+            except __vis_cancelled_type__():
+                if not coro.done():
+                    coro.cancel()
+                raise
+
+        task = __vis_create_task__(coro, name=name, context=context)
+        self.group.create_task(
+            run_host() if isinstance(task, HostTask) else __vis_drive_async__(task),
+            name=name, context=context,
+        )
+        return task
+
+    async def __aexit__(self, typ, val, tb):
+        return await self.group.__aexit__(typ, val, tb)
 
 
 async def __vis_wait_for__(aw, timeout):
-    # No hidden timer/event-loop thread. Zero/negative deadlines cancel before
-    # work starts; positive deadlines are checked cooperatively after each
-    # awaitable completes (blocking host tools remain governed by Vis turn/eval
-    # cancellation, which interrupts and cancels every gather child).
-    if timeout is not None:
-        # A blocking primitive takes the deadline INTO its own wait, so
-        # `wait_for(q.get(), 0.5)` really does give up after 0.5 s instead of
-        # discovering afterwards that the value never arrived.
-        bounded = getattr(aw, "__vis_bounded__", None)
-        if bounded is not None:
-            aw = bounded(float(timeout))
-    task = __vis_create_task__(aw)
-    if timeout is not None and float(timeout) <= 0:
-        task.cancel()
-        raise TimeoutError()
-    started = __vis_time__.monotonic()
-    result = await task
-    if timeout is not None and __vis_time__.monotonic() - started > float(timeout):
-        raise TimeoutError()
-    return result
+    import asyncio as std_asyncio
+
+    bounded = getattr(aw, "__vis_bounded__", None)
+    if timeout is not None and bounded is not None:
+        return await __vis_drive_async__(bounded(float(timeout)))
+    if not isinstance(aw, HostTask):
+        task = __vis_create_task__(aw)
+        if isinstance(task, LocalTask) and timeout is not None and timeout <= 0:
+            task.cancel()
+            raise TimeoutError()
+        return await std_asyncio.wait_for(__vis_drive_async__(task), timeout)
+    if aw.done():
+        return aw.result()
+    deadline = std_asyncio.timeout(timeout)
+    try:
+        async with deadline:
+            return await aw._wait(read=True)
+    except TimeoutError as timeout_error:
+        if not deadline.expired():
+            raise
+        aw.cancel()
+        try:
+            state = await aw._wait(read=False, observe=True)
+            return aw if state == "detached" else aw.result()
+        except __vis_cancelled_type__() as cancelled:
+            raise timeout_error from cancelled
 
 
 async def __vis_wait__(aws, *, timeout=None, return_when="ALL_COMPLETED"):
+    import asyncio as std_asyncio
+
+    if return_when not in ("FIRST_COMPLETED", "FIRST_EXCEPTION", "ALL_COMPLETED"):
+        raise ValueError("Invalid return_when value")
     tasks = {__vis_create_task__(aw) for aw in aws}
-    if timeout is not None and float(timeout) <= 0:
-        return set(), tasks
-    if tasks:
-        await gather(*tasks, return_exceptions=True)
-    return tasks, set()
+    if not tasks:
+        raise ValueError("Set of Tasks is empty.")
+    watchers = {
+        std_asyncio.create_task(t._wait(read=False, observe=True)): t
+        for t in tasks if isinstance(t, HostTask)
+    }
+    local = {
+        std_asyncio.create_task(__vis_drive_async__(t)): t
+        for t in tasks if isinstance(t, LocalTask)
+    }
+    watchers.update(local)
+    pending = (tasks - set(watchers.values())) | set(watchers)
+    completed = set()
+    deadline = None if timeout is None else __vis_time__.monotonic() + float(timeout)
+    try:
+        while pending:
+            left = None if deadline is None else max(0, deadline - __vis_time__.monotonic())
+            done, pending = await std_asyncio.wait(
+                pending, timeout=left, return_when=std_asyncio.FIRST_COMPLETED
+            )
+            if not done:
+                break
+            detached = failed = False
+            for slot in done:
+                if slot in watchers and slot not in local:
+                    state = slot.result()
+                    detached |= state == "detached"
+                    failed |= state == "failed"
+                    if state != "detached":
+                        completed.add(watchers[slot])
+                else:
+                    completed.add(local.get(slot, slot))
+                    if return_when == "FIRST_EXCEPTION" and not slot.cancelled():
+                        failed |= slot.exception() is not None
+            if detached or return_when == "FIRST_COMPLETED" or (failed and return_when == "FIRST_EXCEPTION"):
+                break
+        return completed, tasks - completed
+    finally:
+        for watcher in watchers:
+            if watcher not in local and not watcher.done():
+                watcher.cancel()
+        observers = set(watchers) - set(local)
+        if observers:
+            await std_asyncio.gather(*observers, return_exceptions=True)
+
+
+def __vis_shield__(aw):
+    import asyncio as std_asyncio
+
+    if not isinstance(aw, HostTask):
+        return std_asyncio.shield(__vis_drive_async__(__vis_create_task__(aw)))
+
+    class Shield(std_asyncio.Future):
+        def result(self):
+            state = super().result()
+            return aw if state == "detached" else aw.result()
+
+        def __await__(self):
+            yield from super().__await__()
+            return self.result()
+
+    outer = Shield()
+    observer = std_asyncio.create_task(aw._wait(read=False, observe=True))
+
+    def deliver(done):
+        if outer.done():
+            return
+        if done.cancelled():
+            outer.cancel()
+        elif done.exception() is not None:
+            outer.set_exception(done.exception())
+        else:
+            outer.set_result(done.result())
+
+    def release(done):
+        if done.cancelled():
+            observer.cancel()
+
+    observer.add_done_callback(deliver)
+    outer.add_done_callback(release)
+    return outer
+
+
+def __vis_all_tasks__(loop=None):
+    import asyncio as std_asyncio
+
+    result = {t for t in std_asyncio.all_tasks(loop) if t not in __vis_runners__}
+    if globals().get("__vis_task_registry__"):
+        result.update(__vis_task_handle__(row) for row in __vis_task_rpc__("_task_list"))
+    return result
 
 
 def __vis_to_thread__(func, /, *args, **kwargs):
     # The deferred call is dispatched by gather on the same bounded platform
     # executor as tools; it never creates a guest thread or a per-call executor.
-    return __vis_Call__(func, args, kwargs, getattr(func, "__name__", "to_thread"))
+    name = getattr(func, "__name__", "to_thread")
+    # Only a Task tool starts work that this call owns. A plain function can
+    # return an existing Task as a value, and must return it unchanged.
+    resolve_host_task = (
+        type(func) is type(__vis_to_thread__)
+        and getattr(func, "__vis_is_tool__", False)
+        and bool((globals().get("__vis_task_tools__") or {}).get(name))
+    )
+    return __vis_Call__(func, args, kwargs, name, resolve_host_task=resolve_host_task)
 
 
 class QueueEmpty(Exception):
@@ -2831,7 +3208,7 @@ class __vis_Future__:
         if not self._event.wait(timeout):
             raise TimeoutError()
         if self._cancelled:
-            raise CancelledError()
+            raise __vis_cancelled__()
         if self._exception is not None:
             raise __vis_clone_exception__(self._exception) from None
         return self._result
@@ -2850,7 +3227,7 @@ class __vis_Future__:
         if not self._event.wait(timeout):
             raise TimeoutError()
         if self._cancelled:
-            raise CancelledError()
+            raise __vis_cancelled__()
         return self._exception
 
     def __vis_bounded__(self, timeout):
@@ -2906,6 +3283,25 @@ class __vis_Slot__:
 
 
 def __vis_as_completed__(aws, *, timeout=None):
+    aws = tuple(aws)
+    if any(isinstance(aw, HostTask) for aw in aws):
+        import asyncio as std_asyncio
+
+        async def observe(aw):
+            if isinstance(aw, HostTask):
+                await aw._wait(read=False, observe=True)
+                return aw
+            return await __vis_drive_async__(aw)
+
+        async def read(slot):
+            result = await slot
+            if isinstance(result, HostTask) and result.done():
+                return result.result()
+            return result
+
+        for slot in std_asyncio.as_completed(map(observe, aws), timeout=timeout):
+            yield read(slot)
+        return
     # Real asyncio STREAMS completions; this cannot - the driver is one thread
     # and `gather` is where concurrency lives - so the whole batch is settled
     # CONCURRENTLY first and handed back in COMPLETION order, which is the part
@@ -2957,7 +3353,7 @@ def __vis_scope_cancel__(scope):
     # The deadline of `scope` ended a wait: cancel, as asyncio cancels the task.
     if scope._owner == __vis_thread__.get_ident():
         scope._fired = True
-    raise CancelledError()
+    raise __vis_cancelled__()
 
 
 class __vis_Timeout__:
@@ -3002,7 +3398,7 @@ class __vis_Timeout__:
             self._when is not None and __vis_time__.monotonic() >= self._when
         ):
             self._expired = True
-            if typ is None or issubclass(typ, CancelledError):
+            if typ is None or issubclass(typ, __vis_cancelled_type__()):
                 raise TimeoutError()
         return False
 
@@ -3032,6 +3428,10 @@ class __vis_Runner__:
 
 
 class __vis_AsyncioMeta__(type):
+    @property
+    def CancelledError(cls):
+        return __vis_cancelled_type__()
+
     # Every name real asyncio has that this runtime deliberately does NOT. The
     # answer stays an AttributeError - feature probes must keep getting False
     # from `hasattr` - but one that says WHY and what to reach for instead of
@@ -3377,6 +3777,8 @@ def __vis_publish_tool__(fn, nm):
 
 def __vis_deferred__(realfn, nm="tool"):
     def __vis_tool__(*a, **k):
+        if (globals().get("__vis_task_tools__") or {}).get(nm):
+            return __vis_start_host_task__(nm, a, k)
         c = __vis_Call__(realfn, a, k, nm)
         # An EAGER tool changes state, so it runs where it is called. Deferred, a call
         # that a holder only stored (`results.append(patch(p, edits, v))`) ran nothing,
@@ -3394,10 +3796,9 @@ class __vis_asyncio__(metaclass=__vis_AsyncioMeta__):
     # CPython's socket/select event loop: it owns no loop thread, timer thread,
     # task registry, or executor. Concurrent work is delegated only to the host's
     # bounded, self-reclaiming platform pool.
-    CancelledError = CancelledError
     InvalidStateError = InvalidStateError
     TimeoutError = TimeoutError
-    Task = __vis_Task__
+    Task = __vis_TaskType__
     TaskGroup = __vis_TaskGroup__
     ALL_COMPLETED = "ALL_COMPLETED"
     FIRST_COMPLETED = "FIRST_COMPLETED"
@@ -3464,19 +3865,23 @@ class __vis_asyncio__(metaclass=__vis_AsyncioMeta__):
 
     @staticmethod
     def isfuture(v):
-        return isinstance(v, __vis_Task__)
+        import asyncio as std_asyncio
+
+        return isinstance(v, (HostTask, __vis_Future__, std_asyncio.Future))
 
     @staticmethod
     def current_task(loop=None):
-        return None
+        import asyncio as std_asyncio
+
+        return std_asyncio.current_task(loop)
 
     @staticmethod
     def all_tasks(loop=None):
-        return set()
+        return __vis_all_tasks__(loop)
 
     @staticmethod
     def shield(aw):
-        return __vis_create_task__(aw)
+        return __vis_shield__(aw)
 
     @staticmethod
     def wait_for(aw, timeout):
@@ -6170,7 +6575,16 @@ def __vis_run_async__(src):
     exec(__vis_code__, g)
     __vis_kept__ = {n: g[n] for n in __vis_prot__ if n in g}
     try:
-        __vis_drive__(g["__vis_main__"]())
+        async def run_block():
+            if __vis_task_callbacks__:
+                import asyncio as std_asyncio
+
+                for task in tuple(__vis_task_callbacks__.values()):
+                    task.done()
+                await std_asyncio.sleep(0)
+            return await g["__vis_main__"]()
+
+        __vis_drive__(run_block())
     except BaseException as __vis_err__:
         # Keep the original failure, and the block it failed in, for the host's
         # separate position lookup.

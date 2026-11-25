@@ -4,6 +4,7 @@
    block kept, and a thread that writes after its block ended."
   (:require [clojure.string :as str]
             [clojure.test :refer [is testing use-fixtures]]
+            [com.blockether.vis-python-runtime :as runtime]
             [com.blockether.vis-python-runtime.harness :as harness :refer [block]]))
 
 (use-fixtures :each
@@ -35,6 +36,51 @@
              (block
                session
                "import sys\nprint('warned', file=sys.stderr)\nraise RuntimeError('after')"))))))
+
+(harness/defbuilt-test
+  concurrent-blocks-keep-their-own-output-test
+  (doseq [same-session? [true false]]
+    (let [first-wrote (promise)
+          second-wrote (promise)
+          first-finished (promise)
+          tools {"first_wrote" (fn [_]
+                                 (deliver first-wrote true)
+                                 (deref second-wrote 5000 false))
+                 "second_wrote" (fn [_]
+                                  (deliver second-wrote true)
+                                  (deref first-finished 5000 false))}
+          session (harness/tool-session tools)
+          other (if same-session? session (harness/tool-session tools))
+          first-result (future (try (block session
+                                           (str "import sys\nprint('first out')\n"
+                                                "assert await first_wrote()\n"
+                                                "print('first err', file=sys.stderr)"))
+                                    (finally (deliver first-finished true))))]
+      (is (true? (deref first-wrote 5000 false)))
+      (let [second-result (future (block other
+                                        (str "import sys\nprint('second err', file=sys.stderr)\n"
+                                             "assert await second_wrote()\n"
+                                             "print('second out')")))]
+        (is (= {:stdout "first out\nfirst err\n" :error nil}
+               (deref first-result 10000 ::hung)))
+        (is (= {:stdout "second err\nsecond out\n" :error nil}
+               (deref second-result 10000 ::hung)))))))
+
+(harness/defbuilt-test
+  a-value-call-does-not-write-into-a-running-block-test
+  (let [first-wrote (promise)
+        value-finished (promise)
+        session (harness/tool-session {"first_wrote" (fn [_]
+                                                       (deliver first-wrote true)
+                                                       (deref value-finished 5000 false))})
+        running (future (block session (str "print('before')\n"
+                                            "assert await first_wrote()\n"
+                                            "print('after')")))]
+    (is (true? (deref first-wrote 5000 false)))
+    (try (is (= "42" (runtime/run session
+                                  "import sys\nprint('outside')\nprint('outside', file=sys.stderr)\n42")))
+         (finally (deliver value-finished true)))
+    (is (= {:stdout "before\nafter\n" :error nil} (deref running 10000 ::hung)))))
 
 (harness/defbuilt-test
   terminal-session-keeps-process-stderr-test

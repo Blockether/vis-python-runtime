@@ -126,6 +126,7 @@
           "void*",
           "void*",
           "void*",
+          "void*",
           "jint"
         ]
       }

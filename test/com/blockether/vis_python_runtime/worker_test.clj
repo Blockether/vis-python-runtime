@@ -184,6 +184,109 @@
     (is (nil? (get reply "error")) (str op " failed: " (get reply "error")))
     (get reply "value")))
 
+(defn- read-message!
+  [worker]
+  (when-let [line (.readLine ^BufferedReader (:reader worker))]
+    (json/read-str line)))
+
+(defn- exercise-call-interrupt!
+  "Drive a targeted interrupt while a host request from the call is pending."
+  [worker session op kind code expected]
+  (let [run-id (swap! (:sequence worker) inc)
+        interrupt-id (swap! (:sequence worker) inc)
+        call (str "call-" run-id)
+        request
+        (future
+          (send! worker {"op" op "id" run-id "session" session
+                         "call" call "code" code})
+          (let [host (read-message! worker)]
+            (when-not (= "host" (get host "op"))
+              (throw (ex-info "expected the call's host request" {:received host})))
+            (send! worker (cond-> {"op" "interrupt" "id" interrupt-id
+                                   "session" session "call" call}
+                            kind (assoc "kind" kind)))
+            (let [interrupted (read-message! worker)]
+              (send! worker {"id" (get host "id") "error" "interrupted by host"})
+              (let [run (read-message! worker)
+                    next-id (swap! (:sequence worker) inc)]
+                (send! worker {"op" "run-block" "id" next-id "session" session
+                               "call" call "code" "print(ready())"})
+                (let [next-host (read-message! worker)]
+                  (when-not (= ["host" call] [(get next-host "op") (get next-host "call")])
+                    (throw (ex-info "expected the next block's host request"
+                                    {:received next-host :log (slurp (:log worker))})))
+                  (send! worker {"id" (get next-host "id") "value" "{\"value\":\"ok\"}"})
+                  [host interrupted run next-id (read-message! worker)])))))
+        result (deref request 10000 ::timeout)]
+    (when (= ::timeout result)
+      (.destroyForcibly ^Process (:process worker))
+      (throw (ex-info "call interrupt or next block did not settle"
+                      {:kind kind :log (slurp (:log worker))})))
+    (let [[host interrupted run next-id next-run] result]
+      (is (= call (get host "call")))
+      (is (= {"id" interrupt-id "value" true} interrupted))
+      (is (= run-id (get run "id")))
+       (is (= expected (if (= "run-block" op)
+                         (some-> (get run "value") json/read-str)
+                         (get run "error"))))
+      (is (= next-id (get next-run "id")))
+      (is (= {"stdout" "ok\n" "error" nil}
+             (some-> (get next-run "value") json/read-str))))))
+
+(defn- exercise-concurrent-output!
+  "Check that two calls keep their own output while they overlap."
+  [worker session]
+  (let [first-id (swap! (:sequence worker) inc)
+        second-id (swap! (:sequence worker) inc)
+        run-block (fn [id code]
+                    (send! worker {"op" "run-block" "id" id "session" session
+                                   "call" (str "output-" id) "code" code})
+                    (read-message! worker))
+        release (fn [host]
+                  (send! worker {"id" (get host "id") "value" "{\"value\":null}"})
+                  (read-message! worker))
+        request
+        (future
+          (let [first-host (run-block first-id
+                                      "import sys\nprint('first out')\nready()\nprint('first err', file=sys.stderr)")
+                second-host (run-block second-id
+                                       "import sys\nprint('second err', file=sys.stderr)\nready()\nprint('second out')")]
+            [(release first-host) (release second-host)]))
+        result (deref request 10000 ::timeout)]
+    (when (= ::timeout result)
+      (.destroyForcibly ^Process (:process worker))
+      (throw (ex-info "overlapping calls did not settle" {})))
+    (let [[first-run second-run] result]
+      (is (= first-id (get first-run "id")))
+      (is (= second-id (get second-run "id")))
+      (is (= {"stdout" "first out\nfirst err\n" "error" nil}
+             (some-> (get first-run "value") json/read-str)))
+      (is (= {"stdout" "second err\nsecond out\n" "error" nil}
+             (some-> (get second-run "value") json/read-str))))))
+
+(defn- exercise-pool-call!
+  "The native pool keeps the caller's identity even while callbacks overlap."
+  [worker session]
+  (let [id (swap! (:sequence worker) inc)
+        call (str "pool-" id)
+        request
+        (future
+          (send! worker {"op" "run" "id" id "session" session "call" call
+                         "code" "from _vis_host import par\npar([lambda: ready(1), lambda: ready(2)])"})
+          (let [asks [(read-message! worker) (read-message! worker)]]
+            (doseq [ask asks]
+              (send! worker {"id" (get ask "id") "value" "{\"value\":42}"}))
+            [asks (read-message! worker)]))
+        result (deref request 10000 ::timeout)]
+    (when (= ::timeout result)
+      (.destroyForcibly ^Process (:process worker))
+      (throw (ex-info "native pool callbacks did not settle" {:log (slurp (:log worker))})))
+    (let [[asks reply] result]
+      (is (= [["host" session call] ["host" session call]]
+             (mapv #(mapv % ["op" "session" "call"]) asks)))
+      (is (= id (get reply "id")))
+      (is (= [42 42] (some-> (get reply "value") json/read-str))))))
+
 (defn- exercise!
   "The whole drive, against whatever `argv` starts."
   [argv & [jailed?]]
@@ -255,6 +358,24 @@
                                        "env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))\n"
                                        "[child.returncode, child.stdout, child.stderr]"))))))
                (finally (value! worker "trust" "session" session "code" "0")))))
+      (testing "targeted interruption defaults to KeyboardInterrupt and accepts cancel"
+        (value! worker "install-sync-tool" "session" session "code" "ready")
+        (exercise-call-interrupt! worker session "run-block" nil
+                                  "try:\n    ready()\nfinally:\n    print('cleanup')"
+                                  {"stdout" "cleanup\n" "error" "KeyboardInterrupt"})
+        (exercise-call-interrupt! worker session "run-block" "cancel"
+                                  (str "from importlib import import_module\n"
+                                       "try:\n    ready()\n"
+                                       "except import_module('asyncio').CancelledError:\n"
+                                       "    print('caught cancellation')")
+                                  {"stdout" "caught cancellation\n" "error" nil})
+         (doseq [op ["exec" "eval"]]
+           (exercise-call-interrupt! worker session op nil "ready()"
+                                     "vis-python: KeyboardInterrupt")))
+      (testing "native pool callbacks carry their caller's exact id"
+        (exercise-pool-call! worker session))
+      (testing "overlapping calls cannot write to each other's output"
+        (exercise-concurrent-output! worker session))
       (testing "local async and host calls need no network capability"
         (value! worker "network" "session" session "code" "{\"enabled\":false}"))
       (testing "host source directories are installed before serving interpreter requests"
