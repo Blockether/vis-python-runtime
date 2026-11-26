@@ -64,6 +64,19 @@ public final class Bubblewrap {
 
   public static List<String> compile(JailPolicy policy) {
     JailPolicy.Resolved resolved = policy.resolve();
+    Set<String> writableDirs = new LinkedHashSet<>();
+    for (String path : resolved.readWrite()) {
+      if (JailPolicy.isDirectory(path)) {
+        writableDirs.add(path);
+      }
+    }
+    for (String path : resolved.unresolvedWrite()) {
+      Path missing = JailPolicy.missingPath(path, true);
+      if (missing == null || !inside(missing.toString(), writableDirs)) {
+        throw new VisPythonException("Process denied: Linux cannot grant write access to a missing path: " + path,
+            Map.of("reason", "missing-write-path", "platform", "linux", "path", path));
+      }
+    }
     List<String> args = new ArrayList<>(List.of("--die-with-parent", "--proc", "/proc", "--dev", "/dev"));
     // System roots at their literal spelling: on merged-usr distros /lib64 is a symlink and
     // the ELF interpreter path is hard-coded, so a canonicalised mount point breaks every exec.

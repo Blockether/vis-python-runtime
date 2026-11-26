@@ -137,6 +137,13 @@ public final class Seatbelt {
 
   public static String compile(JailPolicy policy) {
     JailPolicy.Resolved resolved = policy.resolve();
+    Set<String> writeLeaves = new LinkedHashSet<>();
+    for (String path : resolved.unresolvedWrite()) {
+      Path leaf = JailPolicy.missingPath(path, false);
+      if (leaf != null) {
+        writeLeaves.add(leaf.toString());
+      }
+    }
     List<String> readOnly = new ArrayList<>(resolved.readOnly());
     if (policy.keychain()) {
       readOnly.addAll(JailPolicy.realPaths(KEYCHAIN_READ_ROOTS));
@@ -146,6 +153,9 @@ public final class Seatbelt {
     metadata.add(System.getProperty("java.io.tmpdir"));
     for (String root : resolved.readWrite()) {
       ancestors(root, metadata);
+    }
+    for (String leaf : writeLeaves) {
+      ancestors(leaf, metadata);
     }
     for (String root : readOnly) {
       ancestors(root, metadata);
@@ -193,7 +203,8 @@ public final class Seatbelt {
     }
     out.append("(allow file-read* file-write*")
         .append("(literal \"/dev/null\")(literal \"/dev/tty\")(literal \"/dev/stdout\")")
-        .append("(literal \"/dev/stderr\")").append(subpaths(resolved.readWrite())).append(')');
+        .append("(literal \"/dev/stderr\")").append(subpaths(resolved.readWrite()))
+        .append(literals(writeLeaves)).append(')');
     if (!resolved.denyWrite().isEmpty()) {
       out.append("(deny file-write*").append(denyTargets(resolved.denyWrite())).append(')');
     }

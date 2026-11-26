@@ -5,7 +5,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [com.blockether.vis-python-runtime :as runtime])
-  (:import [com.blockether.vispython Bubblewrap JailPolicy JailPolicy$Egress Seatbelt]
+  (:import [com.blockether.vispython Bubblewrap JailPolicy JailPolicy$Egress Seatbelt VisPythonException]
            [java.net InetAddress ServerSocket]
            [java.nio.file Files Path]
            [java.nio.file.attribute FileAttribute]
@@ -286,6 +286,55 @@
                                 (partition 3 1 (compile {:read-only [(str install) (str link)]}))))
                   (finally (delete-tree install)))))
          (finally (delete-tree root)))))
+
+(deftest bubblewrap-missing-write-path-test
+  (let [root (temp-dir)
+        covered (str root "/new/audit.txt")
+        outside (str (io/file (System/getProperty "user.home") (str ".visjail-" (System/nanoTime))))]
+    (try (testing "a writable directory already covers a missing path below it"
+           (is (= (Bubblewrap/compile (runtime/jail-policy {:read-write [(str root)]}))
+                  (Bubblewrap/compile (runtime/jail-policy {:read-write [(str root) covered]})))))
+         (testing "an exact missing path outside the writable directories cannot be bound"
+           (let [failure (try (Bubblewrap/compile (runtime/jail-policy {:read-write [outside]}))
+                              nil
+                              (catch VisPythonException e e))]
+             (is (= [(str "Process denied: Linux cannot grant write access to a missing path: " outside)
+                     {"reason" "missing-write-path" "platform" "linux" "path" outside}]
+                    (when failure [(.getMessage failure) (into {} (.data failure))])))))
+         (finally (delete-tree root)))))
+
+(deftest seatbelt-missing-write-leaf-test
+  (when (macos?)
+    (let [root (Files/createTempDirectory
+                 (.toPath (io/file (System/getProperty "user.home")))
+                 ".visjail-"
+                 (make-array FileAttribute 0))
+          real (Files/createDirectory (.resolve root "real") (make-array FileAttribute 0))
+          denied (Files/createDirectory (.resolve real "denied") (make-array FileAttribute 0))
+          link (Files/createSymbolicLink (.resolve root "link") real (make-array FileAttribute 0))
+          dir-path (str (.resolve link "denied/audit.txt"))
+          file-path (str (.resolve link "secret.txt"))
+          allowed-path (str (.resolve link "audit.txt"))
+          regular-path (str (Files/createFile (.resolve real "existing.txt")
+                                            (make-array FileAttribute 0)))]
+      (try (let [result (run-process
+                          ["/bin/sh" "-c"
+                           (str "for f do if (printf OK > \"$f\"); then echo wrote; "
+                                "else echo refused; fi; done")
+                           "write-test" (str (.resolve link "existing.txt")) allowed-path
+                           (str (.resolve real "neighbor.txt")) dir-path file-path]
+                          (options root {:policy {:read-write [(str (.resolve link "existing.txt"))
+                                                              allowed-path dir-path file-path]
+                                                  :deny-write [(str denied) file-path]}}))]
+             (is (= ["wrote" "wrote" "refused" "refused" "refused"]
+                    (str/split-lines (:out result)))
+                 (pr-str result))
+             (is (= "OK" (slurp regular-path)))
+             (is (= "OK" (some->> (.resolve real "audit.txt") .toFile
+                                   (#(when (.exists %) (slurp %)))))))
+           (finally
+             (Files/deleteIfExists link)
+             (delete-tree root))))))
 
 (deftest native-bridge-does-not-interpret-policy-arguments-test
   (let [source (slurp "native/visjail/visjail.c")]

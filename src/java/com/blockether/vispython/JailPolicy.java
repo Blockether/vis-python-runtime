@@ -2,6 +2,7 @@ package com.blockether.vispython;
 
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -172,10 +173,39 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
     }
   }
 
-  /** A deny target fails safe: the real path when it resolves, else the expanded string. */
+  /** A missing name below a real directory. Never resolve through a dangling link. */
+  static Path missingPath(String path, boolean allowMissingParents) {
+    try {
+      Path leaf = Path.of(expandHome(path)).toAbsolutePath();
+      Path parent = leaf.getParent();
+      if (!missingName(leaf) || parent == null) {
+        return null;
+      }
+      if (allowMissingParents) {
+        while (parent.getParent() != null && missingName(parent)) {
+          parent = parent.getParent();
+        }
+      }
+      Path real = parent.toRealPath();
+      return Files.isDirectory(real) ? real.resolve(parent.relativize(leaf)) : null;
+    } catch (java.io.IOException | InvalidPathException | SecurityException e) {
+      return null;
+    }
+  }
+
+  private static boolean missingName(Path path) {
+    String name = path.getFileName().toString();
+    return !name.equals(".") && !name.equals("..") && Files.notExists(path, LinkOption.NOFOLLOW_LINKS);
+  }
+
+  /** A deny target keeps its expanded spelling when it cannot be canonicalized. */
   static String denyPath(String path) {
     String real = realPath(path);
-    return real == null ? expandHome(path) : real;
+    if (real != null) {
+      return real;
+    }
+    Path missing = isPattern(path) ? null : missingPath(path, true);
+    return missing == null ? expandHome(path) : missing.toString();
   }
 
   static List<String> realPaths(List<String> paths) {
@@ -215,18 +245,28 @@ public record JailPolicy(List<String> readWrite, List<String> readOnly, List<Str
     rw.addAll(tempDirs());
     List<String> granted = new ArrayList<>(rw);
     granted.addAll(readOnly);
-    Set<String> writable = new LinkedHashSet<>(realPaths(rw));
+    Set<String> writable = new LinkedHashSet<>();
+    List<String> unresolvedWrite = new ArrayList<>();
+    for (String path : readWrite) {
+      String real = realPath(path);
+      if (real == null) {
+        unresolvedWrite.add(path);
+      } else {
+        writable.add(real);
+      }
+    }
+    writable.addAll(realPaths(tempDirs()));
     writable.addAll(unixSocketDirs);
-    return new Resolved(List.copyOf(writable), realPaths(readOnly), denyPaths(denyRead),
-        denyPaths(denyWrite), denyPaths(denyExec), links(granted));
+    return new Resolved(List.copyOf(writable), List.copyOf(unresolvedWrite), realPaths(readOnly),
+        denyPaths(denyRead), denyPaths(denyWrite), denyPaths(denyExec), links(granted));
   }
 
   /**
-   * Real paths only; a deny target that does not exist keeps its expanded spelling.
-   * {@code links} maps each symbolic link on the way to a granted path to its target.
+   * Real grants and the write paths that need a platform-specific decision.
+   * {@code links} maps the links on the way to a grant to their targets.
    */
-  record Resolved(List<String> readWrite, List<String> readOnly, List<String> denyRead,
-      List<String> denyWrite, List<String> denyExec, Map<String, String> links) {}
+  record Resolved(List<String> readWrite, List<String> unresolvedWrite, List<String> readOnly,
+      List<String> denyRead, List<String> denyWrite, List<String> denyExec, Map<String, String> links) {}
 
   /** More links than this on one path is a loop; the kernel gives up near the same depth. */
   private static final int MAX_LINKS = 40;
