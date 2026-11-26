@@ -2163,7 +2163,7 @@ class HostTask:
         token = next(__vis_wait_serial__)
         try:
             while True:
-                outcome = self._request(token=token, read=read)
+                outcome = self._request(token=token, read=read, observation=observe)
                 state = outcome["state"]
                 if state == "detached":
                     return "detached" if observe else self
@@ -2183,6 +2183,8 @@ class HostTask:
             if options.get("read"):
                 if "value" in outcome:
                     outcome["value"] = self._decode(outcome["value"])
+                if "snapshot" in outcome:
+                    outcome["snapshot"] = self._decode(outcome["snapshot"])
                 self._outcome = outcome
                 __vis_task_rpc__("_task_ack", self._id)
             self._notify()
@@ -2325,24 +2327,12 @@ class SubagentTask(HostTask):
             raise LookupError("This subagent Task no longer belongs to the session")
         return __vis_record__("SubagentRecord", fields)
 
-    def wait(self, seconds):
-        """Wait up to seconds and return a snapshot, without cancelling the Task."""
-        import math
-
-        seconds = float(seconds)
-        if not math.isfinite(seconds) or seconds < 0:
-            raise ValueError("seconds must be finite and nonnegative")
-        deadline = __vis_time__.monotonic() + seconds
-        token = next(__vis_wait_serial__)
-        try:
-            while True:
-                remaining = max(0, int((deadline - __vis_time__.monotonic()) * 1000))
-                outcome = self._request(token=token, timeout_ms=min(250, remaining), observation=True)
-                if outcome["state"] != "running" or not remaining:
-                    break
-        finally:
-            __vis_task_rpc__("_task_await", self._id, {"token": token, "leave": True})
-        return self.record()
+    def __getattr__(self, name):
+        if name == "wait":
+            raise AttributeError(
+                "Use await asyncio.wait([task], timeout=seconds), then task.record()."
+            )
+        return super().__getattr__(name)
 
 
 class ShellTask(HostTask):
@@ -2362,7 +2352,7 @@ class ShellTask(HostTask):
         return self._snapshot
 
     def _shell_op(self, name, args):
-        value = __vis_task_rpc__(name, {**args, "id": self.id, "token": self._generation})
+        value = __vis_task_rpc__(name, {**args, "id": self._snapshot["id"], "token": self._generation})
         return __vis_typed_value__(value)
 
     @property
@@ -2371,75 +2361,40 @@ class ShellTask(HostTask):
 
     @property
     def id(self):
-        return self._snapshot["id"]
+        return self._read_snapshot()["id"]
 
     @property
     def logs(self):
         return self._snapshot.logs
 
     def type(self, text, is_enter=True):
-        result = __vis_settle__(self._shell_op("_shell_type", {
+        __vis_settle__(self._shell_op("_shell_type", {
             "text": str(text), "is_enter": bool(is_enter),
         }))
-        self._set_snapshot(result)
         return self
+
+    def _read_snapshot(self):
+        if self._outcome is not None:
+            return self._snapshot
+        value = self._shell_op("__vis_shell_snapshot__", {"task_id": self._id})
+        if value.get("status") == "running" and self._snapshot.get("already_running"):
+            value = {**value, "already_running": True}
+        return __VisShell__({"op": "shell", **value})
 
     def __getattr__(self, name):
-        if not name.startswith("_") and name in self._snapshot:
-            return self._snapshot[name]
-        return super().__getattr__(name)
+        if name == "wait":
+            raise AttributeError(
+                "Use await asyncio.wait([task], timeout=seconds), then read the fields on task."
+            )
+        if name.startswith("_"):
+            return super().__getattr__(name)
+        return getattr(self._read_snapshot(), name)
 
     def __getitem__(self, key):
-        return self._snapshot[key]
+        return self._read_snapshot()[key]
 
     def get(self, key, default=None):
-        return self._snapshot.get(key, default)
-
-    def wait(self, seconds=None, **aliases):
-        """Wait up to seconds and refresh this handle without cancelling it."""
-        import time
-
-        for key in ("secs", "timeout"):
-            if key in aliases:
-                seconds = aliases.pop(key)
-        if aliases:
-            raise TypeError("wait: unknown keyword " + repr(sorted(aliases)[0]))
-        options = {"seconds": seconds}
-        budget = __vis_settle__(self._shell_op("__vis_shell_snapshot__", {**options, "budget": True, "sample_cpu": True}))
-        if isinstance(budget, dict):
-            limit = budget["seconds"]
-            options["cpu_start_ms"] = budget["cpu_ms"]
-        else:
-            limit = budget
-        started = time.monotonic()
-        deadline = started + limit
-        token = next(__vis_wait_serial__)
-        reader = None
-        waiting_for_input = False
-        state = "running"
-        try:
-            while True:
-                remaining = max(0, int((deadline - time.monotonic()) * 1000))
-                outcome = self._request(token=token, timeout_ms=min(250, remaining), observation=True)
-                state = outcome["state"]
-                if state != "running" or not remaining or time.monotonic() >= deadline:
-                    break
-                seen = __vis_settle__(self._shell_op("__vis_shell_snapshot__", {"probe": True}))
-                if seen is not None and reader == seen:
-                    waiting_for_input = True
-                    break
-                reader = seen
-        finally:
-            __vis_task_rpc__("_task_await", self._id, {"token": token, "leave": True})
-        snapshot = outcome.get("value")
-        if snapshot is not None:
-            snapshot = {**snapshot, "stage": "wait", "timeout_secs": limit}
-        else:
-            snapshot = self._shell_op("__vis_shell_snapshot__", {**options, "elapsed_ms": int((time.monotonic() - started) * 1000)})
-        self._set_snapshot({**snapshot, "waiting_for_input": waiting_for_input,
-                            "timed_out": state == "running" and not waiting_for_input,
-                            "duration_ms": int((time.monotonic() - started) * 1000)})
-        return self
+        return self._read_snapshot().get(key, default)
 
 
 __vis_host_task_types__ = {}
