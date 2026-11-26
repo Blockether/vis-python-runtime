@@ -1292,9 +1292,9 @@ def __vis_as_result__(__vis_v__, __vis_paging__=None):
         children = __vis_v__.get("__vis_subagent_tasks__")
         if isinstance(children, list):
             return [__vis_task_handle__(row) for row in children]
-        process = __vis_v__.get("__vis_shell_task__")
-        if isinstance(process, dict):
-            return __vis_task_handle__(process)
+        task = __vis_v__.get("__vis_host_task__", __vis_v__.get("__vis_shell_task__"))
+        if isinstance(task, dict):
+            return __vis_task_handle__(task)
         return __vis_typed_result__(__vis_v__)
     if isinstance(__vis_v__, (__VisResultList__, __VisResultStr__)):
         return __vis_v__
@@ -1892,13 +1892,20 @@ def __vis_drive__(coro):
     # A synchronous auto-settle or the sandbox's asyncio.run can be nested inside
     # the synthetic block coroutine. Its work owns a separate, short-lived loop;
     # restore the suspended caller's loop even on cancellation or failure.
+    class BlockRunner(std_asyncio.Runner):
+        def close(self):
+            # Runner cancels pending Python awaits to close the loop. That is
+            # block cleanup, not a request to cancel the host work they awaited.
+            self.get_loop()._vis_closing = True
+            super().close()
+
     previous = std_asyncio.events._get_running_loop()
     previous_task = std_asyncio.current_task(previous) if previous is not None else None
     if previous_task is not None:
         std_asyncio.tasks._leave_task(previous, previous_task)
     try:
         std_asyncio.events._set_running_loop(None)
-        with std_asyncio.Runner(loop_factory=__vis_loop_factory__) as runner:
+        with BlockRunner(loop_factory=__vis_loop_factory__) as runner:
             return runner.run(__vis_run_block_coro__(coro))
     finally:
         std_asyncio.events._set_running_loop(previous)
@@ -2134,12 +2141,67 @@ __vis_task_callbacks__ = {}
 __vis_wait_serial__ = __import__("itertools").count(1)
 
 
+class _HostWaits:
+    """Read the host registry once per loop tick, independent of waiter count."""
+
+    def __init__(self, loop):
+        self._loop = loop
+        self._active = {}
+        self._leaves = []
+        self._scheduled = False
+
+    def _schedule(self, *, delay=False):
+        if not self._scheduled:
+            self._scheduled = True
+            if delay:
+                self._loop.call_later(0.02, self._poll)
+            else:
+                self._loop.call_soon(self._poll)
+
+    def enter(self, task, observe):
+        token = next(__vis_wait_serial__)
+        waiter = self._loop.create_future()
+        self._active[token] = (task, waiter, {"token": token, "observation": observe})
+        self._schedule()
+        return token, waiter
+
+    def leave(self, task, token):
+        self._active.pop(token, None)
+        self._leaves.append((task._id, {"token": token, "leave": True}))
+        self._schedule()
+
+    def _poll(self):
+        self._scheduled = False
+        active = [(token, task, waiter, options) for token, (task, waiter, options)
+                  in self._active.items() if not waiter.done()]
+        leaves, self._leaves = self._leaves, []
+        requests = [(task._id, options) for _, task, _, options in active] + leaves
+        if not requests:
+            return
+        try:
+            outcomes = __vis_task_rpc__("_task_await_batch", requests)
+            for (token, task, waiter, _), outcome in zip(active, outcomes[:len(active)], strict=True):
+                observed = task._observe(outcome, read=False)
+                if observed["state"] != "running":
+                    self._active.pop(token, None)
+                    waiter.set_result(observed["state"])
+        except Exception as error:
+            for token, _, waiter, _ in active:
+                self._active.pop(token, None)
+                if not waiter.done():
+                    waiter.set_exception(error)
+        if self._active or self._leaves:
+            self._schedule(delay=True)
+
+
 class HostTask:
     __slots__ = ()
 
     def __init__(self, ident, name):
         self._id = ident
         self._host_name = name
+        self._view_watch = False
+        self._cancel_on_await = False
         self._outcome = None
         self._host_callbacks = []
         self._fired = False
@@ -2153,34 +2215,51 @@ class HostTask:
         raise AttributeError(self._host_name + " is a Task: await it for the tool result")
 
     def __await__(self):
-        return self._wait(read=True).__await__()
+        return self._await_owned().__await__()
+
+    async def _await_owned(self):
+        try:
+            return await self._wait(read=True)
+        except __vis_cancelled_type__():
+            import asyncio as std_asyncio
+
+            loop = std_asyncio.get_running_loop()
+            if (self._cancel_on_await and self._outcome is None
+                    and not getattr(loop, "_vis_closing", False)):
+                self.cancel()
+            raise
 
     async def _wait(self, *, read, observe=False):
         import asyncio as std_asyncio
 
         if self._outcome is not None:
             return self._value() if read else self._outcome["state"]
-        token = next(__vis_wait_serial__)
+        loop = std_asyncio.get_running_loop()
+        waits = getattr(loop, "_vis_host_waits", None)
+        if waits is None:
+            waits = loop._vis_host_waits = _HostWaits(loop)
+        token, watcher = waits.enter(self, observe)
         try:
-            while True:
-                outcome = self._request(token=token, read=read, observation=observe)
-                state = outcome["state"]
-                if state == "detached":
-                    return "detached" if observe else self
-                if state != "running":
-                    return self._value() if read else state
-                await std_asyncio.sleep(0.02)
+            state = await watcher
+            if not observe and state == "detached":
+                return self
+            return self.result() if read else state
         finally:
-            __vis_task_rpc__("_task_await", self._id, {"token": token, "leave": True})
+            waits.leave(self, token)
 
     def _request(self, **options):
-        outcome = __vis_task_rpc__("_task_await", self._id, options)
+        return self._observe(__vis_task_rpc__("_task_await", self._id, options), read=options.get("read"))
+
+    def _observe(self, outcome, *, read):
         if self._outcome is not None:
             return self._outcome
         if outcome["state"] not in ("running", "detached"):
-            if outcome["state"] == "missing":
-                outcome = {"state": "cancelled"}
-            if options.get("read"):
+            # The view must apply close state even when its caller only waits.
+            if self._view_watch and not read:
+                return self._request(read=True)
+            if self._view_watch and "value" not in outcome:
+                __vis_view_ready__(self._id, None)
+            if read:
                 if "value" in outcome:
                     outcome["value"] = self._decode(outcome["value"])
                 if "snapshot" in outcome:
@@ -2191,6 +2270,8 @@ class HostTask:
         return outcome
 
     def _decode(self, value):
+        if self._view_watch:
+            return __vis_view_ready__(self._id, value)
         if isinstance(value, dict) and isinstance(value.get("__vis_shell_task__"), dict):
             return __vis_task_handle__(value["__vis_shell_task__"])
         return __vis_typed_value__(value)
@@ -2223,6 +2304,8 @@ class HostTask:
             raise __vis_cancelled__(outcome.get("message"))
         if outcome["state"] == "failed":
             return VisToolError(outcome["error"], outcome.get("error_data"))
+        if outcome["state"] == "missing":
+            return LookupError("This Task no longer belongs to the session")
         return None
 
     def done(self):
@@ -2231,7 +2314,7 @@ class HostTask:
     def cancelled(self):
         if self._outcome is not None:
             return self._outcome["state"] == "cancelled"
-        return self._request()["state"] in ("cancelled", "missing")
+        return self._request()["state"] == "cancelled"
 
     def result(self):
         if self._outcome is None and self._request(read=True)["state"] == "running":
@@ -2296,6 +2379,59 @@ class HostTask:
 
     def print_stack(self, *, limit=None, file=None):
         pass
+
+
+def __vis_host_exception_state__(state):
+    return state in ("failed", "missing")
+
+
+def __vis_install_concurrent_wait__():
+    import concurrent.futures as futures
+
+    original = futures.wait
+    if getattr(original, "__vis_host_tasks__", False):
+        return
+
+    def wait(fs, timeout=None, return_when=futures.ALL_COMPLETED):
+        from concurrent.futures._base import DoneAndNotDoneFutures
+
+        pending = set(fs)
+        if not any(isinstance(task, HostTask) for task in pending):
+            return original(pending, timeout, return_when)
+        if return_when not in (futures.ALL_COMPLETED, futures.FIRST_COMPLETED, futures.FIRST_EXCEPTION):
+            raise ValueError("Invalid return_when value")
+        deadline = None if timeout is None else __vis_time__.monotonic() + timeout
+        done = set()
+        while pending:
+            host = [task for task in pending if isinstance(task, HostTask)]
+            local = pending - set(host)
+            requests = [(task._id, {"observation": True}) for task in host if task._outcome is None]
+            outcomes = iter(__vis_task_rpc__("_task_await_batch", requests) if requests else ())
+            failed = False
+            for task in host:
+                outcome = task._outcome
+                if outcome is None:
+                    outcome = task._observe(next(outcomes), read=False)
+                if outcome["state"] != "running":
+                    done.add(task)
+                    failed |= __vis_host_exception_state__(outcome["state"])
+            local_done = original(local, timeout=0).done
+            done.update(local_done)
+            pending.difference_update(done)
+            if not pending or (done and return_when == futures.FIRST_COMPLETED):
+                break
+            if return_when == futures.FIRST_EXCEPTION and (
+                failed or any(not task.cancelled() and task.exception() is not None for task in local_done)
+            ):
+                break
+            delay = 0.02 if deadline is None else min(0.02, deadline - __vis_time__.monotonic())
+            if delay <= 0:
+                break
+            __vis_time__.sleep(delay)
+        return DoneAndNotDoneFutures(done, pending)
+
+    wait.__vis_host_tasks__ = True
+    futures.wait = wait
 
 
 class SubagentTask(HostTask):
@@ -2412,6 +2548,10 @@ def __vis_task_handle__(row):
             cls = type(base.__name__, (base, std_asyncio.Task), {})
             __vis_host_task_types__[base] = cls
         task = cls(ident, row["name"]) if base is HostTask else cls(row)
+        task._cancel_on_await = row.get("cancel_on_await", True)
+        if isinstance(task, ShellTask) and row["snapshot"].get("already_running"):
+            task._cancel_on_await = False
+        task._view_watch = row.get("readiness") == "view"
         __vis_host_tasks__[ident] = task
     elif isinstance(task, ShellTask) and "token" in row and not task.done():
         task._set_snapshot(row["snapshot"])
@@ -2585,17 +2725,9 @@ class __vis_TaskGroup__:
         return self
 
     def create_task(self, coro, *, name=None, context=None):
-        async def run_host():
-            try:
-                return await coro
-            except __vis_cancelled_type__():
-                if not coro.done():
-                    coro.cancel()
-                raise
-
         task = __vis_create_task__(coro, name=name, context=context)
         self.group.create_task(
-            run_host() if isinstance(task, HostTask) else __vis_drive_async__(task),
+            task._await_owned() if isinstance(task, HostTask) else __vis_drive_async__(task),
             name=name, context=context,
         )
         return task
@@ -2618,17 +2750,18 @@ async def __vis_wait_for__(aw, timeout):
         return await std_asyncio.wait_for(__vis_drive_async__(task), timeout)
     if aw.done():
         return aw.result()
+    if timeout is not None and timeout <= 0 and not aw._cancel_on_await:
+        raise TimeoutError()
     deadline = std_asyncio.timeout(timeout)
     try:
         async with deadline:
-            return await aw._wait(read=True)
+            return await aw._wait(read=True, observe=True)
     except TimeoutError as timeout_error:
-        if not deadline.expired():
+        if not deadline.expired() or not aw._cancel_on_await:
             raise
         aw.cancel()
         try:
-            state = await aw._wait(read=False, observe=True)
-            return aw if state == "detached" else aw.result()
+            return await aw._wait(read=True, observe=True)
         except __vis_cancelled_type__() as cancelled:
             raise timeout_error from cancelled
 
@@ -2661,19 +2794,16 @@ async def __vis_wait__(aws, *, timeout=None, return_when="ALL_COMPLETED"):
             )
             if not done:
                 break
-            detached = failed = False
+            failed = False
             for slot in done:
                 if slot in watchers and slot not in local:
-                    state = slot.result()
-                    detached |= state == "detached"
-                    failed |= state == "failed"
-                    if state != "detached":
-                        completed.add(watchers[slot])
+                    failed |= __vis_host_exception_state__(slot.result())
+                    completed.add(watchers[slot])
                 else:
                     completed.add(local.get(slot, slot))
                     if return_when == "FIRST_EXCEPTION" and not slot.cancelled():
                         failed |= slot.exception() is not None
-            if detached or return_when == "FIRST_COMPLETED" or (failed and return_when == "FIRST_EXCEPTION"):
+            if return_when == "FIRST_COMPLETED" or (failed and return_when == "FIRST_EXCEPTION"):
                 break
         return completed, tasks - completed
     finally:
@@ -2693,8 +2823,8 @@ def __vis_shield__(aw):
 
     class Shield(std_asyncio.Future):
         def result(self):
-            state = super().result()
-            return aw if state == "detached" else aw.result()
+            super().result()
+            return aw.result()
 
         def __await__(self):
             yield from super().__await__()
@@ -3880,6 +4010,9 @@ def __vis_deferred__(realfn, nm="tool"):
     def __vis_tool__(*a, **k):
         if (globals().get("__vis_task_tools__") or {}).get(nm):
             return __vis_start_host_task__(nm, a, k)
+        if nm == "council.changed":
+            # Registration already returns the host Task. Do not defer it or start another Task.
+            return __vis_as_result__(realfn(*a, **k))
         if nm == "council.run":
             from vis_runtime import _council_task_refs
 
@@ -6682,6 +6815,7 @@ def __vis_run_async__(src):
     __vis_kept__ = {n: g[n] for n in __vis_prot__ if n in g}
     try:
         async def run_block():
+            __vis_install_concurrent_wait__()
             if __vis_task_callbacks__:
                 import asyncio as std_asyncio
 

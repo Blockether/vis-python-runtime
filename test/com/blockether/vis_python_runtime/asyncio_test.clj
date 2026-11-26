@@ -318,6 +318,93 @@ async def main():
 
 print(asyncio.run(main()))")
 
+(harness/defbuilt-test
+  host-waits-share-a-bridge-poll-test
+  (let [answer (block (tools)
+                      "import asyncio
+from collections import Counter
+
+async def measure(count):
+    calls = Counter()
+    def bridge(op, *args, **kwargs):
+        calls[op] += 1
+        if op == '_task_await_batch':
+            return [{'state': 'running'} for _ in args[0]]
+        return {'state': 'running'}
+    globals()['__vis_task_rpc__'] = bridge
+    tasks = [__vis_task_handle__({'id': str(i), 'name': str(i)}) for i in range(count)]
+    done, pending = await asyncio.wait(tasks, timeout=.205)
+    assert not done and pending == set(tasks)
+    assert not calls['_task_cancel']
+    return sum(calls.values())
+
+counts = [await measure(n) for n in (1, 8, 32)]
+assert max(counts) <= 16 and max(counts) - min(counts) <= 3, counts
+print('bounded')")]
+    (is (nil? (:error answer)) (pr-str answer))
+    (is (= "bounded" (out answer)))))
+
+(harness/defbuilt-test
+  cancel-direct-await-requests-owned-task-interrupt-test
+  (let [answer (block (tools)
+                      "import asyncio
+calls = []
+def bridge(op, *args):
+    calls.append(op)
+    if op == '_task_await_batch':
+        return [{'state': 'running'} for _ in args[0]]
+    return {'state': 'running'}
+globals()['__vis_task_rpc__'] = bridge
+standard = __import__('importlib').import_module('asyncio')
+async def observe(task, entered):
+    entered.set()
+    await task
+for owned in (False, True):
+    task = __vis_task_handle__({'id': str(owned), 'name': 'attempt', 'cancel_on_await': owned})
+    entered = standard.Event()
+    local = standard.create_task(observe(task, entered))
+    await entered.wait()
+    local.cancel()
+    try:
+        await local
+    except asyncio.CancelledError:
+        pass
+    assert calls.count('_task_cancel') == int(owned), calls
+print('interrupted')")]
+    (is (nil? (:error answer)) (pr-str answer))
+    (is (= "interrupted" (out answer)))))
+
+(harness/defbuilt-test
+  host-observers-use-the-same-exception-and-ownership-rules-test
+  (let [answer (block (tools)
+                      "import asyncio
+calls = []
+def bridge(op, *args):
+    calls.append(op)
+    def state(ident):
+        return {'state': 'missing' if ident == 'missing' else 'running'}
+    if op == '_task_await_batch':
+        return [state(ident) for ident, _ in args[0]]
+    if op == '_task_cancel':
+        raise AssertionError('cancelled an attached Task')
+    return state(args[0])
+globals()['__vis_task_rpc__'] = bridge
+expired = __vis_task_handle__({'id': 'missing', 'name': 'expired'})
+attached = __vis_task_handle__({'id': 'attached', 'name': 'attached shell', 'kind': 'shell',
+                               'snapshot': {'already_running': True}})
+async with asyncio.timeout(.2):
+    assert await asyncio.wait([expired, attached], return_when=asyncio.FIRST_EXCEPTION) == ({expired}, {attached})
+try:
+    await asyncio.wait_for(attached, .02)
+except TimeoutError:
+    assert not attached.done()
+else:
+    raise AssertionError('the wait did not time out')
+assert '_task_cancel' not in calls
+print('ok')")]
+    (is (nil? (:error answer)) (pr-str answer))
+    (is (= "ok" (out answer)))))
+
 (def ^:private release-src
   "import asyncio
 
