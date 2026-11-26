@@ -2588,14 +2588,27 @@ def __vis_dispose_awaitable__(aw):
         pass
 
 
-class __vis_TaskMeta__(type):
+class __vis_FutureMeta__(type):
+    def __instancecheck__(cls, value):
+        import asyncio as std_asyncio
+
+        return isinstance(value, (__vis_Future__, HostTask, LocalTask, std_asyncio.Future))
+
+
+class __vis_FutureType__(metaclass=__vis_FutureMeta__):
+    # The public type accepts Tasks. Only the private Future is a placeholder.
+    def __new__(cls, *, loop=None):
+        return __vis_Future__(loop=loop)
+
+
+class __vis_TaskMeta__(__vis_FutureMeta__):
     def __instancecheck__(cls, value):
         import asyncio as std_asyncio
 
         return isinstance(value, (HostTask, LocalTask, std_asyncio.Task))
 
 
-class __vis_TaskType__(metaclass=__vis_TaskMeta__):
+class __vis_TaskType__(__vis_FutureType__, metaclass=__vis_TaskMeta__):
     def __new__(cls, coro, *, loop=None, name=None, context=None):
         return __vis_create_task__(coro, name=name, context=context)
 
@@ -3943,7 +3956,7 @@ class __vis_asyncio__(metaclass=__vis_AsyncioMeta__):
     ALL_COMPLETED = "ALL_COMPLETED"
     FIRST_COMPLETED = "FIRST_COMPLETED"
     FIRST_EXCEPTION = "FIRST_EXCEPTION"
-    Future = __vis_Future__
+    Future = __vis_FutureType__
     Lock = __vis_Lock__
     Event = __vis_Event__
     Condition = __vis_Condition__
@@ -4005,9 +4018,7 @@ class __vis_asyncio__(metaclass=__vis_AsyncioMeta__):
 
     @staticmethod
     def isfuture(v):
-        import asyncio as std_asyncio
-
-        return isinstance(v, (HostTask, __vis_Future__, std_asyncio.Future))
+        return isinstance(v, __vis_FutureType__)
 
     @staticmethod
     def current_task(loop=None):

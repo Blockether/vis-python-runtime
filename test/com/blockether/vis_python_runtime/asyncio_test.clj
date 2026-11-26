@@ -119,6 +119,31 @@ print(await gather(combined(), echo('host')))")]
       (is (= "['<library>', '<host>']" (out answer))))))
 
 (harness/defbuilt-test
+  task-future-type-test
+  (let [session (harness/block-session)]
+    (runtime/exec! session "host_task = __vis_task_handle__({'id': 'test', 'name': 'tool'})")
+    (let
+      [answer
+       (block
+         session
+         "import asyncio
+
+async def work():
+    return 42
+
+async def check():
+    local_task = asyncio.create_task(work())
+    print(isinstance(host_task, asyncio.Task), issubclass(asyncio.Task, asyncio.Future))
+    for value in (host_task, local_task, asyncio.Future(), asyncio.current_task(), 42):
+        print(isinstance(value, asyncio.Future), asyncio.isfuture(value))
+    print(await local_task)
+
+await check()")]
+      (is (nil? (:error answer)) (pr-str answer))
+      (is (= ["True True" "True True" "True True" "True True" "True True" "False False" "42"]
+             (str/split-lines (out answer)))))))
+
+(harness/defbuilt-test
   library-awaitable-cleanup-test
   (is
     (=
