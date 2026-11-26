@@ -303,6 +303,17 @@
                     (when failure [(.getMessage failure) (into {} (.data failure))])))))
          (finally (delete-tree root)))))
 
+(deftest seatbelt-missing-write-parent-test
+  (let [root (temp-dir)
+        path (str (.resolve root "reports/audit.txt"))]
+    (try (let [failure (try (Seatbelt/compile (runtime/jail-policy {:read-write [path]}))
+                            nil
+                            (catch VisPythonException e e))]
+           (is (= [(str "Process denied: cannot grant write access to a missing path: " path)
+                   {"reason" "missing-write-path" "platform" "macos" "path" path}]
+                  (when failure [(.getMessage failure) (into {} (.data failure))]))))
+         (finally (delete-tree root)))))
+
 (deftest seatbelt-missing-write-leaf-test
   (when (macos?)
     (let [root (Files/createTempDirectory

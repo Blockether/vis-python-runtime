@@ -4,6 +4,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -140,9 +141,11 @@ public final class Seatbelt {
     Set<String> writeLeaves = new LinkedHashSet<>();
     for (String path : resolved.unresolvedWrite()) {
       Path leaf = JailPolicy.missingPath(path, false);
-      if (leaf != null) {
-        writeLeaves.add(leaf.toString());
+      if (leaf == null) {
+        throw new VisPythonException("Process denied: cannot grant write access to a missing path: " + path,
+            Map.of("reason", "missing-write-path", "platform", "macos", "path", path));
       }
+      writeLeaves.add(leaf.toString());
     }
     List<String> readOnly = new ArrayList<>(resolved.readOnly());
     if (policy.keychain()) {
