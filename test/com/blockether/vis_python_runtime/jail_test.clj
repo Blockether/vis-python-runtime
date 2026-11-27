@@ -1068,6 +1068,39 @@
                            (.close (.getErrorStream process))))))
          (finally (delete-tree root)))))
 
+(defn- open-descriptors [] (count (.list (io/file "/dev/fd"))))
+
+(defn- settled-descriptors
+  "The descriptor count when it is at most `limit`, or its last value after two seconds."
+  [limit]
+  (loop [attempt 0]
+    (let [now (open-descriptors)]
+      (if (or (<= now limit) (= attempt 200)) now (do (Thread/sleep 10) (recur (inc attempt)))))))
+
+(deftest exited-process-releases-its-descriptors-test
+  ;; Vis: a worker's owner read the output to its end and closed no stream, as it does
+  ;; for a `java.lang.Process`. Each exited child kept two descriptors, and a gateway
+  ;; that had started 7117 workers had none left.
+  (let [root
+        (temp-dir)
+
+        run
+        (fn []
+          (let [^Process process
+                (runtime/spawn-process! ["/bin/sh" "-c" "echo done"]
+                                        (options root {:policy nil :merge-stderr? true}))]
+
+            (io/copy (.getInputStream process) (java.io.ByteArrayOutputStream.))
+            (is (.waitFor process 5 TimeUnit/SECONDS))))]
+
+    (try (run)
+         (let [before (settled-descriptors 0)]
+           (dotimes [_ 20]
+             (run))
+           (is (<= (settled-descriptors before) before)
+               "An exited process whose output was read to its end holds no descriptor."))
+         (finally (delete-tree root)))))
+
 (deftest pty-round-trip-test
   (let [root (temp-dir)]
     (try (let [^Process p (runtime/spawn-process!

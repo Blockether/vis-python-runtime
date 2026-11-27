@@ -64,6 +64,10 @@ public final class JailedProcess extends Process {
       }
     } catch (Throwable throwable) {
       exit.completeExceptionally(throwable);
+    } finally {
+      // Like java.lang.Process: an owner that closes no stream keeps no descriptor of an
+      // exited child. The output streams close themselves at their end.
+      stdin.close();
     }
   }
 
@@ -150,6 +154,7 @@ public final class JailedProcess extends Process {
   private static final class NativeInputStream extends InputStream {
     private final int fd;
     private final AtomicBoolean open = new AtomicBoolean(true);
+    private volatile boolean ended;
     NativeInputStream(int fd) { this.fd = fd; }
     @Override public int read() throws IOException {
       byte[] one = new byte[1];
@@ -157,12 +162,18 @@ public final class JailedProcess extends Process {
       return count < 0 ? -1 : one[0] & 0xff;
     }
     @Override public int read(byte[] bytes, int offset, int length) throws IOException {
+      if (ended) return -1;
       if (!open.get()) throw new IOException("stream is closed");
       if (length == 0) return 0;
       byte[] buffer = offset == 0 && length == bytes.length ? bytes : new byte[length];
       int count = Jail.read(fd, buffer);
       if (count < 0) throw new IOException("native read failed: " + count);
-      if (count == 0) return -1;
+      if (count == 0) {
+        // Every writer is gone, so the reader is the last user of the descriptor.
+        ended = true;
+        close();
+        return -1;
+      }
       if (buffer != bytes) System.arraycopy(buffer, 0, bytes, offset, count);
       return count;
     }
@@ -175,21 +186,40 @@ public final class JailedProcess extends Process {
     private final int fd;
     private final AtomicBoolean open;
     private final boolean closes;
+    // The process exit closes this stream from another thread. A descriptor number that
+    // a write still uses must not go back to the system, where a new file can take it.
+    private int writers;
+    private boolean closing;
     NativeOutputStream(int fd, AtomicBoolean open, boolean closes) {
       this.fd = fd; this.open = open; this.closes = closes;
     }
     @Override public void write(int value) throws IOException { write(new byte[] {(byte) value}); }
     @Override public void write(byte[] bytes, int offset, int length) throws IOException {
-      if (!open.get()) throw new IOException("stream is closed");
-      int at = 0;
-      while (at < length) {
-        int count = Jail.write(fd, bytes, offset + at, length - at);
-        if (count <= 0) throw new IOException("native write failed: " + count);
-        at += count;
+      synchronized (this) {
+        if (closing || !open.get()) throw new IOException("stream is closed");
+        writers++;
+      }
+      try {
+        int at = 0;
+        while (at < length) {
+          int count = Jail.write(fd, bytes, offset + at, length - at);
+          if (count <= 0) throw new IOException("native write failed: " + count);
+          at += count;
+        }
+      } finally {
+        synchronized (this) {
+          writers--;
+          if (closing && writers == 0) release();
+        }
       }
     }
-    @Override public void close() {
-      if (closes && open.compareAndSet(true, false)) Jail.close(fd);
+    @Override public synchronized void close() {
+      if (!closes) return;
+      closing = true;
+      if (writers == 0) release();
+    }
+    private void release() {
+      if (open.compareAndSet(true, false)) Jail.close(fd);
     }
   }
 }
