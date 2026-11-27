@@ -2487,6 +2487,16 @@ class ShellTask(HostTask):
         self._set_snapshot(value)
         return self._snapshot
 
+    def _observe(self, outcome, *, read):
+        observed = super()._observe(outcome, read=read)
+        if self._outcome is None and observed["state"] in ("done", "failed", "cancelled"):
+            # A wait sees the end without reading the result. The fields must show it too.
+            value = observed.get("snapshot")
+            if not isinstance(value, dict):
+                value = self._shell_op("__vis_shell_snapshot__", {"task_id": self._id})
+            self._set_snapshot(value)
+        return observed
+
     def _shell_op(self, name, args):
         value = __vis_task_rpc__(name, {**args, "id": self._snapshot["id"], "token": self._generation})
         return __vis_typed_value__(value)
