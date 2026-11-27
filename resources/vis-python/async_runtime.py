@@ -2497,25 +2497,32 @@ class ShellTask(HostTask):
 
     @property
     def id(self):
-        return self._read_snapshot()["id"]
+        return self._snapshot["id"]
 
     @property
     def logs(self):
         return self._snapshot.logs
 
     def type(self, text, is_enter=True):
+        if not isinstance(text, str):
+            raise TypeError("shell `text` must be a string.")
+        if not isinstance(is_enter, bool):
+            raise TypeError("shell `is_enter` must be a bool.")
         __vis_settle__(self._shell_op("_shell_type", {
-            "text": str(text), "is_enter": bool(is_enter),
+            "text": text, "is_enter": is_enter,
         }))
         return self
 
-    def _read_snapshot(self):
+    def snapshot(self):
+        """Read the current process state without waiting for it to exit."""
         if self._outcome is not None:
             return self._snapshot
         value = self._shell_op("__vis_shell_snapshot__", {"task_id": self._id})
         if value.get("status") == "running" and self._snapshot.get("already_running"):
             value = {**value, "already_running": True}
-        return __VisShell__({"op": "shell", **value})
+        result = __VisShell__({"op": "shell", **value})
+        result.__vis_shell_route__ = self._shell_op
+        return result
 
     def __getattr__(self, name):
         if name == "wait":
@@ -2524,13 +2531,13 @@ class ShellTask(HostTask):
             )
         if name.startswith("_"):
             return super().__getattr__(name)
-        return getattr(self._read_snapshot(), name)
+        return getattr(self._snapshot, name)
 
     def __getitem__(self, key):
-        return self._read_snapshot()[key]
+        return self._snapshot[key]
 
     def get(self, key, default=None):
-        return self._read_snapshot().get(key, default)
+        return self._snapshot.get(key, default)
 
 
 __vis_host_task_types__ = {}
@@ -4009,6 +4016,8 @@ def __vis_publish_tool__(fn, nm):
 def __vis_deferred__(realfn, nm="tool"):
     def __vis_tool__(*a, **k):
         if (globals().get("__vis_task_tools__") or {}).get(nm):
+            if nm == "shell" and (len(a) > 1 or (a and not isinstance(a[0], str))):
+                raise TypeError("shell takes one string command and keyword options.")
             return __vis_start_host_task__(nm, a, k)
         if nm == "council.changed":
             # Registration already returns the host Task. Do not defer it or start another Task.
