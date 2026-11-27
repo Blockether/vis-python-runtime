@@ -1180,7 +1180,11 @@ class __VisRecord__(dict):
         return (
             type(self).__name__
             + "("
-            + ", ".join(f"{__k__}={__v__!r}" for __k__, __v__ in dict.items(self))
+            + ", ".join(
+                f"{__k__}={__v__!r}"
+                for __k__, __v__ in dict.items(self)
+                if __v__ is not None
+            )
             + ")"
         )
 

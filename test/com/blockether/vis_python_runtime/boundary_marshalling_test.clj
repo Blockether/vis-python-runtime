@@ -294,6 +294,23 @@
             "    assert str(plain) == repr(plain), str(plain)\n"
             "print('record text verified')"))))))
 
+;; Regression Blockether/vis#520: a printed record omits its empty fields, so a
+;; subagent record does not show each absent key as None.
+(harness/defbuilt-test
+  record-repr-omits-empty-fields-test
+  (let [session (harness/tool-session {"ledger.child" (fn [_]
+                                                        {"__vis_object__" "SubagentRecord"
+                                                         "__vis_attrs__" {"id" "a1"
+                                                                          "status" "running"
+                                                                          "answer" nil}})})]
+    (is (= "empty fields omitted"
+           (ran session
+                (str "r = await ledger.child()\n"
+                     "assert repr(r) == \"SubagentRecord(id='a1', status='running')\", repr(r)\n"
+                     "assert r['answer'] is None and r.answer is None\n"
+                     "assert list(r) == ['id', 'status', 'answer']\n"
+                     "print('empty fields omitted')"))))))
+
 (harness/defbuilt-test
   pyify-container-preservation-test
   (let [session (harness/block-session)]
