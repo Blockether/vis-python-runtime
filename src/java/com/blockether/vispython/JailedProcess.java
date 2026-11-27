@@ -154,7 +154,12 @@ public final class JailedProcess extends Process {
   private static final class NativeInputStream extends InputStream {
     private final int fd;
     private final AtomicBoolean open = new AtomicBoolean(true);
-    private volatile boolean ended;
+    // A close from another thread and the end of the stream both release the descriptor.
+    // A number that a read still uses must not go back to the system, where a new file
+    // can take it.
+    private int readers;
+    private boolean closing;
+    private boolean ended;
     NativeInputStream(int fd) { this.fd = fd; }
     @Override public int read() throws IOException {
       byte[] one = new byte[1];
@@ -162,22 +167,40 @@ public final class JailedProcess extends Process {
       return count < 0 ? -1 : one[0] & 0xff;
     }
     @Override public int read(byte[] bytes, int offset, int length) throws IOException {
-      if (ended) return -1;
-      if (!open.get()) throw new IOException("stream is closed");
-      if (length == 0) return 0;
-      byte[] buffer = offset == 0 && length == bytes.length ? bytes : new byte[length];
-      int count = Jail.read(fd, buffer);
-      if (count < 0) throw new IOException("native read failed: " + count);
-      if (count == 0) {
-        // Every writer is gone, so the reader is the last user of the descriptor.
-        ended = true;
-        close();
-        return -1;
+      synchronized (this) {
+        if (ended) return -1;
+        if (closing) throw new IOException("stream is closed");
+        if (length == 0) return 0;
+        readers++;
       }
-      if (buffer != bytes) System.arraycopy(buffer, 0, bytes, offset, count);
-      return count;
+      boolean end = false;
+      try {
+        byte[] buffer = offset == 0 && length == bytes.length ? bytes : new byte[length];
+        int count = Jail.read(fd, buffer);
+        if (count < 0) throw new IOException("native read failed: " + count);
+        if (count == 0) {
+          // Every writer is gone, so the readers are the last users of the descriptor.
+          end = true;
+          return -1;
+        }
+        if (buffer != bytes) System.arraycopy(buffer, 0, bytes, offset, count);
+        return count;
+      } finally {
+        synchronized (this) {
+          if (end) {
+            ended = true;
+            closing = true;
+          }
+          readers--;
+          if (closing && readers == 0) release();
+        }
+      }
     }
-    @Override public void close() {
+    @Override public synchronized void close() {
+      closing = true;
+      if (readers == 0) release();
+    }
+    private void release() {
       if (open.compareAndSet(true, false)) Jail.close(fd);
     }
   }
