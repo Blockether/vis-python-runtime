@@ -160,6 +160,8 @@ public final class JailedProcess extends Process {
     private int readers;
     private boolean closing;
     private boolean ended;
+    // Like java.lang.Process: a read after the owner's close fails, also after the end.
+    private boolean closed;
     NativeInputStream(int fd) { this.fd = fd; }
     @Override public int read() throws IOException {
       byte[] one = new byte[1];
@@ -168,8 +170,8 @@ public final class JailedProcess extends Process {
     }
     @Override public int read(byte[] bytes, int offset, int length) throws IOException {
       synchronized (this) {
+        if (closed) throw new IOException("stream is closed");
         if (ended) return -1;
-        if (closing) throw new IOException("stream is closed");
         if (length == 0) return 0;
         readers++;
       }
@@ -197,6 +199,7 @@ public final class JailedProcess extends Process {
       }
     }
     @Override public synchronized void close() {
+      closed = true;
       closing = true;
       if (readers == 0) release();
     }

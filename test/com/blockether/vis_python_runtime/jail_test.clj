@@ -1101,6 +1101,20 @@
                "An exited process whose output was read to its end holds no descriptor."))
          (finally (delete-tree root)))))
 
+(deftest closed-output-refuses-reads-after-its-end-test
+  ;; Vis: an MCP client closes the stdout of its server. A read after that close must
+  ;; fail, as it does for a `java.lang.Process`, also when the stream reached its end.
+  (let [root (temp-dir)]
+    (try (let [^Process process
+               (runtime/spawn-process! ["/bin/sh" "-c" "echo done"]
+                                       (options root {:policy nil :merge-stderr? true}))
+               stream (.getInputStream process)]
+           (io/copy stream (java.io.ByteArrayOutputStream.))
+           (is (= -1 (.read stream)) "A read after the end and before a close gives the end.")
+           (.close stream)
+           (is (thrown? java.io.IOException (.read stream))))
+         (finally (delete-tree root)))))
+
 (deftest pty-round-trip-test
   (let [root (temp-dir)]
     (try (let [^Process p (runtime/spawn-process!
